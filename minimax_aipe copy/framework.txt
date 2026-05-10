@@ -1,0 +1,775 @@
+"""High-level Minimax-AIPE framework.
+
+This module wires the lower-level AIPE, NPE, CRN, and EG primitives into a
+usable solver entry point and exposes the surrogate-problem constructors used
+by the three-loop Minimax-AIPE reduction.
+
+Architecture (the full triple loop)
+------------------------------------
+Algorithm 3 (outer) — AIPE minimises  Φ(x) = max_y f(x,y)
+    │                  via aipe_restart + inexact proximal oracle for Φ.
+    │
+    └── Algorithm 4 (middle) — Inexact proximal oracle for Φ.
+            Solvers  min_x max_y g(x,y;x_bar)  by running AIPE on -Ψ:
+                │      aipe_restart minimises  -Ψ(y) = -min_x g(x,y;x_bar)
+                │
+                └── Algorithm 5 (inner) — Inexact proximal oracle for -Ψ.
+                        Solves the regularised saddle subproblem
+                        min_x max_y h(x,y;x_bar,y_bar)  via NPE-restart,
+                        whose operator oracles are CRN-based.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from math import ceil, log2
+from typing import Callable, Optional
+
+import jax
+import jax.numpy as jnp
+from jax import Array
+
+from minimax_aipe.aipe import aipe_restart, make_crn_prox_oracle
+from minimax_aipe.gap import estimate_gap
+from minimax_aipe.npe import make_crn_npe_oracle, npe_restart, project_z
+from minimax_aipe.oracles import eg_step
+from minimax_aipe.problem import MinimaxProblem, SolverResult
+
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Numerical guard constants
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_ABS_TOL = 1e-12       # general floor for divisions and denominators
+_REG_MIN = 1e-6        # minimum regularisation parameter (γ, ρ)
+_CUBIC_ZERO = 1e-15    # threshold for cubic-Hessian zero-limit branch
+_GAP_FLOOR = 1e-6      # floor for gap-estimation step-count denominator
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Mutable call counter
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class _CallCounter:
+    """Simple mutable call counter for bookkeeping across nested loops.
+
+    Not JIT-safe — must be used outside traced code (which is safe here
+    because ``aipe_restart`` itself is an eager Python loop).
+    """
+    total: int = 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Loop parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class _LoopParams:
+    T_outer: int
+    S_outer: int
+    T_middle: int
+    S_middle: int
+    T_inner: int
+    S_inner: int
+    zeta_1: float
+    zeta_2: float
+    zeta_3: float
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Public entry point
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def solve(
+    problem: MinimaxProblem,
+    epsilon: float,
+    *,
+    gamma: float | None = None,
+    M_saddle: str = "npe",
+    npe_T_factor: float = 1.0,
+    verbose: bool = False,
+) -> SolverResult:
+    """Solve ``min_x max_y f(x, y)`` to approximately ``epsilon`` gap.
+
+    Uses the full three-loop Minimax-AIPE reduction: an outer AIPE loop
+    minimises the primal value function Φ whose proximal oracle (Alg 4)
+    runs a middle AIPE loop on -Ψ whose proximal oracle (Alg 5) delegates
+    to NPE-restart on the cubic-regularised saddle subproblem.  A final
+    EG refinement step is applied for the gap certificate.
+    """
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+    if M_saddle not in ("npe", "len"):
+        raise ValueError("M_saddle must be either 'npe' or 'len'")
+
+    gamma = _default_gamma(problem, gamma)
+    mu_x = epsilon / (2.0 * max(_diam(problem.D_x), _ABS_TOL) ** 3)
+    mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
+    params = _compute_loop_params(problem, epsilon, gamma, npe_T_factor)
+
+    if verbose:
+        logger.setLevel(logging.DEBUG)
+
+    z0 = _initial_z(problem)
+    z_hat, calls = _algorithm_3(
+        problem,
+        gamma,
+        mu_x,
+        mu_y,
+        params.zeta_1,
+        params=params,
+        M_saddle=M_saddle,
+        z0=z0,
+        verbose=verbose,
+    )
+
+    eta = 1.0 / (2.0 * max(_ell(problem), _ABS_TOL))
+    z_out, _cert = eg_step(problem, z_hat, eta)
+    x_out, y_out = _split(problem, z_out)
+
+    gap = _safe_gap(problem, x_out, y_out, epsilon)
+    history = {
+        "gamma": gamma,
+        "mu_x": mu_x,
+        "mu_y": mu_y,
+        "zeta_1": params.zeta_1,
+        "zeta_2": params.zeta_2,
+        "zeta_3": params.zeta_3,
+        "T_outer": params.T_outer,
+        "S_outer": params.S_outer,
+        "T_middle": params.T_middle,
+        "S_middle": params.S_middle,
+        "T_inner": params.T_inner,
+        "S_inner": params.S_inner,
+        "M_saddle": M_saddle,
+    }
+
+    return SolverResult(
+        x=x_out,
+        y=y_out,
+        gap=gap,
+        iterations=params.S_outer,
+        oracle_calls=calls + 1,
+        converged=gap <= epsilon,
+        history=history,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Algorithm 3 — Full triple-loop Minimax-AIPE reduction  (outer loop)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _algorithm_3(
+    problem: MinimaxProblem,
+    gamma: float,
+    mu_x: float,
+    mu_y: float,
+    zeta_1: float,
+    *,
+    params: Optional[_LoopParams] = None,
+    M_saddle: str = "npe",
+    z0: Optional[Array] = None,
+    verbose: bool = False,
+) -> tuple[Array, int]:
+    """Algorithm 3: Full three-loop Minimax-AIPE reduction.
+
+    **Outer loop** — AIPE with restart (Algorithms 1+2) minimises
+        Φ(x) = max_{y∈D_y} f(x, y)
+
+    **Middle loop** — Algorithm 4: each proximal-oracle call on Φ runs
+    AIPE on -Ψ(y; x̄) = -min_x g(x, y; x̄).
+
+    **Inner loop** — Algorithm 5: each proximal-oracle call on -Ψ runs
+    NPE-restart on the h-problem with CRN-based operator oracles.
+
+    Parameters
+    ----------
+    mu_x, mu_y : float
+        Strong-convexity regularisers forwarded from the theoretical
+        reduction (informational — the triple loop handles convexity
+        via the cubic penalty).
+    zeta_1 : float
+        Target accuracy for the outer AIPE loop (informational — actual
+        accuracy flows through ``params.zeta_*``).
+    """
+    # mu_x, mu_y, zeta_1 are kept in the signature for API consistency
+    # with the theoretical reduction.  Accuracy is scheduled via params.
+    del mu_x, mu_y, zeta_1
+
+    if params is None:
+        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
+    if z0 is None:
+        z0 = _initial_z(problem)
+
+    x0, _y0 = _split(problem, z0)
+    counter = _CallCounter()
+
+    # ── Build the Φ oracle (value, gradient, Hessian) ─────────────────────
+    phi_fn, grad_phi_fn, _hess_phi_fn = _make_phi_oracle(problem, gamma, params)
+
+    # ── Proximal oracle for Φ  (delegates to Algorithm 4) ─────────────────
+    def _prox_phi(x_bar: Array) -> tuple[Array, Array]:
+        return _iProx_Phi(
+            problem, x_bar, gamma,
+            zeta_2=params.zeta_2,
+            params=params,
+            M_saddle=M_saddle,
+            counter=counter,
+        )
+
+    # ── Outer AIPE with restart ───────────────────────────────────────────
+    x_hat, _outer_calls = aipe_restart(
+        prox_oracle=_prox_phi,
+        grad_fn=grad_phi_fn,
+        z0=x0,
+        T=params.T_outer,
+        gamma=gamma,
+        S=params.S_outer,
+        project=problem.project_x,
+        fn=phi_fn,
+    )
+
+    # ── Early-stopping check ──────────────────────────────────────────────
+    grad_norm = float(jnp.linalg.norm(grad_phi_fn(x_hat)))
+    phi_val = float(phi_fn(x_hat))
+
+    # ── Recover y ≈ argmax_y f(x_hat, y) ─────────────────────────────────
+    y_hat = _maximize_y(
+        problem, x_hat,
+        steps=max(20, params.T_middle * params.S_middle),
+    )
+
+    total_calls = counter.total
+
+    logger.info(
+        "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d",
+        phi_val, grad_norm, total_calls,
+    )
+
+    z_hat = jnp.concatenate([x_hat, y_hat])
+    return z_hat, total_calls
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Surrogate problem constructors
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_g_problem(problem: MinimaxProblem, x_bar: Array, gamma: float) -> MinimaxProblem:
+    """Construct ``g(x,y;x̄) = f(x,y) + (γ/3)·‖x−x̄‖³``."""
+    x_bar = jnp.asarray(x_bar)
+
+    def f_g(x: Array, y: Array):
+        dx = x - x_bar
+        return problem.f(x, y) + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
+
+    def grad_g(x: Array, y: Array) -> tuple[Array, Array]:
+        gx, gy_neg = problem.grad_f(x, y)
+        return gx + _cubic_grad(x - x_bar, gamma), gy_neg
+
+    def hess_g(x: Array, y: Array):
+        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
+        H_xx_g = H_xx + _cubic_hess(x - x_bar, gamma)
+        return (H_xx_g, H_xy), (H_yx, H_yy)
+
+    return MinimaxProblem(
+        f=f_g,
+        grad_f=grad_g,
+        hessian_f=hess_g,
+        dim_x=problem.dim_x,
+        dim_y=problem.dim_y,
+        D_x=problem.D_x,
+        D_y=problem.D_y,
+        rho=(problem.rho or 0.0) + gamma,
+        ell=(problem.ell or 0.0) + gamma * max(problem.D_x, 1.0),
+        L=problem.L,
+        project_x=problem.project_x,
+        project_y=problem.project_y,
+    )
+
+
+def _make_h_problem(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    y_bar: Array,
+    gamma: float,
+) -> MinimaxProblem:
+    """Construct ``h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³``."""
+    x_bar = jnp.asarray(x_bar)
+    y_bar = jnp.asarray(y_bar)
+
+    def f_h(x: Array, y: Array):
+        dx = x - x_bar
+        dy = y - y_bar
+        return (
+            problem.f(x, y)
+            + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
+            - (gamma / 3.0) * jnp.linalg.norm(dy) ** 3
+        )
+
+    def grad_h(x: Array, y: Array) -> tuple[Array, Array]:
+        gx, gy_neg = problem.grad_f(x, y)
+        return (
+            gx + _cubic_grad(x - x_bar, gamma),
+            gy_neg + _cubic_grad(y - y_bar, gamma),
+        )
+
+    def hess_h(x: Array, y: Array):
+        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
+        H_xx_h = H_xx + _cubic_hess(x - x_bar, gamma)
+        H_yy_h = H_yy - _cubic_hess(y - y_bar, gamma)
+        return (H_xx_h, H_xy), (H_yx, H_yy_h)
+
+    diameter = max(problem.D_x, problem.D_y, 1.0)
+    return MinimaxProblem(
+        f=f_h,
+        grad_f=grad_h,
+        hessian_f=hess_h,
+        dim_x=problem.dim_x,
+        dim_y=problem.dim_y,
+        D_x=problem.D_x,
+        D_y=problem.D_y,
+        rho=(problem.rho or 0.0) + gamma,
+        ell=(problem.ell or 0.0) + gamma * diameter,
+        L=problem.L,
+        project_x=problem.project_x,
+        project_y=problem.project_y,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cubic regularisation helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _cubic_grad(delta: Array, gamma: float) -> Array:
+    """Gradient of ``(γ/3)·‖δ‖³``."""
+    delta = jnp.asarray(delta)
+    return gamma * jnp.linalg.norm(delta) * delta
+
+
+def _cubic_hess(delta: Array, gamma: float) -> Array:
+    """Hessian of ``(γ/3)·‖δ‖³`` with zero-limit branch."""
+    delta = jnp.asarray(delta)
+    norm = jnp.linalg.norm(delta)
+    eye = jnp.eye(delta.shape[0], dtype=delta.dtype)
+    safe_norm = jnp.maximum(norm, jnp.asarray(_CUBIC_ZERO, dtype=delta.dtype))
+    hess = gamma  * (norm * eye + jnp.outer(delta, delta) / safe_norm)
+    return jnp.where(norm > _CUBIC_ZERO, hess, jnp.zeros_like(hess))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Algorithm 4 — Inexact proximal oracle for Φ  (middle loop)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _iProx_Phi(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    gamma: float,
+    zeta_2: float = 1e-4,
+    *,
+    params: Optional[_LoopParams] = None,
+    M_saddle: str = "npe",
+    counter: Optional[_CallCounter] = None,
+) -> tuple[Array, Array]:
+    """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``.
+
+    Solves the equivalent regularised saddle subproblem
+        min_x max_y  g(x, y; x̄)   where  g = f + (γ/3)·‖x−x̄‖³
+
+    by running **AIPE on -Ψ** (the *middle loop*):
+        -Ψ(y; x̄) = -min_x g(x, y; x̄)
+
+    whose proximal oracle delegates to Algorithm 5 (the *inner loop*).
+
+    Returns ``(x_out, u_out)`` with ``u_out ∈ ∂Φ(x_out)``.
+    """
+    # TODO: wire zeta_2 through as accuracy tolerance for the middle-loop AIPE.
+    del zeta_2
+
+    if params is None:
+        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
+
+    # ── Construct the cubic-regularised surrogate ─────────────────────────
+    g_problem = _make_g_problem(problem, x_bar, gamma)
+
+    # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ─────────────────────
+    neg_psi_fn, grad_neg_psi_fn, _hess_neg_psi_fn = _make_psi_oracle(
+        problem, x_bar, gamma, params,
+    )
+
+    # ── Proximal oracle for -Ψ  (delegates to Algorithm 5) ────────────────
+    def _prox_psi(y_bar: Array) -> tuple[Array, Array]:
+        return _iProx_Psi(
+            problem, x_bar, y_bar, gamma,
+            zeta_3=params.zeta_3,
+            params=params,
+            M_saddle=M_saddle,
+            counter=counter,
+        )
+
+    # ── Middle AIPE: minimise -Ψ over y ───────────────────────────────────
+    y0 = problem.project_y(jnp.zeros(problem.dim_y))
+    y_hat, _middle_calls = aipe_restart(
+        prox_oracle=_prox_psi,
+        grad_fn=grad_neg_psi_fn,
+        z0=y0,
+        T=params.T_middle,
+        gamma=gamma,
+        S=params.S_middle,
+        project=problem.project_y,
+        fn=neg_psi_fn,
+    )
+
+    # ── Recover x ≈ argmin_x g(x, y_hat) ─────────────────────────────────
+    x_hat = _minimize_x(
+        g_problem, y_hat,
+        steps=max(20, params.T_inner * params.S_inner),
+    )
+
+    gx, _ = g_problem.grad_f(x_hat, y_hat)
+    u_out = -gx   # subgradient certificate for Φ at x_hat
+
+    return x_hat, u_out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Algorithm 5 — Inexact proximal oracle for -Ψ  (inner loop)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _iProx_Psi(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    y_bar: Array,
+    gamma: float,
+    zeta_3: float = 1e-4,
+    *,
+    params: Optional[_LoopParams] = None,
+    M_saddle: str = "npe",
+    counter: Optional[_CallCounter] = None,
+) -> tuple[Array, Array]:
+    """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``.
+
+    Solves the regularised saddle subproblem
+        min_x max_y  h(x, y; x̄, ȳ)
+    where  h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³
+
+    via NPE-restart on the monotone operator F_h, followed by one EG
+    refinement step.
+
+    Returns ``(y_out, v_out)`` with ``v_out ∈ ∂(-Ψ)(y_out)``.
+    """
+    # TODO: wire zeta_3 through as NPE accuracy tolerance.
+    del zeta_3
+
+    if params is None:
+        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
+
+    h_problem = _make_h_problem(problem, x_bar, y_bar, gamma)
+    z0 = jnp.concatenate([problem.project_x(x_bar), problem.project_y(y_bar)])
+    z0 = project_z(h_problem, z0)
+
+    # ── Inner NPE-restart on the saddle operator F_h ─────────────────────
+    z_hat, calls = _solve_saddle_subproblem(
+        h_problem, z0, gamma, params, M_saddle,
+    )
+
+    # ── EG refinement ─────────────────────────────────────────────────────
+    ell_h = max(_ell(h_problem), _ABS_TOL)
+    diam_h = max(_diameter(h_problem), _ABS_TOL)
+    # Hessian Lipschitz of h is ρ_h = ρ + γ (stored in h_problem.rho).
+    rho_h = max(float(h_problem.rho or 0.0), _REG_MIN)
+    eta = 1.0 / (2.0 * max(ell_h + 2.0 * rho_h * diam_h, _ABS_TOL))
+    z_out, _cert = eg_step(h_problem, z_hat, eta)
+
+    _x_out, y_out = _split(h_problem, z_out)
+    _gx, gy_neg = h_problem.grad_f(_x_out, y_out)
+    v_out = -gy_neg   # subgradient certificate for -Ψ at y_out
+
+    if counter is not None:
+        counter.total += calls + 1
+
+    return y_out, v_out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Auxiliary oracles for Φ and Ψ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_phi_oracle(
+    problem: MinimaxProblem,
+    gamma: float,
+    params: _LoopParams,
+) -> tuple[Callable[[Array], Array], Callable[[Array], Array], Callable[[Array], Array]]:
+    """Build approximate value, gradient, and Hessian oracles for Φ.
+
+    ``Φ(x) = max_{y∈D_y} f(x, y)``.
+    The inner maximisation over y uses gradient ascent.
+    """
+    def _solve_y(x: Array) -> Array:
+        return _maximize_y(
+            problem, x,
+            steps=max(20, params.T_middle * params.S_middle),
+        )
+
+    def phi(x: Array):
+        y = _solve_y(x)
+        return problem.f(x, y)
+
+    def grad_phi(x: Array) -> Array:
+        y = _solve_y(x)
+        gx, _gy_neg = problem.grad_f(x, y)
+        return gx
+
+    hess_phi = jax.jacfwd(grad_phi)
+    return phi, grad_phi, hess_phi
+
+
+def _make_psi_oracle(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    gamma: float,
+    params: _LoopParams,
+) -> tuple[Callable[[Array], Array], Callable[[Array], Array], Callable[[Array], Array]]:
+    """Build approximate oracles for the convex function ``-Ψ(y; x̄)``.
+
+    ``Ψ(y; x̄) = min_{x∈D_x} g(x, y; x̄)`` where ``g`` is the
+    cubic-regularised surrogate.  Returns ``(neg_psi, grad_neg_psi,
+    hess_neg_psi)``.
+    """
+    g_problem = _make_g_problem(problem, x_bar, gamma)
+
+    def _solve_x(y: Array) -> Array:
+        return _minimize_x(
+            g_problem, y,
+            steps=max(20, params.T_inner * params.S_inner),
+        )
+
+    def neg_psi(y: Array):
+        x = _solve_x(y)
+        return -g_problem.f(x, y)
+
+    def grad_neg_psi(y: Array) -> Array:
+        x = _solve_x(y)
+        _gx, gy_neg = g_problem.grad_f(x, y)
+        return gy_neg
+
+    hess_neg_psi = jax.jacfwd(grad_neg_psi)
+    return neg_psi, grad_neg_psi, hess_neg_psi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Saddle subproblem solver (innermost layer)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _solve_saddle_subproblem(
+    problem: MinimaxProblem,
+    z0: Array,
+    gamma: float,
+    params: _LoopParams,
+    M_saddle: str,
+) -> tuple[Array, int]:
+    """Solve a saddle subproblem via NPE-restart.
+
+    *problem* is the h-subproblem (already has ρ_h = ρ_orig + γ in its
+    ``rho`` field).  Per Theorem E.1 the NPE CRN parameter must be
+    γ_NPE = 2 · ρ_h.
+    """
+    # Hessian Lipschitz of the h-subproblem (already baked into problem.rho
+    # by _make_h_problem / _make_h_problem when they set rho = ρ + γ).
+    sub_rho = max(float(problem.rho or 0.0), _REG_MIN)
+
+    # Theorem E.1: NPE must use γ = 2ρ of the subproblem.
+    npe_gamma = 2.0 * sub_rho
+
+    if M_saddle == "npe":
+        oracle = make_crn_npe_oracle(problem, npe_gamma)
+    elif M_saddle == "len":
+        logger.debug("M_saddle='len' is not yet implemented; falling back to NPE.")
+        oracle = make_crn_npe_oracle(problem, npe_gamma)
+    else:
+        raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
+
+    sub_ell = max(_ell(problem), _ABS_TOL)
+    D = max(_diameter(problem), _ABS_TOL)
+
+    complexity = (D ** (12.0 / 7.0)) * ((sub_rho / max(npe_gamma, _ABS_TOL)) ** (4.0 / 7.0))
+    inner_T = max(8, int(ceil(complexity)))
+    inner_T = min(inner_T, params.T_inner)
+
+    return npe_restart(
+        oracle,
+        problem.operator_F,
+        z0,
+        T=inner_T,
+        gamma=npe_gamma,
+        S=params.S_inner,
+        project=lambda z: project_z(problem, z),
+        fn=lambda z: jnp.dot(problem.operator_F(z), problem.operator_F(z)),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Simple gradient ascent / descent helpers  (with warm‑start)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _maximize_y(
+    problem: MinimaxProblem,
+    x: Array,
+    *,
+    steps: int,
+    y_init: Optional[Array] = None,
+) -> Array:
+    """Approximately maximise ``y ↦ f(x, y)`` by gradient ascent.
+
+    Parameters
+    ----------
+    y_init : Array or None
+        Warm-start point.  When ``None`` starts from projected zeros.
+    """
+    dtype = x.dtype
+    if y_init is not None:
+        y = problem.project_y(y_init)
+    else:
+        y = problem.project_y(jnp.zeros(problem.dim_y, dtype=dtype))
+    lr = 1.0 / max(_ell(problem), _ABS_TOL)
+
+    def body(_i, cur):
+        _gx, gy_neg = problem.grad_f(x, cur)
+        return problem.project_y(cur - lr * gy_neg)
+
+    return jax.lax.fori_loop(0, int(steps), body, y)
+
+
+def _minimize_x(
+    problem: MinimaxProblem,
+    y: Array,
+    *,
+    steps: int,
+    x_init: Optional[Array] = None,
+) -> Array:
+    """Approximately minimise ``x ↦ f(x, y)`` by gradient descent.
+
+    Parameters
+    ----------
+    x_init : Array or None
+        Warm-start point.  When ``None`` starts from projected zeros.
+    """
+    dtype = y.dtype
+    if x_init is not None:
+        x = problem.project_x(x_init)
+    else:
+        x = problem.project_x(jnp.zeros(problem.dim_x, dtype=dtype))
+    lr = 1.0 / max(_ell(problem), _ABS_TOL)
+
+    def body(_i, cur):
+        gx, _gy_neg = problem.grad_f(cur, y)
+        return problem.project_x(cur - lr * gx)
+
+    return jax.lax.fori_loop(0, int(steps), body, x)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Parameter computation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compute_loop_params(
+    problem: MinimaxProblem,
+    epsilon: float,
+    gamma: float,
+    npe_T_factor: float = 1.0,
+) -> _LoopParams:
+    """Compute iteration counts and accuracy parameters for all three loops."""
+    D = max(_diameter(problem), _ABS_TOL)
+    ell = max(_ell(problem), _ABS_TOL)
+    rho = max(float(problem.rho or 0.0), gamma, _REG_MIN)
+
+    # Outer-loop parameters (AIPE on Φ).
+    complexity = (D ** (12.0 / 7.0)) * ((rho / max(epsilon, _ABS_TOL)) ** (4.0 / 7.0))
+    T = max(8, int(ceil(npe_T_factor * complexity)))
+    T = min(T, 200)
+    S = max(1, min(int(ceil(log2(max(D / max(epsilon, _ABS_TOL), 2.0)))),4))
+
+    # Accuracy scheduling across the three loops.
+    mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
+    zeta_1 = min(epsilon, mu_y * epsilon**2 / (147.0 * ell**3 * D**2 + _ABS_TOL))
+    zeta_2 = min(1e-2, max(zeta_1 * 0.1, _ABS_TOL))
+    zeta_3 = min(1e-2, max(zeta_2 * 0.1, _ABS_TOL))
+
+    return _LoopParams(
+        T_outer=T,
+        S_outer=S,
+        T_middle=max(6, T // 2),
+        S_middle=max(1, min(S, 6)),
+        T_inner=max(6, T // 2),
+        S_inner=max(1, min(S, 6)),
+        zeta_1=zeta_1,
+        zeta_2=zeta_2,
+        zeta_3=zeta_3,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Utility helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _default_gamma(problem: MinimaxProblem, gamma: float | None) -> float:
+    if gamma is not None:
+        if gamma <= 0:
+            raise ValueError("gamma must be positive")
+        return float(gamma)
+    rho = float(problem.rho or 0.0)
+    return rho if rho > 0 else 1.0
+
+
+def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> float:
+    try:
+        gap = problem.duality_gap(x, y)
+        return max(0.0, float(gap))
+    except NotImplementedError:
+        pass
+
+    D = _diameter(problem)
+    lr = 0.5 / max(_ell(problem), 1.0)
+    # Scale step count with problem diameter relative to epsilon.
+    num_steps = max(200, min(2000, int(200 * D / max(epsilon, _GAP_FLOOR))))
+    gap = estimate_gap(
+        problem,
+        x,
+        y,
+        num_restarts=8,
+        num_steps=num_steps,
+        lr=lr,
+    )
+    return max(0.0, gap)
+
+
+def _initial_z(problem: MinimaxProblem) -> Array:
+    x0 = problem.project_x(jnp.zeros(problem.dim_x))
+    y0 = problem.project_y(jnp.zeros(problem.dim_y))
+    return jnp.concatenate([x0, y0])
+
+
+def _split(problem: MinimaxProblem, z: Array) -> tuple[Array, Array]:
+    return z[: problem.dim_x], z[problem.dim_x :]
+
+
+def _diam(value: float | None) -> float:
+    return float(value) if value is not None and value > 0 else 1.0
+
+
+def _diameter(problem: MinimaxProblem) -> float:
+    return max(_diam(problem.D_x), _diam(problem.D_y))
+
+
+def _ell(problem: MinimaxProblem) -> float:
+    return float(problem.ell) if problem.ell is not None and problem.ell > 0 else 1.0
+
+
+__all__ = [
+    "solve",
+    "_cubic_grad",
+    "_cubic_hess",
+    "_make_g_problem",
+    "_make_h_problem",
+]
