@@ -38,6 +38,7 @@ import builtins
 import jax
 import jax.numpy as jnp
 from jax import Array
+from functools import partial
 
 from minimax_aipe.npe import project_z  # single source of truth
 from minimax_aipe.oracles import lazy_crn_oracle
@@ -424,6 +425,11 @@ def _len_scan_loop(
 
 # ── public alias ──────────────────────────────────────────────────────────
 
+@partial(
+    jax.jit,
+    static_argnums=(0, 1, 3, 5, 6, 7),
+    static_argnames=("safety_checks", "return_full"),
+)
 def len(
     oracle: LENOracle,
     F_fn: Callable[[Array], Array],
@@ -443,6 +449,13 @@ def len(
 
     This is the recommended entry point.  ``len_loop`` is kept for backward
     compatibility; both call the same underlying implementation.
+    
+    Algorithm 8 — Lazy Extra Newton (single epoch).
+
+    JIT-compiled by default.  ``safety_checks`` and ``return_full``
+    are static keyword arguments — changing them triggers recompilation.
+    ``eta_floor`` and ``max_norm`` are traced floats.
+    Set ``JAX_DISABLE_JIT=1`` for eager execution during debugging.
     """
     return _len_scan_loop(
         oracle, F_fn, z0, T, gamma, m,
@@ -599,3 +612,12 @@ def make_len_saddle_solver(
         )
 
     return solver
+
+__all__ = [
+    "LENOracle",
+    "LENResult",
+    "len_loop",
+    "len_restart",
+    "make_lazy_crn_npe_oracle",
+    "make_len_saddle_solver",
+]

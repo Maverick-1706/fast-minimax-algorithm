@@ -83,3 +83,9 @@ def make_jacobian(
         return jnp.concatenate([top, bot], axis=0)
 
     return jacobian_F
+
+__all__ = [
+    "MonotoneOperator",
+    "make_operator",
+    "make_jacobian",
+]

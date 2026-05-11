@@ -101,6 +101,362 @@ class _LoopParams:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Cubic regularisation helpers
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _cubic_grad(delta: Array, gamma: float) -> Array:
+    """Gradient of ``(γ/3)·‖δ‖³``."""
+    delta = jnp.asarray(delta)
+    return gamma * jnp.linalg.norm(delta) * delta
+
+
+def _cubic_hess(delta: Array, gamma: float) -> Array:
+    """Hessian of ``(γ/3)·‖δ‖³`` with zero-limit branch."""
+    delta = jnp.asarray(delta)
+    norm = jnp.linalg.norm(delta)
+    eye = jnp.eye(delta.shape[0], dtype=delta.dtype)
+    safe_norm = jnp.maximum(norm, jnp.asarray(_CUBIC_ZERO, dtype=delta.dtype))
+    hess = gamma * (norm * eye + jnp.outer(delta, delta) / safe_norm)
+    return jnp.where(norm > _CUBIC_ZERO, hess, jnp.zeros_like(hess))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Regularised subproblem kernel  (public, reusable)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class RegularizedSubproblem:
+    """Reusable kernel for the regularised h-subproblem.
+
+    Constructed **once** per ``(problem, gamma)`` pair and threaded through
+    the triple loop.  The parametric methods
+    (:meth:`operator_F_h`, :meth:`jacobian_F_h`, :meth:`make_crn_oracle`)
+    share a *fixed Python identity* across all calls so that JAX compiles
+    each underlying function exactly once, regardless of how many times the
+    solver invokes them with different ``(x_bar, y_bar)`` arguments.
+
+    Users can also construct this independently to experiment with the
+    regularised saddle subproblem outside the full Minimax-AIPE pipeline::
+
+        kernel = RegularizedSubproblem(my_problem, gamma=0.1)
+        z = jnp.concatenate([x0, y0])
+        F = kernel.operator_F_h(z, x_bar, y_bar)
+        H = kernel.jacobian_F_h(x, y, x_bar, y_bar)
+
+    Parameters
+    ----------
+    problem : MinimaxProblem
+        The base (unregularised) minimax problem.
+    gamma : float
+        Cubic regularisation strength.
+    """
+
+    __slots__ = (
+        "_problem", "_gamma",
+        "dim_x", "dim_y", "D_x", "D_y",
+        "rho_h", "ell_h",
+        "project_x", "project_y",
+    )
+
+    def __init__(self, problem: MinimaxProblem, gamma: float) -> None:
+        self._problem = problem
+        self._gamma = gamma
+        self.dim_x = problem.dim_x
+        self.dim_y = problem.dim_y
+        self.D_x = problem.D_x
+        self.D_y = problem.D_y
+        diameter = max(problem.D_x, problem.D_y, 1.0)
+        self.rho_h = (problem.rho or 0.0) + gamma
+        self.ell_h = (problem.ell or 0.0) + gamma * diameter
+        self.project_x = problem.project_x
+        self.project_y = problem.project_y
+
+    # ── repr ─────────────────────────────────────────────────────────
+    def __repr__(self) -> str:
+        return (
+            f"RegularizedSubproblem(dim=({self.dim_x},{self.dim_y}), "
+            f"gamma={self._gamma:.4e}, rho_h={self.rho_h:.4e})"
+        )
+
+    @property
+    def gamma(self) -> float:
+        """The cubic regularisation strength."""
+        return self._gamma
+
+    @property
+    def base_problem(self) -> MinimaxProblem:
+        """The underlying unregularised minimax problem."""
+        return self._problem
+
+    # ── parametric operator F_h(z; x_bar, y_bar) ────────────────────
+    def operator_F_h(self, z: Array, x_bar: Array, y_bar: Array) -> Array:
+        r"""Evaluate the monotone operator of the h-subproblem.
+
+        .. math::
+
+            F_h(z) = \begin{bmatrix} \nabla_x h \\ -\nabla_y h \end{bmatrix}
+
+        where
+        :math:`h(x,y) = f(x,y) + \frac{\gamma}{3}\|x - \bar{x}\|^3
+        - \frac{\gamma}{3}\|y - \bar{y}\|^3`.
+
+        Parameters
+        ----------
+        z : Array, shape ``(dim_x + dim_y,)``
+            Joint iterate.
+        x_bar, y_bar : Array
+            Regularisation centres.
+
+        Returns
+        -------
+        Array, shape ``(dim_x + dim_y,)``
+        """
+        x, y = z[: self.dim_x], z[self.dim_x :]
+        gx, gy_neg = self._problem.grad_f(x, y)
+        gx_h = gx + _cubic_grad(x - x_bar, self._gamma)
+        gy_neg_h = gy_neg + _cubic_grad(y - y_bar, self._gamma)
+        return jnp.concatenate([gx_h, gy_neg_h])
+
+    # ── parametric Jacobian of F_h ───────────────────────────────────
+    def jacobian_F_h(
+        self, x: Array, y: Array, x_bar: Array, y_bar: Array
+    ) -> Array:
+        r"""Jacobian of the monotone operator of the h-subproblem.
+
+        Assembles the block matrix
+
+        .. math::
+
+            \nabla F_h = \begin{bmatrix}
+                H_{xx}^h & H_{xy} \\
+                -H_{yx} & -H_{yy}^h
+            \end{bmatrix}
+
+        where the diagonal blocks include the cubic-correction Hessians.
+
+        Parameters
+        ----------
+        x, y : Array
+            Current iterate components.
+        x_bar, y_bar : Array
+            Regularisation centres.
+
+        Returns
+        -------
+        Array, shape ``(dim_x + dim_y, dim_x + dim_y)``
+        """
+        (H_xx, H_xy), (H_yx, H_yy) = self._problem.hessian_f(x, y)
+        H_xx_h = H_xx + _cubic_hess(x - x_bar, self._gamma)
+        H_yy_h = H_yy - _cubic_hess(y - y_bar, self._gamma)
+        top = jnp.concatenate([H_xx_h, H_xy], axis=1)
+        bot = jnp.concatenate([-H_yx, -H_yy_h], axis=1)
+        return jnp.concatenate([top, bot], axis=0)
+
+    # ── joint projection ─────────────────────────────────────────────
+    def project(self, z: Array) -> Array:
+        """Project a joint iterate onto ``D_x × D_y``."""
+        return jnp.concatenate([
+            self.project_x(z[: self.dim_x]),
+            self.project_y(z[self.dim_x :]),
+        ])
+
+    # ── on-the-fly MinimaxProblem for the h-subproblem ──────────────
+    def make_h_problem(
+        self, x_bar: Array, y_bar: Array
+    ) -> MinimaxProblem:
+        """Build a :class:`MinimaxProblem` for ``h`` at fixed centres.
+
+        This is useful for experimentation or when the full
+        ``MinimaxProblem`` interface (e.g. ``operator_F``, ``project_z``)
+        is needed alongside the parametric kernel.
+
+        Parameters
+        ----------
+        x_bar, y_bar : Array
+            Regularisation centres.
+
+        Returns
+        -------
+        MinimaxProblem
+        """
+        return _make_h_problem(self._problem, x_bar, y_bar, self._gamma)
+
+    # ── CRN oracle for NPE (parametric) ─────────────────────────────
+    def make_crn_oracle(
+        self,
+        x_bar: Array,
+        y_bar: Array,
+        npe_gamma: float,
+        n_iters: int = 50,
+        tol: float = 0.0,
+    ) -> Callable[[Array], tuple[Array, Array]]:
+        """Return a CRN NPE oracle bound to fixed ``(x_bar, y_bar)``.
+
+        The returned callable's Python identity is a fresh closure, but the
+        *underlying parametric methods* (``operator_F_h``, ``jacobian_F_h``)
+        remain the same Python objects across all calls.  JAX reuses the same
+        compiled kernel; only the captured ``x_bar``/``y_bar`` constants differ
+        — those are folded in as constants at trace time (they are concrete
+        arrays outside any JAX trace when ``_iProx_Psi`` is called from
+        ``_restart_with_early_stop``, which is an eager Python loop).
+
+        When ``tol > 0`` the secular-equation solver exits as soon as the
+        regularisation parameter λ converges, saving unnecessary iterations on
+        easy subproblems.
+        """
+        dim_x = self.dim_x
+        _tiny = 1e-12
+        gamma = self._gamma
+
+        def _project_z_h(z: Array) -> Array:
+            xz, yz = z[:dim_x], z[dim_x:]
+            return jnp.concatenate([
+                self.project_x(xz), self.project_y(yz),
+            ])
+
+        if tol > 0:
+            def oracle(z_bar: Array) -> tuple[Array, Array]:
+                g = self.operator_F_h(z_bar, x_bar, y_bar)
+                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
+                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
+                d = z_bar.shape[0]
+                dtype = z_bar.dtype
+                eye = jnp.eye(d, dtype=dtype)
+                tiny = jnp.asarray(_tiny, dtype=dtype)
+                tol_jax = jnp.asarray(tol, dtype=dtype)
+
+                def cond(state):
+                    lam, _z, i, prev_lam = state
+                    change = jnp.abs(lam - prev_lam)
+                    return (i < n_iters) & (change > jnp.maximum(tol_jax * lam, tiny))
+
+                def body(state):
+                    lam, _z, i, _prev = state
+                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+                    z_new = _project_z_h(z_bar + delta)
+                    d_eff = z_new - z_bar
+                    return (
+                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
+                        z_new, i + 1, lam,
+                    )
+
+                lam, z, _i, _p = jax.lax.while_loop(
+                    cond, body,
+                    (jnp.zeros((), dtype=dtype), z_bar,
+                     jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
+                )
+                d_eff = z - z_bar
+                u = -(g + H @ d_eff + lam * d_eff)
+                return z, u
+        else:
+            def oracle(z_bar: Array) -> tuple[Array, Array]:
+                g = self.operator_F_h(z_bar, x_bar, y_bar)
+                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
+                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
+                d = z_bar.shape[0]
+                dtype = z_bar.dtype
+                eye = jnp.eye(d, dtype=dtype)
+                tiny = jnp.asarray(_tiny, dtype=dtype)
+
+                def body(i, state):
+                    lam, z = state
+                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+                    z_new = _project_z_h(z_bar + delta)
+                    d_eff = z_new - z_bar
+                    return (npe_gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
+
+                lam, z = jax.lax.fori_loop(
+                    0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar)
+                )
+                d_eff = z - z_bar
+                u = -(g + H @ d_eff + lam * d_eff)
+                return z, u
+
+        return oracle
+
+
+# Backward-compatible alias
+_HKernel = RegularizedSubproblem
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Surrogate problem constructors
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_g_problem(
+    problem: MinimaxProblem, x_bar: Array, gamma: float,
+) -> MinimaxProblem:
+    """Construct ``g(x,y;x̄) = f(x,y) + (γ/3)·‖x−x̄‖³``."""
+    x_bar = jnp.asarray(x_bar)
+
+    def f_g(x: Array, y: Array):
+        dx = x - x_bar
+        return problem.f(x, y) + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
+
+    def grad_g(x: Array, y: Array) -> tuple[Array, Array]:
+        gx, gy_neg = problem.grad_f(x, y)
+        return gx + _cubic_grad(x - x_bar, gamma), gy_neg
+
+    def hess_g(x: Array, y: Array):
+        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
+        H_xx_g = H_xx + _cubic_hess(x - x_bar, gamma)
+        return (H_xx_g, H_xy), (H_yx, H_yy)
+
+    return MinimaxProblem(
+        f=f_g, grad_f=grad_g, hessian_f=hess_g,
+        dim_x=problem.dim_x, dim_y=problem.dim_y,
+        D_x=problem.D_x, D_y=problem.D_y,
+        rho=(problem.rho or 0.0) + gamma,
+        ell=(problem.ell or 0.0) + gamma * max(problem.D_x, 1.0),
+        L=problem.L,
+        project_x=problem.project_x, project_y=problem.project_y,
+    )
+
+
+def _make_h_problem(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    y_bar: Array,
+    gamma: float,
+) -> MinimaxProblem:
+    """Construct ``h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³``."""
+    x_bar = jnp.asarray(x_bar)
+    y_bar = jnp.asarray(y_bar)
+
+    def f_h(x: Array, y: Array):
+        dx = x - x_bar
+        dy = y - y_bar
+        return (
+            problem.f(x, y)
+            + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
+            - (gamma / 3.0) * jnp.linalg.norm(dy) ** 3
+        )
+
+    def grad_h(x: Array, y: Array) -> tuple[Array, Array]:
+        gx, gy_neg = problem.grad_f(x, y)
+        return (
+            gx + _cubic_grad(x - x_bar, gamma),
+            gy_neg + _cubic_grad(y - y_bar, gamma),
+        )
+
+    def hess_h(x: Array, y: Array):
+        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
+        H_xx_h = H_xx + _cubic_hess(x - x_bar, gamma)
+        H_yy_h = H_yy - _cubic_hess(y - y_bar, gamma)
+        return (H_xx_h, H_xy), (H_yx, H_yy_h)
+
+    diameter = max(problem.D_x, problem.D_y, 1.0)
+    return MinimaxProblem(
+        f=f_h, grad_f=grad_h, hessian_f=hess_h,
+        dim_x=problem.dim_x, dim_y=problem.dim_y,
+        D_x=problem.D_x, D_y=problem.D_y,
+        rho=(problem.rho or 0.0) + gamma,
+        ell=(problem.ell or 0.0) + gamma * diameter,
+        L=problem.L,
+        project_x=problem.project_x, project_y=problem.project_y,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Early-stopping restart helper
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -217,6 +573,257 @@ def _restart_jax(
         cond, body, (z0, z0, jnp.int32(0)),
     )
     return z_final, epochs
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Algorithm 4 — Inexact proximal oracle for Φ  (middle loop)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _iProx_Phi(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    gamma: float,
+    zeta_2: float = 1e-4,
+    *,
+    params: Optional[_LoopParams] = None,
+    M_saddle: str = "npe",
+    counter: Optional[_CallCounter] = None,
+    y_init: Optional[Array] = None,
+    outer_warm_y: Optional["_WarmStart"] = None,
+    kernel: Optional[RegularizedSubproblem] = None,
+) -> tuple[Array, Array]:
+    """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``.
+
+    Solves the equivalent regularised saddle subproblem
+        min_x max_y  g(x, y; x̄)   where  g = f + (γ/3)·‖x−x̄‖³
+
+    by running AIPE on -Ψ (the *middle loop*):
+        -Ψ(y; x̄) = -min_x g(x, y; x̄)
+
+    whose proximal oracle delegates to Algorithm 5 (the *inner loop*).
+
+    The δ tolerance from Definition 4.1 is enforced by passing ``zeta_3``
+    (derived from ``zeta_2``) to the innermost CRN solver.
+
+    When *y_init* is provided the middle AIPE loop is seeded from that
+    point instead of zeros, warm-starting from the previous outer iterate.
+    When *outer_warm_y* is provided the final ``y_hat`` is written back
+    to it so the caller can warm-start the next invocation.
+
+    When *kernel* is supplied (built once by the caller), the inner h-subproblem
+    reuses the kernel's parametric methods instead of constructing a new
+    ``RegularizedSubproblem`` per call, avoiding JIT recompilation.
+
+    Returns ``(x_out, u_out)`` with ``u_out ∈ ∂Φ(x_out)``.
+    """
+    if params is None:
+        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
+
+    g_problem = _make_g_problem(problem, x_bar, gamma)
+
+    # Build the kernel once if not supplied (backward-compatible path).
+    if kernel is None:
+        kernel = RegularizedSubproblem(problem, gamma)
+
+    # Derive inner tolerance: one order tighter than zeta_2, but at
+    # least as tight as the pre-computed zeta_3.
+    inner_zeta_3 = min(params.zeta_3, zeta_2 * 0.1)
+
+    # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ────────────────
+    neg_psi_fn, grad_neg_psi_fn, _hess_neg_psi_fn = _make_psi_oracle(
+        problem, x_bar, gamma, params,
+        M_saddle=M_saddle, m_lazy=params.m_lazy,
+    )
+
+    # ── Per-call warm-start cell for the inner NPE z0 ────────────────
+    # Updated via jax.debug.callback after each _iProx_Psi so the next
+    # _prox_psi call starts from the previous saddle solution.
+    inner_warm = _WarmStart()
+    # Caches the x_out from the last inner call — avoids re-running
+    # _minimize_x_auto after the middle AIPE completes.
+    x_hat_warm = _WarmStart()
+
+    # ── Proximal oracle for -Ψ (delegates to Algorithm 5) ────────────
+    def _prox_psi(y_bar: Array) -> tuple[Array, Array]:
+        return _iProx_Psi(
+            problem, x_bar, y_bar, gamma,
+            zeta_3=inner_zeta_3,
+            params=params,
+            M_saddle=M_saddle,
+            counter=counter,
+            kernel=kernel,
+            z_init=inner_warm.value,
+            _z_hat_cell=inner_warm,
+            _x_hat_cell=x_hat_warm,
+        )
+
+    # ── Middle AIPE with restart + early stopping ────────────────────
+    if y_init is not None:
+        y0 = problem.project_y(y_init)
+    else:
+        y0 = problem.project_y(jnp.zeros(problem.dim_y))
+
+    def _run_middle_epoch(y_cur: Array) -> tuple[Array, int]:
+        return aipe(
+            _prox_psi, grad_neg_psi_fn, y_cur,
+            params.T_middle, gamma,
+            project=problem.project_y, fn=neg_psi_fn,
+        )
+
+    y_hat, _middle_calls = _restart_jax(
+        _run_middle_epoch, y0, params.S_middle,
+        step_tol=params.zeta_2,
+    )
+
+    x_hat: Array
+    if x_hat_warm.value is not None:
+        x_hat = problem.project_x(x_hat_warm.value)
+    else:
+        x_hat = _minimize_x_auto(
+            g_problem, y_hat,
+            steps=max(20, params.T_inner * params.S_inner),
+            M_saddle=M_saddle, gamma=gamma, m_lazy=params.m_lazy,
+        )
+
+    gx, _ = g_problem.grad_f(x_hat, y_hat)
+    u_out = -gx
+
+    if outer_warm_y is not None:
+        jax.debug.callback(
+            lambda v: setattr(outer_warm_y, 'value', v), y_hat
+        )
+
+    return x_hat, u_out
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Algorithm 5 — Inexact proximal oracle for -Ψ  (inner loop)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _iProx_Psi(
+    problem: MinimaxProblem,
+    x_bar: Array,
+    y_bar: Array,
+    gamma: float,
+    zeta_3: float = 1e-4,
+    *,
+    params: Optional[_LoopParams] = None,
+    M_saddle: str = "npe",
+    counter: Optional[_CallCounter] = None,
+    kernel: Optional[RegularizedSubproblem] = None,
+    z_init: Optional[Array] = None,
+    _z_hat_cell: Optional["_WarmStart"] = None,
+    _x_hat_cell: Optional["_WarmStart"] = None,
+) -> tuple[Array, Array]:
+    """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``.
+
+    Solves the regularised saddle subproblem
+        min_x max_y  h(x, y; x̄, ȳ)
+    where  h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³
+
+    via NPE/LEN-restart on the monotone operator F_h, followed by one EG
+    refinement step.  The δ tolerance from Theorem 5.3 is enforced by
+    passing ``zeta_3`` to the CRN secular-equation solver.
+
+    When *kernel* is supplied (built once by the caller via
+    :class:`RegularizedSubproblem`), the inner CRN oracle reuses the
+    kernel's parametric methods instead of creating fresh closures,
+    avoiding JIT recompilation on every call.
+
+    When *z_init* is provided the NPE restart begins from that point
+    (warm-starting from the previous call's solution).  When *_z_hat_cell*
+    is provided the final ``z_hat`` is written back to it via
+    ``jax.debug.callback`` so the caller can warm-start the next invocation.
+
+    Returns ``(y_out, v_out)`` with ``v_out ∈ ∂(-Ψ)(y_out)``.
+    """
+    if params is None:
+        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
+
+    # Build the kernel if not supplied (backward-compatible path).
+    if kernel is None:
+        kernel = RegularizedSubproblem(problem, gamma)
+
+    sub_rho = max(kernel.rho_h, _REG_MIN)
+    npe_gamma = 2.0 * sub_rho
+
+    D = max(_diam(kernel.D_x), _diam(kernel.D_y), _ABS_TOL)
+    complexity = (D ** (12.0 / 7.0)) * (
+        (sub_rho / max(npe_gamma, _ABS_TOL)) ** (4.0 / 7.0)
+    )
+    inner_T = max(8, int(ceil(complexity)))
+    inner_T = min(inner_T, params.T_inner)
+
+    z0: Array
+    if z_init is not None:
+        z0 = jnp.concatenate([
+            kernel.project_x(z_init[: kernel.dim_x]),
+            kernel.project_y(z_init[kernel.dim_x :]),
+        ])
+    else:
+        z0 = jnp.concatenate([
+            problem.project_x(x_bar), problem.project_y(y_bar),
+        ])
+        z0 = jnp.concatenate([
+            kernel.project_x(z0[: kernel.dim_x]),
+            kernel.project_y(z0[kernel.dim_x :]),
+        ])
+
+    # ── Build a JIT-stable CRN oracle using the kernel ────────────────
+    crn_oracle_fn = kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=zeta_3)
+
+    def _F_h(z: Array) -> Array:
+        return kernel.operator_F_h(z, x_bar, y_bar)
+
+    proj = lambda z: jnp.concatenate([
+        kernel.project_x(z[: kernel.dim_x]),
+        kernel.project_y(z[kernel.dim_x :]),
+    ])
+    merit = lambda z: jnp.dot(_F_h(z), _F_h(z))
+
+    def _run_inner(z: Array) -> tuple[Array, int]:
+        return npe(
+            crn_oracle_fn, _F_h, z,
+            inner_T, npe_gamma, project=proj, fn=merit,
+        )
+
+    z_hat, epochs = _restart_jax(
+        _run_inner, z0, params.S_inner,
+        step_tol=max(zeta_3 * 0.01, 1e-14),
+    )
+    calls = epochs * inner_T
+
+    # ── EG refinement ────────────────────────────────────────────────
+    ell_h = max(kernel.ell_h, _ABS_TOL)
+    diam_h = max(D, _ABS_TOL)
+    rho_h = max(kernel.rho_h, _REG_MIN)
+    eta = 1.0 / (2.0 * max(ell_h + 2.0 * rho_h * diam_h, _ABS_TOL))
+
+    F_hat = _F_h(z_hat)
+    z_half = proj(z_hat - eta * F_hat)
+    F_half = _F_h(z_half)
+    z_out = proj(z_hat - eta * F_half)
+
+    _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
+    gy_neg_h = _F_h(z_out)[kernel.dim_x :]
+    v_out = -gy_neg_h
+
+    if _z_hat_cell is not None:
+        jax.debug.callback(
+            lambda v: setattr(_z_hat_cell, 'value', v), z_hat
+        )
+
+    if _x_hat_cell is not None:
+        jax.debug.callback(
+            lambda v: setattr(_x_hat_cell, 'value', v), z_out[: kernel.dim_x]
+        )
+
+    if counter is not None:
+        jax.debug.callback(
+            lambda c: setattr(counter, 'total', counter.total + int(c)),
+            calls + 1
+        )
+
+    return y_out, v_out
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Public entry point
@@ -336,6 +943,10 @@ def _algorithm_3(
     **Inner loop** — Algorithm 5: each proximal-oracle call on -Ψ runs
     NPE/LEN-restart on the h-problem with CRN-based operator oracles.
 
+    The :class:`RegularizedSubproblem` kernel is built **once** here and
+    threaded through Algorithms 4 and 5, ensuring that JAX's JIT cache
+    hits on every subsequent call to the parametric operator/Jacobian.
+
     Parameters
     ----------
     mu_x, mu_y : float
@@ -350,6 +961,10 @@ def _algorithm_3(
 
     x0, _y0 = _split(problem, z0)
     counter = _CallCounter()
+
+    # ── Build the kernel once for the entire solve ───────────────────
+    kernel = RegularizedSubproblem(problem, gamma)
+    logger.debug("Built kernel: %r", kernel)
 
     # ── Build the Φ oracle ───────────────────────────────────────────
     phi_fn, grad_phi_fn, _hess_phi_fn = _make_phi_oracle(
@@ -370,6 +985,7 @@ def _algorithm_3(
             counter=counter,
             y_init=warm_y.value,
             outer_warm_y=warm_y,
+            kernel=kernel,
         )
         return x_out, u_out
 
@@ -381,7 +997,7 @@ def _algorithm_3(
             project=problem.project_x, fn=phi_fn,
         )
 
-    x_hat, _outer_calls, outer_epochs = _restart_with_early_stop(
+    x_hat, outer_epochs = _restart_jax(
         _run_outer_epoch, x0, params.S_outer,
         step_tol=params.zeta_1,
     )
@@ -401,502 +1017,11 @@ def _algorithm_3(
         "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d  "
         "outer_epochs=%d/%d",
         phi_val, grad_norm, total_calls,
-        outer_epochs, params.S_outer,
+        int(outer_epochs), params.S_outer,
     )
 
     z_hat = jnp.concatenate([x_hat, y_hat])
     return z_hat, total_calls
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Surrogate problem constructors
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _make_g_problem(
-    problem: MinimaxProblem, x_bar: Array, gamma: float,
-) -> MinimaxProblem:
-    """Construct ``g(x,y;x̄) = f(x,y) + (γ/3)·‖x−x̄‖³``."""
-    x_bar = jnp.asarray(x_bar)
-
-    def f_g(x: Array, y: Array):
-        dx = x - x_bar
-        return problem.f(x, y) + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
-
-    def grad_g(x: Array, y: Array) -> tuple[Array, Array]:
-        gx, gy_neg = problem.grad_f(x, y)
-        return gx + _cubic_grad(x - x_bar, gamma), gy_neg
-
-    def hess_g(x: Array, y: Array):
-        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
-        H_xx_g = H_xx + _cubic_hess(x - x_bar, gamma)
-        return (H_xx_g, H_xy), (H_yx, H_yy)
-
-    return MinimaxProblem(
-        f=f_g, grad_f=grad_g, hessian_f=hess_g,
-        dim_x=problem.dim_x, dim_y=problem.dim_y,
-        D_x=problem.D_x, D_y=problem.D_y,
-        rho=(problem.rho or 0.0) + gamma,
-        ell=(problem.ell or 0.0) + gamma * max(problem.D_x, 1.0),
-        L=problem.L,
-        project_x=problem.project_x, project_y=problem.project_y,
-    )
-
-
-def _make_h_problem(
-    problem: MinimaxProblem,
-    x_bar: Array,
-    y_bar: Array,
-    gamma: float,
-) -> MinimaxProblem:
-    """Construct ``h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³``."""
-    x_bar = jnp.asarray(x_bar)
-    y_bar = jnp.asarray(y_bar)
-
-    def f_h(x: Array, y: Array):
-        dx = x - x_bar
-        dy = y - y_bar
-        return (
-            problem.f(x, y)
-            + (gamma / 3.0) * jnp.linalg.norm(dx) ** 3
-            - (gamma / 3.0) * jnp.linalg.norm(dy) ** 3
-        )
-
-    def grad_h(x: Array, y: Array) -> tuple[Array, Array]:
-        gx, gy_neg = problem.grad_f(x, y)
-        return (
-            gx + _cubic_grad(x - x_bar, gamma),
-            gy_neg + _cubic_grad(y - y_bar, gamma),
-        )
-
-    def hess_h(x: Array, y: Array):
-        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
-        H_xx_h = H_xx + _cubic_hess(x - x_bar, gamma)
-        H_yy_h = H_yy - _cubic_hess(y - y_bar, gamma)
-        return (H_xx_h, H_xy), (H_yx, H_yy_h)
-
-    diameter = max(problem.D_x, problem.D_y, 1.0)
-    return MinimaxProblem(
-        f=f_h, grad_f=grad_h, hessian_f=hess_h,
-        dim_x=problem.dim_x, dim_y=problem.dim_y,
-        D_x=problem.D_x, D_y=problem.D_y,
-        rho=(problem.rho or 0.0) + gamma,
-        ell=(problem.ell or 0.0) + gamma * diameter,
-        L=problem.L,
-        project_x=problem.project_x, project_y=problem.project_y,
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# JIT-stable h-subproblem kernel
-# ═════════════════════════════════════════════════════════════════════════════
-
-class _HKernel:
-    """Parametric kernel for the h-subproblem that avoids JIT recompilation.
-
-    **Problem:** Every call to ``_iProx_Psi`` previously constructed a fresh
-    ``MinimaxProblem`` via ``_make_h_problem(problem, x_bar, y_bar, gamma)``,
-    creating new Python closures that *captured* the current ``(x_bar, y_bar)``
-    values.  JAX treats each new closure as a new callable and recompiles the
-    entire inner ``npe()``/``len()`` ``jax.lax.scan`` + ``fori_loop`` graph.
-    With hundreds of ``_iProx_Psi`` calls per solve, this causes hundreds of
-    expensive JIT compilations.
-
-    **Solution:** Build the kernel *once* per ``(problem, gamma)`` pair.  The
-    kernel exposes parametric functions whose *Python identity is fixed*:
-    ``operator_F_h(z, x_bar, y_bar)`` and ``hessian_h(x, y, x_bar, y_bar)``.
-    JAX compiles these once and reuses the compiled binary for every subsequent
-    call — only the array data (``x_bar``, ``y_bar``, ``z``) changes.
-    """
-
-    def __init__(self, problem: MinimaxProblem, gamma: float) -> None:
-        self._problem = problem
-        self._gamma = gamma
-        self.dim_x = problem.dim_x
-        self.dim_y = problem.dim_y
-        self.D_x = problem.D_x
-        self.D_y = problem.D_y
-        diameter = max(problem.D_x, problem.D_y, 1.0)
-        self.rho_h = (problem.rho or 0.0) + gamma
-        self.ell_h = (problem.ell or 0.0) + gamma * diameter
-        self.project_x = problem.project_x
-        self.project_y = problem.project_y
-
-    # ── parametric operator F_h(z; x_bar, y_bar) ────────────────────
-    def operator_F_h(self, z: Array, x_bar: Array, y_bar: Array) -> Array:
-        """F_h(z) = [∇_x h, -∇_y h] with x_bar, y_bar as explicit args."""
-        x, y = z[: self.dim_x], z[self.dim_x :]
-        gx, gy_neg = self._problem.grad_f(x, y)
-        gx_h = gx + _cubic_grad(x - x_bar, self._gamma)
-        gy_neg_h = gy_neg + _cubic_grad(y - y_bar, self._gamma)
-        return jnp.concatenate([gx_h, gy_neg_h])
-
-    # ── parametric Jacobian of F_h ───────────────────────────────────
-    def jacobian_F_h(
-        self, x: Array, y: Array, x_bar: Array, y_bar: Array
-    ) -> Array:
-        """∇F_h assembled from hessian_f plus cubic correction blocks."""
-        (H_xx, H_xy), (H_yx, H_yy) = self._problem.hessian_f(x, y)
-        H_xx_h = H_xx + _cubic_hess(x - x_bar, self._gamma)
-        H_yy_h = H_yy - _cubic_hess(y - y_bar, self._gamma)
-        top = jnp.concatenate([H_xx_h, H_xy], axis=1)
-        bot = jnp.concatenate([-H_yx, -H_yy_h], axis=1)
-        return jnp.concatenate([top, bot], axis=0)
-
-    # ── CRN oracle for NPE (parametric) ─────────────────────────────
-    def make_crn_oracle(
-        self,
-        x_bar: Array,
-        y_bar: Array,
-        npe_gamma: float,
-        n_iters: int = 50,
-        tol: float = 0.0,
-    ) -> Callable[[Array], tuple[Array, Array]]:
-        """Return a CRN NPE oracle bound to fixed ``(x_bar, y_bar)``.
-
-        The returned callable's Python identity is a fresh closure, but the
-        *underlying parametric methods* (``operator_F_h``, ``jacobian_F_h``)
-        remain the same Python objects across all calls.  JAX reuses the same
-        compiled kernel; only the captured ``x_bar``/``y_bar`` constants differ
-        — those are folded in as constants at trace time (they are concrete
-        arrays outside any JAX trace when ``_iProx_Psi`` is called from
-        ``_restart_with_early_stop``, which is an eager Python loop).
-
-        When ``tol > 0`` the secular-equation solver exits as soon as the
-        regularisation parameter λ converges, saving unnecessary iterations on
-        easy subproblems.  This mirrors the ``tol`` path in
-        :func:`~minimax_aipe.oracles.lazy_crn_oracle`.
-        """
-        dim_x = self.dim_x
-        _tiny = 1e-12
-
-        def _project_z_h(z: Array) -> Array:
-            xz, yz = z[:dim_x], z[dim_x:]
-            return jnp.concatenate([
-                self.project_x(xz), self.project_y(yz),
-            ])
-
-        if tol > 0:
-            def oracle(z_bar: Array) -> tuple[Array, Array]:
-                g = self.operator_F_h(z_bar, x_bar, y_bar)
-                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
-                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                d = z_bar.shape[0]
-                dtype = z_bar.dtype
-                eye = jnp.eye(d, dtype=dtype)
-                tiny = jnp.asarray(_tiny, dtype=dtype)
-                tol_jax = jnp.asarray(tol, dtype=dtype)
-
-                def cond(state):
-                    lam, _z, i, prev_lam = state
-                    change = jnp.abs(lam - prev_lam)
-                    return (i < n_iters) & (change > jnp.maximum(tol_jax * lam, tiny))
-
-                def body(state):
-                    lam, _z, i, _prev = state
-                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-                    z_new = _project_z_h(z_bar + delta)
-                    d_eff = z_new - z_bar
-                    return (
-                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
-                        z_new, i + 1, lam,
-                    )
-
-                lam, z, _i, _p = jax.lax.while_loop(
-                    cond, body,
-                    (jnp.zeros((), dtype=dtype), z_bar,
-                     jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
-                )
-                d_eff = z - z_bar
-                u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
-        else:
-            def oracle(z_bar: Array) -> tuple[Array, Array]:
-                g = self.operator_F_h(z_bar, x_bar, y_bar)
-                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
-                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                d = z_bar.shape[0]
-                dtype = z_bar.dtype
-                eye = jnp.eye(d, dtype=dtype)
-                tiny = jnp.asarray(_tiny, dtype=dtype)
-
-                def body(i, state):
-                    lam, z = state
-                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-                    z_new = _project_z_h(z_bar + delta)
-                    d_eff = z_new - z_bar
-                    return (npe_gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
-
-                lam, z = jax.lax.fori_loop(
-                    0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar)
-                )
-                d_eff = z - z_bar
-                u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
-
-        return oracle
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Cubic regularisation helpers
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _cubic_grad(delta: Array, gamma: float) -> Array:
-    """Gradient of ``(γ/3)·‖δ‖³``."""
-    delta = jnp.asarray(delta)
-    return gamma * jnp.linalg.norm(delta) * delta
-
-
-def _cubic_hess(delta: Array, gamma: float) -> Array:
-    """Hessian of ``(γ/3)·‖δ‖³`` with zero-limit branch."""
-    delta = jnp.asarray(delta)
-    norm = jnp.linalg.norm(delta)
-    eye = jnp.eye(delta.shape[0], dtype=delta.dtype)
-    safe_norm = jnp.maximum(norm, jnp.asarray(_CUBIC_ZERO, dtype=delta.dtype))
-    hess = gamma * (norm * eye + jnp.outer(delta, delta) / safe_norm)
-    return jnp.where(norm > _CUBIC_ZERO, hess, jnp.zeros_like(hess))
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Algorithm 4 — Inexact proximal oracle for Φ  (middle loop)
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _iProx_Phi(
-    problem: MinimaxProblem,
-    x_bar: Array,
-    gamma: float,
-    zeta_2: float = 1e-4,
-    *,
-    params: Optional[_LoopParams] = None,
-    M_saddle: str = "npe",
-    counter: Optional[_CallCounter] = None,
-    y_init: Optional[Array] = None,
-    outer_warm_y: Optional["_WarmStart"] = None,
-) -> tuple[Array, Array]:
-    """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``.
-
-    Solves the equivalent regularised saddle subproblem
-        min_x max_y  g(x, y; x̄)   where  g = f + (γ/3)·‖x−x̄‖³
-
-    by running AIPE on -Ψ (the *middle loop*):
-        -Ψ(y; x̄) = -min_x g(x, y; x̄)
-
-    whose proximal oracle delegates to Algorithm 5 (the *inner loop*).
-
-    The δ tolerance from Definition 4.1 is enforced by passing ``zeta_3``
-    (derived from ``zeta_2``) to the innermost CRN solver.
-
-    When *y_init* is provided the middle AIPE loop is seeded from that
-    point instead of zeros, warm-starting from the previous outer iterate.
-    When *outer_warm_y* is provided the final ``y_hat`` is written back
-    to it so the caller can warm-start the next invocation.
-
-    Returns ``(x_out, u_out)`` with ``u_out ∈ ∂Φ(x_out)``.
-    """
-    if params is None:
-        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
-
-    g_problem = _make_g_problem(problem, x_bar, gamma)
-
-    # Derive inner tolerance: one order tighter than zeta_2, but at
-    # least as tight as the pre-computed zeta_3.
-    inner_zeta_3 = min(params.zeta_3, zeta_2 * 0.1)
-
-    # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ────────────────
-    neg_psi_fn, grad_neg_psi_fn, _hess_neg_psi_fn = _make_psi_oracle(
-        problem, x_bar, gamma, params,
-        M_saddle=M_saddle, m_lazy=params.m_lazy,
-    )
-
-    # ── Build JIT-stable h-kernel once per middle-loop invocation ────
-    h_kernel = _HKernel(problem, gamma)
-
-    # ── Per-call warm-start cell for the inner NPE z0 ────────────────
-    # Updated via jax.debug.callback after each _iProx_Psi so the next
-    # _prox_psi call starts from the previous saddle solution.
-    inner_warm = _WarmStart()
-    # Caches the x_out from the last inner call — avoids re-running
-    # _minimize_x_auto after the middle AIPE completes.
-    x_hat_warm = _WarmStart()
-
-    # ── Proximal oracle for -Ψ (delegates to Algorithm 5) ────────────
-    def _prox_psi(y_bar: Array) -> tuple[Array, Array]:
-        return _iProx_Psi(
-            problem, x_bar, y_bar, gamma,
-            zeta_3=inner_zeta_3,
-            params=params,
-            M_saddle=M_saddle,
-            counter=counter,
-            kernel=h_kernel,
-            z_init=inner_warm.value,
-            _z_hat_cell=inner_warm,
-            _x_hat_cell=x_hat_warm,
-        )
-
-    # ── Middle AIPE with restart + early stopping ────────────────────
-    if y_init is not None:
-        y0 = problem.project_y(y_init)
-    else:
-        y0 = problem.project_y(jnp.zeros(problem.dim_y))
-
-    def _run_middle_epoch(y_cur: Array) -> tuple[Array, int]:
-        return aipe(
-            _prox_psi, grad_neg_psi_fn, y_cur,
-            params.T_middle, gamma,
-            project=problem.project_y, fn=neg_psi_fn,
-        )
-
-    y_hat, _middle_calls = _restart_jax(
-        _run_middle_epoch, y0, params.S_middle,
-        step_tol=params.zeta_2,
-    )
-
-    x_hat: Array
-    if x_hat_warm.value is not None:
-        x_hat = problem.project_x(x_hat_warm.value)
-    else:
-        x_hat = _minimize_x_auto(
-            g_problem, y_hat,
-            steps=max(20, params.T_inner * params.S_inner),
-            M_saddle=M_saddle, gamma=gamma, m_lazy=params.m_lazy,
-        )
-
-    gx, _ = g_problem.grad_f(x_hat, y_hat)
-    u_out = -gx
-
-    if outer_warm_y is not None:
-        jax.debug.callback(
-            lambda v: setattr(outer_warm_y, 'value', v), y_hat
-        )
-
-    return x_hat, u_out
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Algorithm 5 — Inexact proximal oracle for -Ψ  (inner loop)
-# ═════════════════════════════════════════════════════════════════════════════
-
-def _iProx_Psi(
-    problem: MinimaxProblem,
-    x_bar: Array,
-    y_bar: Array,
-    gamma: float,
-    zeta_3: float = 1e-4,
-    *,
-    params: Optional[_LoopParams] = None,
-    M_saddle: str = "npe",
-    counter: Optional[_CallCounter] = None,
-    kernel: Optional["_HKernel"] = None,
-    z_init: Optional[Array] = None,
-    _z_hat_cell: Optional["_WarmStart"] = None,
-    _x_hat_cell: Optional["_WarmStart"] = None,
-) -> tuple[Array, Array]:
-    """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``.
-
-    Solves the regularised saddle subproblem
-        min_x max_y  h(x, y; x̄, ȳ)
-    where  h = f + (γ/3)·‖x−x̄‖³ − (γ/3)·‖y−ȳ‖³
-
-    via NPE/LEN-restart on the monotone operator F_h, followed by one EG
-    refinement step.  The δ tolerance from Theorem 5.3 is enforced by
-    passing ``zeta_3`` to the CRN secular-equation solver.
-
-    When *kernel* is supplied (built once by ``_iProx_Phi``), the inner CRN
-    oracle reuses the kernel's parametric methods instead of creating fresh
-    closures, avoiding JIT recompilation on every call.
-
-    When *z_init* is provided the NPE restart begins from that point
-    (warm-starting from the previous call's solution).  When *_z_hat_cell*
-    is provided the final ``z_hat`` is written back to it via
-    ``jax.debug.callback`` so the caller can warm-start the next invocation.
-
-    Returns ``(y_out, v_out)`` with ``v_out ∈ ∂(-Ψ)(y_out)``.
-    """
-    if params is None:
-        params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
-
-    if kernel is None:
-        kernel = _HKernel(problem, gamma)
-
-    sub_rho = max(kernel.rho_h, _REG_MIN)
-    npe_gamma = 2.0 * sub_rho
-
-    D = max(_diam(kernel.D_x), _diam(kernel.D_y), _ABS_TOL)
-    complexity = (D ** (12.0 / 7.0)) * (
-        (sub_rho / max(npe_gamma, _ABS_TOL)) ** (4.0 / 7.0)
-    )
-    inner_T = max(8, int(ceil(complexity)))
-    inner_T = min(inner_T, params.T_inner)
-
-    z0: Array
-    if z_init is not None:
-        z0 = jnp.concatenate([
-            kernel.project_x(z_init[: kernel.dim_x]),
-            kernel.project_y(z_init[kernel.dim_x :]),
-        ])
-    else:
-        z0 = jnp.concatenate([
-            problem.project_x(x_bar), problem.project_y(y_bar),
-        ])
-        z0 = jnp.concatenate([
-            kernel.project_x(z0[: kernel.dim_x]),
-            kernel.project_y(z0[kernel.dim_x :]),
-        ])
-
-    # ── Build a JIT-stable CRN oracle using the kernel ────────────────
-    crn_oracle_fn = kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=zeta_3)
-
-    def _F_h(z: Array) -> Array:
-        return kernel.operator_F_h(z, x_bar, y_bar)
-
-    proj = lambda z: jnp.concatenate([
-        kernel.project_x(z[: kernel.dim_x]),
-        kernel.project_y(z[kernel.dim_x :]),
-    ])
-    merit = lambda z: jnp.dot(_F_h(z), _F_h(z))
-
-    def _run_inner(z: Array) -> tuple[Array, int]:
-        return npe(
-            crn_oracle_fn, _F_h, z,
-            inner_T, npe_gamma, project=proj, fn=merit,
-        )
-
-    z_hat, epochs = _restart_jax(
-        _run_inner, z0, params.S_inner,
-        step_tol=max(zeta_3 * 0.01, 1e-14),
-    )
-    calls = epochs * inner_T
-
-    # ── EG refinement ────────────────────────────────────────────────
-    ell_h = max(kernel.ell_h, _ABS_TOL)
-    diam_h = max(D, _ABS_TOL)
-    rho_h = max(kernel.rho_h, _REG_MIN)
-    eta = 1.0 / (2.0 * max(ell_h + 2.0 * rho_h * diam_h, _ABS_TOL))
-
-    F_hat = _F_h(z_hat)
-    z_half = proj(z_hat - eta * F_hat)
-    F_half = _F_h(z_half)
-    z_out = proj(z_hat - eta * F_half)
-
-    _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
-    gy_neg_h = _F_h(z_out)[kernel.dim_x :]
-    v_out = -gy_neg_h
-
-    if _z_hat_cell is not None:
-        jax.debug.callback(
-            lambda v: setattr(_z_hat_cell, 'value', v), z_hat
-        )
-
-    if _x_hat_cell is not None:
-        jax.debug.callback(
-            lambda v: setattr(_x_hat_cell, 'value', v), z_out[: kernel.dim_x]
-        )
-
-    if counter is not None:
-        jax.debug.callback(
-            lambda c: setattr(counter, 'total', counter.total + int(c)),
-            calls + 1
-        )
-
-    return y_out, v_out
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -992,6 +1117,7 @@ def _solve_saddle_subproblem(
     params: _LoopParams,
     M_saddle: str,
     tolerance: float = 0.0,
+    kernel: Optional[RegularizedSubproblem] = None,
 ) -> tuple[Array, int]:
     """Solve a saddle subproblem via NPE-restart or LEN-restart.
 
@@ -1006,6 +1132,8 @@ def _solve_saddle_subproblem(
     tolerance : float
         δ tolerance for the CRN secular-equation solver and residual-based
         early-stopping threshold.
+    kernel : RegularizedSubproblem or None
+        When supplied, reused for the CRN oracle construction.
     """
     sub_rho = max(float(problem.rho or 0.0), _REG_MIN)
     npe_gamma = 2.0 * sub_rho
@@ -1174,9 +1302,12 @@ def _compute_loop_params(
     # ── Accuracy scheduling ──────────────────────────────────────────
     mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
     mu_x = epsilon / (2.0 * max(_diam(problem.D_x), _ABS_TOL) ** 3)
-    zeta_1 = min(epsilon, mu_y * epsilon**2 / (147.0 * ell**3 * D**2 + _ABS_TOL))
-    zeta_2 = min(1e-2, max(zeta_1 * 0.1, _ABS_TOL))
-    zeta_3 = min(1e-2, max(zeta_2 * 0.1, _ABS_TOL))
+    zeta_1_raw = mu_y * epsilon**2 / (147.0 * ell**3 * D**2 + _ABS_TOL)
+    # Keep tolerances numerically meaningful in finite precision while
+    # preserving strict hierarchy: zeta_1 > zeta_2 > zeta_3.
+    zeta_1 = min(epsilon, max(zeta_1_raw, epsilon * 1e-2, 1e-8))
+    zeta_2 = min(zeta_1 * 0.1, 1e-2)
+    zeta_3 = min(zeta_2 * 0.1, 1e-3)
 
     # ── Restart counts: epsilon-based with practical cap ──────────────
     _S_CAP = 4
@@ -1186,24 +1317,30 @@ def _compute_loop_params(
     ))
 
     # ── Outer loop: AIPE on Φ (Theorem 4.1) ───────────────────────────
-    # Theorem 4.1: one AIPE epoch with an (0,γ)-proximal oracle halves
-    # the distance with T = O((γ/μ)^{1/2}) iterations.
-    # 2/7 is the overall triple-loop complexity, NOT the per-epoch count.
-    T_outer = max(8, min(200, int(ceil(
-        npe_T_factor * (gamma / max(mu_x, _ABS_TOL)) ** 0.5
+    # Per Theorem 4.1 / proof of Theorem 1.1 (Chen et al. 2025), one AIPE
+    # epoch halves the distance with T = O((γ/μ)^{2/7}) iterations when the
+    # proximal oracle is itself implemented by the middle loop. With
+    # μ_x = ε/(2D_x³) ∝ ε, this gives T_outer ∝ ε^{-2/7}, so
+    # T_outer × T_middle ∝ ε^{-4/7} total — matching the claimed complexity.
+    T_outer = max(1, min(200, int(ceil(
+        npe_T_factor * (gamma / max(mu_x, _ABS_TOL)) ** (2.0 / 7.0)
     ))))
 
     # ── Middle loop: AIPE on -Ψ (Theorem 4.1) ───────────────────────
-    T_middle = max(6, min(200, int(ceil(
-        (gamma / max(mu_y, _ABS_TOL)) ** 0.5
+    # Same exponent 2/7 for the middle level (μ_y = ε/(2D_y³) ∝ ε).
+    T_middle = max(1, min(200, int(ceil(
+        npe_T_factor * (gamma / max(mu_y, _ABS_TOL)) ** (2.0 / 7.0)
     ))))
 
     # ── Inner loop: NPE/LEN on h-subproblem (Theorem E.1) ────────────
-    mu_inner = gamma / 2.0
+    # The h-subproblem's strong-monotonicity constant μ_inner = γ/2 does NOT
+    # depend on ε, so T_inner is an ε-independent constant determined by the
+    # cubic regularisation ratio rho_h/npe_gamma.  We use exponent 4/7
+    # (NPE per-epoch rate, Theorem E.1) against the regularisation ratio.
     rho_h = rho + gamma
     npe_gamma = 2.0 * rho_h
-    T_inner = max(6, min(200, int(ceil(
-        npe_T_factor * (npe_gamma / max(mu_inner, _ABS_TOL)) ** (2.0 / 3.0)
+    T_inner = max(1, min(200, int(ceil(
+        npe_T_factor * (npe_gamma / max(gamma, _ABS_TOL)) ** (4.0 / 7.0)
     ))))
 
     return _LoopParams(
@@ -1274,8 +1411,9 @@ def _ell(problem: MinimaxProblem) -> float:
 
 __all__ = [
     "solve",
+    "RegularizedSubproblem",
+    # Internal building blocks — exported for advanced usage
     "_CallCounter",
-    "_HKernel",
     "_LoopParams",
     "_WarmStart",
     "_algorithm_3",
@@ -1290,4 +1428,6 @@ __all__ = [
     "_make_psi_oracle",
     "_restart_with_early_stop",
     "_solve_saddle_subproblem",
+    # Backward compat
+    "_HKernel",
 ]

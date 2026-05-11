@@ -61,6 +61,16 @@ class MinimaxProblem:
         project_x: Optional[Callable[[Array], Array]] = None,
         project_y: Optional[Callable[[Array], Array]] = None,
     ):
+        # ── Input validation ──────────────────────────────────────────────
+        if dim_x <= 0 or dim_y <= 0:
+            raise ValueError(
+                f"Dimensions must be positive, got dim_x={dim_x}, dim_y={dim_y}"
+            )
+        if D_x <= 0 or D_y <= 0:
+            raise ValueError(
+                f"Diameters must be positive, got D_x={D_x}, D_y={D_y}"
+            )
+
         self.f = f
         self.dim_x = dim_x
         self.dim_y = dim_y
@@ -94,6 +104,22 @@ class MinimaxProblem:
             self.hessian_f = jax.hessian(f, argnums=(0, 1))
         else:
             self.hessian_f = hessian_f
+
+        # ── Shape validation for user-supplied grad_f ────────────────────
+        if grad_f is not None:
+            _test_x = jnp.zeros(dim_x)
+            _test_y = jnp.zeros(dim_y)
+            _gx, _gy = grad_f(_test_x, _test_y)
+            if _gx.shape != (dim_x,):
+                raise ValueError(
+                    f"grad_f first component (grad_x f) has shape {_gx.shape}, "
+                    f"expected ({dim_x},)"
+                )
+            if _gy.shape != (dim_y,):
+                raise ValueError(
+                    f"grad_f second component (-grad_y f) has shape {_gy.shape}, "
+                    f"expected ({dim_y},)"
+                )
 
     def grad_f(self, x: Array, y: Array) -> tuple[Array, Array]:
         """Return (∇_x f, -∇_y f) as a tuple."""
@@ -157,3 +183,5 @@ class SolverResult(NamedTuple):
     oracle_calls: int
     converged: bool
     history: dict = field(default_factory=dict)
+
+__all__ = ["MinimaxProblem", "SolverResult"]

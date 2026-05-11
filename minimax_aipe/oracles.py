@@ -243,3 +243,10 @@ def lazy_crn_oracle(
     d_eff = z - z_bar
     u = -(g + H @ d_eff + lam * d_eff)
     return z, u
+
+__all__ = [
+    "eg_step",
+    "crn_oracle",
+    "crn_oracle_minimization",
+    "lazy_crn_oracle",
+]

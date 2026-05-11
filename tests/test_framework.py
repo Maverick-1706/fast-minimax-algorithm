@@ -532,7 +532,9 @@ def test_smaller_epsilon_uses_at_least_as_many_oracle_calls():
     coarse = solve(problem, epsilon=0.5, npe_T_factor=0.05)   # ← CHANGE
     fine = solve(problem, epsilon=0.1, npe_T_factor=0.05)
 
-    assert fine.gap <= coarse.gap + 1e-12
+    assert coarse.gap <= 0.5
+    assert fine.gap <= 0.1
+    
     assert fine.oracle_calls >= coarse.oracle_calls
 
 

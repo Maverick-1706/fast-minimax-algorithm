@@ -35,6 +35,7 @@ from typing import Callable, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from jax import Array
+from functools import partial
 
 from minimax_aipe.oracles import crn_oracle_minimization
 
@@ -115,6 +116,7 @@ def make_crn_prox_oracle(
 
 # ── Algorithm 1 ────────────────────────────────────────────────────────────
 
+@partial(jax.jit, static_argnums=[0,1,3,5,6])
 def aipe(
     prox_oracle: ProxOracle,
     grad_fn: Callable[[Array], Array],
@@ -295,3 +297,12 @@ def aipe_restart(
         total_calls += calls
 
     return z, total_calls
+
+__all__ = [
+    "ProxOracle",
+    "AIPEState",
+    "aipe",
+    "aipe_restart",
+    "make_crn_prox_oracle",
+]
+

@@ -25,6 +25,7 @@ from typing import Callable, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 from jax import Array
+from functools import partial
 
 from minimax_aipe.oracles import crn_oracle
 
@@ -96,6 +97,7 @@ def make_crn_npe_oracle(
 
 # ── Algorithm 6 ────────────────────────────────────────────────────────────
 
+@partial(jax.jit, static_argnums=[0,1,3,5,6])
 def npe(
     oracle: NPEOracle,
     F_fn: Callable[[Array], Array],
@@ -250,3 +252,12 @@ def npe_restart(
         total_calls += calls
 
     return z, total_calls
+
+__all__ = [
+    "NPEOracle",
+    "NPEState",
+    "npe",
+    "npe_restart",
+    "make_crn_npe_oracle",
+    "project_z",
+]

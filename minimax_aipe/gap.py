@@ -57,18 +57,24 @@ def estimate_gap(
     if key is None:
         key = jax.random.PRNGKey(42)
 
+    # Keep x,y 1D even when caller passed scalar values.
+    x = jnp.atleast_1d(jnp.asarray(x))
+    y = jnp.atleast_1d(jnp.asarray(y))
+
     f = problem.f
     project_x = problem.project_x
     project_y = problem.project_y
 
     # Pre-generate all random initial points in one batched draw.
     key, y_key, x_key = jax.random.split(key, 3)
-    y_inits = project_y(
-        jax.random.normal(y_key, shape=(num_restarts, *y.shape)) * problem.D_y
-    )
-    x_inits = project_x(
-        jax.random.normal(x_key, shape=(num_restarts, *x.shape)) * problem.D_x
-    )
+    y_inits_raw = jax.random.normal(
+        y_key, shape=(num_restarts, *y.shape)
+    ) * problem.D_y
+    x_inits_raw = jax.random.normal(
+        x_key, shape=(num_restarts, *x.shape)
+    ) * problem.D_x
+    y_inits = jax.vmap(project_y)(y_inits_raw)
+    x_inits = jax.vmap(project_x)(x_inits_raw)
 
     # ------------------------------------------------------------------ #
     #  max_y  f(x, y)  via gradient ascent                                #
@@ -113,3 +119,7 @@ def estimate_gap(
     best_min = jax.lax.fori_loop(0, num_restarts, x_restart_body, jnp.inf)
 
     return float(best_max - best_min)
+
+__all__ = [
+    "estimate_gap",
+]
