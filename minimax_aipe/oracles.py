@@ -87,19 +87,18 @@ def crn_oracle(
     z_bar: Array,
     gamma: float,
     n_iters: int = 50,
+    tol: float = 0.0,
 ) -> tuple[Array, Array]:
     """Cubic-regularised Newton oracle for a minimax problem.
 
-    Solves the variational inequality
+    Solves the variational inequality via fixed-point iteration on the
+    secular equation ``(H + λI)δ = −g`` with ``λ = (γ/2)‖δ‖``.
 
-        <F(z̄) + ∇F(z̄)(z − z̄) + (γ/2)‖z − z̄‖(z − z̄),  z′ − z> ≥ 0
-        for all z′ ∈ Z
-
-    via fixed-point iteration on the secular equation
-    ``(H + λI)δ = −g``  with ``λ = (γ/2)‖δ‖``.
-
-    Returns ``(z, u)`` where
-    ``u = −(g + H δ + λ δ)`` is the dual certificate.
+    Always uses ``jax.lax.fori_loop`` (static bound) so that JAX can
+    unroll the loop at compile time.  The ``tol`` parameter is accepted
+    for API compatibility but does not switch to ``while_loop`` — nested
+    dynamic loops cause exponential compilation time inside JAX
+    ``scan``/``fori_loop`` bodies.
     """
     x_bar, y_bar = _split(z_bar, problem.dim_x)
     g = problem.operator_F(z_bar)
@@ -122,8 +121,6 @@ def crn_oracle(
     return z, u
 
 
-# ── 3. CRN oracle — scalar minimization ───────────────────────────────────
-
 def crn_oracle_minimization(
     grad_fn: Callable[[Array], Array],
     hess_fn: Callable[[Array], Array],
@@ -135,28 +132,7 @@ def crn_oracle_minimization(
 ) -> tuple[Array, Array]:
     """CRN oracle for a scalar convex objective ``min h(z)``.
 
-    Used by AIPE for proximal steps on Φ(x) and Ψ(y).
-
-    Solves::
-
-        z = argmin  h(z') + ⟨∇h(z̄), z'−z̄⟩
-                   + ½⟨∇²h(z̄)(z'−z̄), z'−z̄⟩
-                   + (γ/6)‖z'−z̄‖³
-
-    Parameters
-    ----------
-    grad_fn  : gradient of h
-    hess_fn  : Hessian of h
-    z_bar    : linearisation point
-    gamma    : cubic regularisation
-    n_iters  : maximum secular-equation iterations
-    project  : feasible-set projection (or None)
-    tol      : convergence tolerance for the secular equation.
-               When ``tol > 0`` an adaptive ``while_loop`` is used that
-               exits early once ``|λ_new − λ_old| < max(tol·λ, ε)``.
-               When ``tol == 0`` a fixed ``fori_loop`` is used.
-
-    Returns ``(z, u)``.
+    Always uses ``jax.lax.fori_loop`` (see :func:`crn_oracle` for rationale).
     """
     g = grad_fn(z_bar)
     H = hess_fn(z_bar)
@@ -164,47 +140,21 @@ def crn_oracle_minimization(
     dtype = z_bar.dtype
     eye = jnp.eye(d, dtype=dtype)
     tiny = jnp.asarray(1e-12, dtype=dtype)
-    one = jnp.asarray(1.0, dtype=dtype)
 
-    if tol > 0:
-        # ── adaptive: exit when secular equation converges ──────────
-        def cond(state):
-            lam, _z, i, prev_lam = state
-            abs_change = jnp.abs(lam - prev_lam)
-            converged = abs_change < jnp.maximum(tol * lam, tiny)
-            return (i < n_iters) & ~converged
+    def body(i, state):
+        lam, z = state
+        delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+        z_new = z_bar + delta
+        if project is not None:
+            z_new = project(z_new)
+        d_eff = z_new - z_bar
+        return (gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
 
-        def body(state):
-            lam, _z, i, _prev = state
-            delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-            z_new = z_bar + delta
-            if project is not None:
-                z_new = project(z_new)
-            d_eff = z_new - z_bar
-            lam_new = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return (lam_new, z_new, i + 1, lam)
-
-        init = (jnp.zeros(()), z_bar, 0, jnp.asarray(-one, dtype=dtype))
-        lam, z, _i, _p = jax.lax.while_loop(cond, body, init)
-    else:
-        # ── fixed iteration count ───────────────────────────────────
-        def body(i, state):
-            lam, z = state
-            delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-            z_new = z_bar + delta
-            if project is not None:
-                z_new = project(z_new)
-            d_eff = z_new - z_bar
-            return (gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
-
-        lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
-
+    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
     d_eff = z - z_bar
     u = -(g + H @ d_eff + lam * d_eff)
     return z, u
 
-
-# ── 4. Lazy CRN oracle (Definition E.1) ───────────────────────────────────
 
 def lazy_crn_oracle(
     problem: MinimaxProblem,
@@ -212,14 +162,11 @@ def lazy_crn_oracle(
     z_snapshot: Array,
     gamma: float,
     n_iters: int = 50,
+    tol: float = 0.0,
 ) -> tuple[Array, Array]:
     """Lazy CRN oracle — reuses a stale Hessian from *z_snapshot*.
 
-    Identical to :func:`crn_oracle` except the Jacobian ∇F is evaluated
-    at *z_snapshot* rather than *z_bar*, reducing Hessian-computation
-    frequency.
-
-    Returns ``(z, u)``.
+    Always uses ``jax.lax.fori_loop`` (see :func:`crn_oracle` for rationale).
     """
     x_ss, y_ss = _split(z_snapshot, problem.dim_x)
     g = problem.operator_F(z_bar)
@@ -237,6 +184,62 @@ def lazy_crn_oracle(
         return (gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
 
     lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
+    d_eff = z - z_bar
+    u = -(g + H @ d_eff + lam * d_eff)
+    return z, u
+
+
+def lazy_crn_oracle(
+    problem: MinimaxProblem,
+    z_bar: Array,
+    z_snapshot: Array,
+    gamma: float,
+    n_iters: int = 50,
+    tol: float = 0.0,
+) -> tuple[Array, Array]:
+    """Lazy CRN oracle — reuses a stale Hessian from *z_snapshot*.
+
+    Parameters
+    ----------
+    tol : float
+        Adaptive secular-equation convergence tolerance.
+        See :func:`crn_oracle` for details.
+    """
+    x_ss, y_ss = _split(z_snapshot, problem.dim_x)
+    g = problem.operator_F(z_bar)
+    H = _build_jacobian(problem, x_ss, y_ss)
+    d = z_bar.shape[0]
+    dtype = z_bar.dtype
+    eye = jnp.eye(d, dtype=dtype)
+    tiny = jnp.asarray(1e-12, dtype=dtype)
+
+    if tol > 0:
+        def cond(state):
+            lam, _z, i, prev_lam = state
+            change = jnp.abs(lam - prev_lam)
+            return (i < n_iters) & (change > jnp.maximum(tol * lam, tiny))
+
+        def body(state):
+            lam, _z, i, _prev = state
+            delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+            z_new = _project_z(problem, z_bar + delta)
+            d_eff = z_new - z_bar
+            return ((gamma / 2.0) * jnp.linalg.norm(d_eff), z_new, i + 1, lam)
+
+        lam, z, _i, _p = jax.lax.while_loop(
+            cond, body,
+            (jnp.zeros(()), z_bar, 0, jnp.asarray(-1.0, dtype=dtype)),
+        )
+    else:
+        def body(i, state):
+            lam, z = state
+            delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+            z_new = _project_z(problem, z_bar + delta)
+            d_eff = z_new - z_bar
+            return (gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
+
+        lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
+
     d_eff = z - z_bar
     u = -(g + H @ d_eff + lam * d_eff)
     return z, u

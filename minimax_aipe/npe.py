@@ -74,20 +74,22 @@ def project_z(problem, z: Array) -> Array:
 def make_crn_npe_oracle(
     problem,
     gamma: float,
+    tol: float = 0.0,
 ) -> NPEOracle:
     """Create a CRN-based cubic-regularised Newton oracle for NPE.
-
-    Wraps :func:`~minimax_aipe.oracles.crn_oracle` with baked-in
-    ``problem`` and ``gamma`` parameters.
 
     Parameters
     ----------
     problem : MinimaxProblem
-    gamma   : float — cubic regularisation (typically ≈ 2ρ)
+    gamma : float — cubic regularisation (typically ≈ 2ρ)
+    tol : float — secular-equation convergence tolerance.
+        When > 0, the CRN solver exits early once the secular equation
+        residual converges, reducing wasted iterations when the subproblem
+        is easy.
     """
 
     def oracle(z: Array) -> tuple[Array, Array]:
-        return crn_oracle(problem, z, gamma)
+        return crn_oracle(problem, z, gamma, tol=tol)
 
     return oracle
 

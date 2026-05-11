@@ -141,6 +141,7 @@ def make_lazy_crn_npe_oracle(
     n_iters: int = 50,
     *,
     return_F: bool = False,
+    tol: float = 0.0,
 ) -> LENOracle:
     """Create a lazy-CRN oracle for LEN (Definition E.1).
 
@@ -162,6 +163,8 @@ def make_lazy_crn_npe_oracle(
     return_F : bool
         If ``True``, the oracle also returns ``F_half = F(z_half)``, saving a
         separate operator evaluation inside :func:`len_loop`.
+    tol : float
+        Secular-equation convergence tolerance (forwarded to :func:`~minimax_aipe.oracles.lazy_crn_oracle`).
 
     Returns
     -------
@@ -177,6 +180,7 @@ def make_lazy_crn_npe_oracle(
             z_snapshot=z_snapshot,
             gamma=gamma,
             n_iters=n_iters,
+            tol=tol,
         )
         if return_F:
             F_half = problem.operator_F(z_half)
@@ -496,38 +500,33 @@ def len_restart(
 ) -> Union[tuple[Array, int], LENResult]:
     _validate_params(T=T, m=m, gamma=gamma, S=S)
 
-    # ── Pure body: carry is just the iterate (single Array) ──────────
-    #    We intentionally use return_full=False so that _len_scan_loop
-    #    returns (z_out, T) — a concrete tuple with no traced-to-Python
-    #    int()/bool() conversions.  This is required because fori_loop
-    #    traces the body function, and int() on a traced int32 array
-    #    raises ConcretizationTypeError.
-    def _body_fn(_epoch: int, z: Array) -> Array:
-        z_out, _calls = _len_scan_loop(
+    z = z0
+    total_calls = 0
+
+    for _ in range(S):
+        result = _len_scan_loop(
             oracle, F_fn, z, T, gamma, m,
             project=project, fn=fn,
             eta_floor=eta_floor, max_norm=max_norm,
             safety_checks=safety_checks,
-            return_full=False,       # ← key: no LENResult, no int()
+            return_full=False,
         )
-        return z_out
+        z, calls = result  # type: ignore[misc]
+        total_calls += calls
 
-    z_final = jax.lax.fori_loop(0, S, _body_fn, z0)
-
-    # ── Diagnostics computed eagerly (post-trace) ────────────────────
     if return_full:
-        final_grad = F_fn(z_final)
+        final_grad = F_fn(z)
         return LENResult(
-            z=z_final,
-            oracle_calls=S * T,
-            iterations=S * T,
+            z=z,
+            oracle_calls=total_calls,
+            iterations=total_calls,
             snapshot_refreshes=S * ((T + m - 1) // m),
             num_rejected=0,
             final_gradient_norm=jnp.linalg.norm(final_grad),
             converged=True,
         )
 
-    return z_final, S * T
+    return z, total_calls
 
 
 # ═══════════════════════════════════════════════════════════════════════════
