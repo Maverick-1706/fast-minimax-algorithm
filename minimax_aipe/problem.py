@@ -105,10 +105,11 @@ class MinimaxProblem:
         else:
             self.hessian_f = hessian_f
 
-        # ── Shape validation for user-supplied grad_f ────────────────────
+        # ── Shape and Convex-Concavity Validation ────────────────────────
+        _test_x = jnp.zeros(dim_x)
+        _test_y = jnp.zeros(dim_y)
+
         if grad_f is not None:
-            _test_x = jnp.zeros(dim_x)
-            _test_y = jnp.zeros(dim_y)
             _gx, _gy = grad_f(_test_x, _test_y)
             if _gx.shape != (dim_x,):
                 raise ValueError(
@@ -120,6 +121,33 @@ class MinimaxProblem:
                     f"grad_f second component (-grad_y f) has shape {_gy.shape}, "
                     f"expected ({dim_y},)"
                 )
+
+        try:
+            H = self.hessian_f(_test_x, _test_y)
+            H_xx = H[0][0]
+            H_yy = H[1][1]
+            
+            eig_xx = jnp.linalg.eigvalsh((H_xx + H_xx.T) / 2.0)
+            min_eig_xx = float(jnp.min(eig_xx))
+            if min_eig_xx < -1e-5:
+                import warnings
+                warnings.warn(
+                    f"Problem may not be convex in x. Min eigenvalue of H_xx at origin is {min_eig_xx:.2e}."
+                )
+                
+            eig_yy = jnp.linalg.eigvalsh((H_yy + H_yy.T) / 2.0)
+            max_eig_yy = float(jnp.max(eig_yy))
+            if max_eig_yy > 1e-5:
+                import warnings
+                warnings.warn(
+                    f"Problem may not be concave in y. Max eigenvalue of H_yy at origin is {max_eig_yy:.2e}."
+                )
+        except Exception as e:
+            if "Tracer" in str(type(e)) or "tracer" in str(e).lower():
+                pass # Ignore JAX tracing concretization errors
+            else:
+                import warnings
+                warnings.warn(f"Could not validate convex-concavity at origin: {e}")
 
     def grad_f(self, x: Array, y: Array) -> tuple[Array, Array]:
         """Return (∇_x f, -∇_y f) as a tuple."""

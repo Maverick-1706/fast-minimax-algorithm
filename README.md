@@ -376,4 +376,3 @@ The **Architecture** section mirrors the exact algorithm numbering from the pape
 
 The **Module Reference** table at the bottom is the "look up which file to import from" cheat sheet — this is the deeper namespace in action.
 
-Want to move on to the example scripts, or is there anything in the README you'd want adjusted first?

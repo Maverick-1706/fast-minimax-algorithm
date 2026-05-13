@@ -205,11 +205,14 @@ def _len_scan_loop(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], Array]] = None,
     *,
+    adaptive_refresh: bool = False,
+    staleness_threshold: float = 0.1,
     eta_floor: float = _DEFAULT_ETA_FLOOR,
     max_norm: float = _DEFAULT_MAX_NORM,
     safety_checks: bool = True,
     return_full: bool = False,
 ) -> Union[tuple[Array, int], LENResult]:
+
     """Algorithm 8 — Lazy Extra Newton (single epoch).
 
     Identical structure to :func:`minimax_aipe.npe.npe` except:
@@ -255,6 +258,16 @@ def _len_scan_loop(
         Enable NaN/Inf guards and norm-explosion detection.
     return_full : bool
         If ``True``, return :class:`LENResult` instead of ``(z_out, calls)``.
+    adaptive_refresh : bool
+        When ``True``, the Hessian snapshot is refreshed early whenever
+        ``‖z_t − z_snapshot‖`` exceeds ``staleness_threshold``, in addition
+        to the regular every-*m*-steps schedule.  ``m`` then serves as the
+        *maximum* reuse interval (hard upper bound) rather than the fixed
+        interval.  Default ``False`` (original behavior).
+    staleness_threshold : float
+        Threshold on ``‖z_t − z_snapshot‖`` above which the snapshot is
+        refreshed early (only used when ``adaptive_refresh=True``).
+        Default ``0.1``.
 
     Returns
     -------
@@ -303,22 +316,41 @@ def _len_scan_loop(
     def step(carry: LENState, _unused):
         s = carry
 
-        # ── snapshot schedule: refresh every m steps ──────────────────
-        # π(t) = t − (t % m).  When t % m == 0 a new block starts and we
-        # replace the snapshot with the current iterate.
+                # ── snapshot schedule: periodic + optional adaptive refresh ──
+        # Periodic: π(t) = t − (t % m).  When t % m == 0 a new block
+        # starts and we replace the snapshot with the current iterate.
+        # This is the hard upper bound — the snapshot is never more
+        # than m steps stale.
+        #
+        # Adaptive: when enabled, the snapshot is also refreshed early
+        # if the iterate has drifted too far from it (‖z − z_snapshot‖
+        # exceeds ``staleness_threshold``).  This prevents divergence
+        # in rapidly-changing landscapes while avoiding unnecessary
+        # Hessian recomputations when the old one is still good.
+        periodic_refresh = (s.t % m) == 0
+
+        if adaptive_refresh:
+            staleness = jnp.linalg.norm(s.z - s.z_snapshot)
+            staleness_exceeded = staleness > jnp.asarray(
+                staleness_threshold, dtype=dtype
+            )
+            refresh = periodic_refresh | staleness_exceeded
+        else:
+            refresh = periodic_refresh
+
         # Use jax.lax.cond so that only one branch is traced — important
         # when snapshot objects grow (cached factorisations, structured
         # state, distributed sharding).
-        in_new_block = (s.t % m) == 0
         z_snapshot = jax.lax.cond(
-            in_new_block,
+            refresh,
             lambda _: s.z,
             lambda _: s.z_snapshot,
             operand=None,
         )
         snapshot_refreshes = s.snapshot_refreshes + jnp.where(
-            in_new_block, 1, 0
+            refresh, 1, 0
         )
+
 
         # ── Line 2: lazy cubic-regularised Newton step ───────────────
         result = oracle(s.z, z_snapshot)
@@ -428,7 +460,7 @@ def _len_scan_loop(
 @partial(
     jax.jit,
     static_argnums=(0, 1, 3, 5, 6, 7),
-    static_argnames=("safety_checks", "return_full"),
+    static_argnames=("adaptive_refresh", "safety_checks", "return_full"),
 )
 def len(
     oracle: LENOracle,
@@ -440,6 +472,8 @@ def len(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], Array]] = None,
     *,
+    adaptive_refresh: bool = False,
+    staleness_threshold: float = 0.1,
     eta_floor: float = _DEFAULT_ETA_FLOOR,
     max_norm: float = _DEFAULT_MAX_NORM,
     safety_checks: bool = True,
@@ -460,6 +494,8 @@ def len(
     return _len_scan_loop(
         oracle, F_fn, z0, T, gamma, m,
         project=project, fn=fn,
+        adaptive_refresh=adaptive_refresh,
+        staleness_threshold=staleness_threshold,
         eta_floor=eta_floor, max_norm=max_norm,
         safety_checks=safety_checks, return_full=return_full,
     )
@@ -477,6 +513,8 @@ def len_loop(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], Array]] = None,
     *,
+    adaptive_refresh: bool = False,
+    staleness_threshold: float = 0.1,
     eta_floor: float = _DEFAULT_ETA_FLOOR,
     max_norm: float = _DEFAULT_MAX_NORM,
     safety_checks: bool = True,
@@ -486,6 +524,8 @@ def len_loop(
     return _len_scan_loop(
         oracle, F_fn, z0, T, gamma, m,
         project=project, fn=fn,
+        adaptive_refresh=adaptive_refresh,
+        staleness_threshold=staleness_threshold,
         eta_floor=eta_floor, max_norm=max_norm,
         safety_checks=safety_checks, return_full=return_full,
     )
@@ -506,6 +546,8 @@ def len_restart(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], Array]] = None,
     *,
+    adaptive_refresh: bool = False,
+    staleness_threshold: float = 0.1,
     eta_floor: float = _DEFAULT_ETA_FLOOR,
     max_norm: float = _DEFAULT_MAX_NORM,
     safety_checks: bool = True,
@@ -520,6 +562,8 @@ def len_restart(
         result = _len_scan_loop(
             oracle, F_fn, z, T, gamma, m,
             project=project, fn=fn,
+            adaptive_refresh=adaptive_refresh,
+            staleness_threshold=staleness_threshold,
             eta_floor=eta_floor, max_norm=max_norm,
             safety_checks=safety_checks,
             return_full=False,
