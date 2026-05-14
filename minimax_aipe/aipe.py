@@ -157,7 +157,7 @@ def aipe(
     z_out : Array
         Approximate minimiser.
     oracle_calls : int
-        Number of proximal oracle invocations (= T + 1).
+        Number of proximal oracle invocations (= T).
     """
     dtype = z0.dtype
     tiny = jnp.asarray(1e-12, dtype=dtype)
@@ -165,7 +165,7 @@ def aipe(
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
 
     # ── initial proximal oracle call (before loop) ────────────────────
-    z_tilde_0, _u_0 = prox_oracle(z0)
+    z_tilde_0, u_0 = prox_oracle(z0)
     lam_0 = gamma * jnp.linalg.norm(z_tilde_0 - z0)
     lam_prime_init = jnp.maximum(lam_0, tiny)
 
@@ -176,7 +176,7 @@ def aipe(
         lam_prime=lam_prime_init,
     )
 
-    def step(carry: AIPEState, _unused):
+    def step(carry: AIPEState, t):
         s = carry
 
         # line 5 — solve  2λ'(a')² − a' − A = 0  (positive root)
@@ -192,8 +192,16 @@ def aipe(
         w_a = a_prime / jnp.maximum(A_prime, tiny)
         z_bar = w_A * s.z + w_a * s.v
 
-        # proximal oracle
-        z_tilde, u = prox_oracle(z_bar)
+        # Lines 8-10: reuse the initial prox call at t=0.  Algorithm 1
+        # calls iProx before the loop, then only calls it inside the loop
+        # when t > 0.
+        def initial_prox(_):
+            return z_tilde_0, u_0
+
+        def loop_prox(_):
+            return prox_oracle(z_bar)
+
+        z_tilde, u = jax.lax.cond(t == 0, initial_prox, loop_prox, operand=None)
         lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
 
         # lines 12-21 — conditional update (accept / reject)
@@ -204,6 +212,7 @@ def aipe(
                 A_prime,                # A_new = A + a'
                 z_tilde,                # z_new = z̃_{t+1}
                 s.lam_prime / 2.0,      # λ'_{t+1} = λ'_t / 2
+                a_prime,                # a_{t+1}
             )
 
         def reject_fn(_):
@@ -214,17 +223,20 @@ def aipe(
                 (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
                 + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
             )
-            return (A_r, z_r, 2.0 * s.lam_prime)  # λ'_{t+1} = 2·λ'_t
+            return (
+                A_r,
+                z_r,
+                2.0 * s.lam_prime,      # λ'_{t+1} = 2·λ'_t
+                a_r,                    # a_{t+1}
+            )
 
-        A_new, z_new, lam_prime_new = jax.lax.cond(
+        A_new, z_new, lam_prime_new, a_step = jax.lax.cond(
             accept, accept_fn, reject_fn, operand=None,
         )
 
-        # lines 22-23 — v-update  (always uses a', per paper line 22:
-        #   "v_{t+1} = v_t − a'(g_{t+1} + u_{t+1})"
-        # — NOT the possibly-scaled a_r from the reject branch.)
+        # Lines 22-23: v-update with the accepted/scaled a_{t+1}.
         g = grad_fn(z_tilde)
-        v_new = s.v - a_prime * (g + u)
+        v_new = s.v - a_step * (g + u)
         if project is not None:
             v_new = project(v_new)
 
@@ -234,7 +246,9 @@ def aipe(
         # accumulate candidates for output selection
         return new_state, (z_tilde, z_new)
 
-    final_state, (all_z_tilde, all_z) = jax.lax.scan(step, init, length=T)
+    final_state, (all_z_tilde, all_z) = jax.lax.scan(
+        step, init, jnp.arange(T, dtype=jnp.int32)
+    )
 
     # ── line 25 — output selection ────────────────────────────────────
     if fn is not None:
@@ -247,8 +261,7 @@ def aipe(
     else:
         z_out = final_state.z
 
-    # T scan steps + 1 initial proximal call
-    return z_out, T + 1
+    return z_out, T
 
 
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
@@ -305,4 +318,3 @@ __all__ = [
     "aipe_restart",
     "make_crn_prox_oracle",
 ]
-

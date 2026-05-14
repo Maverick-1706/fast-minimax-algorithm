@@ -1,0 +1,249 @@
+"""Export utilities for benchmark results.
+
+Every run produces machine-readable output with full metadata (seed, dims, ε,
+hardware, JAX version, commit hash).
+"""
+
+from __future__ import annotations
+
+import csv
+import datetime
+import io
+import json
+import os
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
+import jax
+
+
+# ── Metadata ──────────────────────────────────────────────────────────────
+
+
+def _git_info() -> dict[str, str]:
+    """Capture git commit hash and dirty flag."""
+    info: dict[str, str] = {}
+    try:
+        info["commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        info["short_commit"] = info["commit"][:8]
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain"], stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        info["dirty"] = bool(dirty)
+    except Exception:
+        info["commit"] = "unknown"
+        info["short_commit"] = "unknown"
+        info["dirty"] = "unknown"
+    return info
+
+
+def collect_metadata(
+    *,
+    epsilon: float,
+    n_repeats: int,
+    seed: int | None,
+    section: str,
+    dims: str | None,
+    names: str | None,
+    quick: bool,
+    problems: list[dict],
+) -> dict:
+    """Collect environment and run metadata.
+
+    Returns a dict suitable for JSON serialisation.
+    """
+    devices = []
+    for d in jax.local_devices():
+        dev: dict = {
+            "device_kind": getattr(d, "device_kind", "unknown"),
+            "platform": d.platform,
+            "id": d.id,
+        }
+        try:
+            dev["memory_limit"] = d.memory_limit()
+        except Exception:
+            pass
+        devices.append(dev)
+
+    git = _git_info()
+
+    return {
+        "timestamp": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
+        "jax_version": jax.__version__,
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "devices": devices,
+        "jax_platforms": os.environ.get("JAX_PLATFORMS", "(default)"),
+        "git": git,
+        "run": {
+            "epsilon": epsilon,
+            "repeats": n_repeats,
+            "seed": seed,
+            "quick": quick,
+            "section": section,
+            "dims": dims,
+            "names": names,
+        },
+        "problems": [{"name": p["name"], "dim": p["dim"]} for p in problems],
+    }
+
+
+def write_metadata(meta: dict, path: str = "metadata.json") -> None:
+    """Write metadata JSON to *path*."""
+    with open(path, "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+
+
+# ── Flattening ────────────────────────────────────────────────────────────
+
+
+def flatten_speed_rows(rows: list[dict]) -> list[dict]:
+    """Flatten nested timing dicts into flat dicts for CSV/JSON export."""
+    flat = []
+    for r in rows:
+        base = {"name": r["name"], "dim": r["dim"]}
+        for solver in ("aipe_npe", "aipe_len", "eg", "gda"):
+            t = r[solver]
+            lo, hi = t.get("ci_95", (0.0, 0.0))
+            base[f"{solver}_mean"] = t["mean"]
+            base[f"{solver}_std"] = t.get("std", 0.0)
+            base[f"{solver}_ci_lo"] = lo
+            base[f"{solver}_ci_hi"] = hi
+            gap = t.get("gap", None)
+            base[f"{solver}_gap"] = float(gap) if gap is not None else None
+            base[f"{solver}_iterations"] = t.get("iterations", None)
+            base[f"{solver}_crn_calls"] = t.get("oracles", {}).get("crn_calls", None)
+            base[f"{solver}_grad_calls"] = t.get("oracles", {}).get("grad_calls", None)
+            base[f"{solver}_converged"] = t.get("converged", None)
+        flat.append(base)
+    return flat
+
+
+def flatten_jit_rows(rows: list[dict]) -> list[dict]:
+    flat = []
+    for r in rows:
+        jit = r["jit"]
+        eager = r["eager"]
+        jit_lo, jit_hi = jit.get("ci_95", (0.0, 0.0))
+        eager_lo, eager_hi = eager.get("ci_95", (0.0, 0.0))
+        flat.append({
+            "name": r["name"], "dim": r["dim"],
+            "jit_mean": jit["mean"], "jit_std": jit.get("std", 0.0),
+            "jit_ci_lo": jit_lo, "jit_ci_hi": jit_hi,
+            "eager_mean": eager["mean"], "eager_std": eager.get("std", 0.0),
+            "eager_ci_lo": eager_lo, "eager_ci_hi": eager_hi,
+            "speedup": r["speedup"],
+        })
+    return flat
+
+
+def flatten_memory_rows(rows: list) -> list[dict]:
+    flat = []
+    for r in rows:
+        d = {"name": r.name, "dim": r.dim, "peak_mb": r.peak_mb, "current_mb": r.current_mb}
+        if r.device_memory:
+            d["device_peak_mb"] = r.device_memory.get("peak_bytes_in_use", 0) / (1024 * 1024)
+        flat.append(d)
+    return flat
+
+
+def flatten_convergence_rows(rows: list[dict]) -> list[dict]:
+    flat = []
+    for r in rows:
+        flat.append({
+            "name": r["name"],
+            "dim": r["dim"],
+            "epsilon": r["epsilon"],
+            "npe_gap": r["npe_gap"],
+            "npe_oracle_calls": r["npe_oracle_calls"],
+            "len_gap": r["len_gap"],
+            "len_oracle_calls": r["len_oracle_calls"],
+            "eg_gap": r["eg_gap"],
+            "eg_grad_calls": r["eg_grad_calls"],
+        })
+    return flat
+
+
+def _flatten_dict(d: dict, parent_key: str = "", sep: str = "_") -> dict:
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
+def flatten_scaling_rows(rows: list[dict]) -> list[dict]:
+    return [_flatten_dict(r) for r in rows]
+
+
+def flatten_ablation_rows(rows: list[dict]) -> list[dict]:
+    return [_flatten_dict(r) for r in rows]
+
+
+# ── Writers ───────────────────────────────────────────────────────────────
+
+
+def _default_json(obj):
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            return obj.tolist()
+    return str(obj)
+
+
+def write_json(data: dict, path: str | None) -> None:
+    """Write JSON to file or stdout."""
+    payload = json.dumps(data, indent=2, default=_default_json)
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(payload)
+        print(f"  JSON written to {path}")
+    else:
+        print(payload)
+
+
+def write_csv(data: dict[str, list[dict]], path: str | None) -> None:
+    """Write CSV to file or stdout.  Each section becomes a '# section_name' header."""
+    if path:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    buf = io.StringIO() if path is None else open(path, "w", newline="")
+    try:
+        for section_name, rows in data.items():
+            if not rows or section_name == "metadata":
+                continue
+            if isinstance(rows, dict):
+                rows = [rows]
+            buf.write(f"# {section_name}\n")
+            if rows:
+                writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+            buf.write("\n")
+
+        if path:
+            print(f"  CSV written to {path}")
+        else:
+            print(buf.getvalue())
+    finally:
+        buf.close()
+
+
+def export_results(data: dict, fmt: str, path: str | None) -> None:
+    """Dispatch to the appropriate writer."""
+    if fmt == "json":
+        write_json(data, path)
+    elif fmt == "csv":
+        write_csv(data, path)
+    else:
+        raise ValueError(f"Unknown export format {fmt!r}; expected 'csv' or 'json'.")

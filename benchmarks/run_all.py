@@ -1,7 +1,14 @@
 """CLI entry point for benchmarks.
 
 Usage:
-    python -m benchmarks.run_all [--epsilon 0.01] [--dims 2,5,10] [--quick] [--section speed|memory|jit|scaling]
+    python -m benchmarks.run_all
+    python -m benchmarks.run_all --quick
+    python -m benchmarks.run_all --section speed --dims 2,5,10 --names bilinear,quadratic
+    python -m benchmarks.run_all --output csv --seed 42
+    python -m benchmarks.run_all --output json:results.json --seed 42 --repeats 5
+    python -m benchmarks.run_all --section convergence --names bilinear --dims 5
+
+Sections: speed, jit, scaling, memory, convergence, ablation, all.
 """
 
 from __future__ import annotations
@@ -12,19 +19,19 @@ import time
 
 import jax
 
-from benchmarks.problems import get_all_problems, list_problems
-from benchmarks.time_solve import (
-    benchmark_jit_vs_eager,
-    benchmark_scaling,
-    benchmark_solver_comparison,
-    format_jit_table,
-    format_scaling_table,
-    format_solver_comparison_table,
+from benchmarks.export import (
+    collect_metadata,
+    export_results,
+    flatten_ablation_rows,
+    flatten_convergence_rows,
+    flatten_jit_rows,
+    flatten_memory_rows,
+    flatten_scaling_rows,
+    flatten_speed_rows,
+    write_json,
+    write_metadata,
 )
-from benchmarks.memory_solve import (
-    benchmark_memory_scaling,
-    format_memory_table,
-)
+from benchmarks.problems import get_all_problems, get_problem
 
 
 def _header(title: str) -> str:
@@ -34,58 +41,183 @@ def _header(title: str) -> str:
 
 def _platform_info() -> str:
     import platform
-    jax_version = jax.__version__
-    devices = [str(d) for d in jax.local_devices()]
     return (
         f"Platform: {platform.platform()}\n"
         f"Python: {sys.version.split()[0]}\n"
-        f"JAX: {jax_version}\n"
-        f"Devices: {', '.join(devices)}"
+        f"JAX: {jax.__version__}\n"
+        f"Devices: {', '.join(str(d) for d in jax.local_devices())}"
     )
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Benchmark suite for Minimax-AIPE solver.")
+    parser.add_argument("--epsilon", type=float, default=0.01, help="Target duality gap (default: 0.01).")
+    parser.add_argument("--dims", type=str, default=None, help="Comma-separated dimensions.")
+    parser.add_argument("--quick", action="store_true", help="Reduced set: 1 problem, 1 repeat, dim=2.")
+    parser.add_argument("--section", type=str, default="all",
+                        choices=["all", "speed", "jit", "scaling", "memory", "convergence", "ablation"],
+                        help="Which benchmark section to run.")
+    parser.add_argument("--names", type=str, default=None, help="Comma-separated problem names.")
+    parser.add_argument("--repeats", type=int, default=None, help="Timed repeats (default: 5, or 1 with --quick).")
+    parser.add_argument("--seed", type=int, default=None, help="Deterministic seed for all problem constructors.")
+    parser.add_argument("--output", type=str, default=None, metavar="FMT[:PATH]",
+                        help="Export: 'csv', 'json', 'csv:out.csv', 'json:out.json'.")
+    return parser.parse_args()
+
+
+def _run_speed(problems, epsilon, n_repeats, export_data):
+    from benchmarks.time_solve import benchmark_solver_comparison, format_solver_comparison_table
+    print(_header("Speed: Solver Comparison"))
+    t0 = time.perf_counter()
+    speed_rows = benchmark_solver_comparison(problems, epsilon=epsilon, n_repeats=n_repeats)
+    elapsed = time.perf_counter() - t0
+    print()
+    print(format_solver_comparison_table(speed_rows))
+    print(f"\n  Total time: {elapsed:.1f}s\n")
+    export_data["speed"] = flatten_speed_rows(speed_rows)
+
+
+def _run_jit(problems, epsilon, n_repeats, export_data):
+    from benchmarks.time_solve import benchmark_jit_vs_eager, format_jit_table
+    print(_header("JIT vs Eager"))
+    jit_problems = problems[:3] if len(problems) > 3 else problems
+    jit_rows = []
+    for prob_dict in jit_problems:
+        name = prob_dict.get("name", "?")
+        dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+        print(f"  JIT vs eager: {name} dim={dim} ...")
+        r = benchmark_jit_vs_eager(prob_dict, epsilon=epsilon, n_repeats=n_repeats)
+        jit_rows.append({"name": name, "dim": dim, **r})
+    print()
+    print(format_jit_table(jit_rows))
+    print()
+    export_data["jit_vs_eager"] = flatten_jit_rows(jit_rows)
+
+
+def _run_scaling(epsilon, n_repeats, seed, export_data):
+    from benchmarks.scaling import scale_dimension, scale_rho, scale_condition_number, format_scaling_table
+    print(_header("Scaling Analysis"))
+
+    scale_dims = [2, 5, 10, 20]
+
+    # Dimension scaling on diagonal_saddle
+    print("  diagonal_saddle (dimension):")
+    rows = scale_dimension("diagonal_saddle", scale_dims, epsilon=epsilon,
+                           n_repeats=max(1, n_repeats // 2), seed=seed)
+    print(format_scaling_table(rows))
+    export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
+    print()
+
+    # Condition number scaling
+    print("  ill_conditioned_quadratic (condition number sweep):")
+    cond_rows = scale_condition_number("ill_quadratic", [1e1, 1e2, 1e3, 1e4], dim=10, epsilon=epsilon,
+                                       n_repeats=max(1, n_repeats // 2), seed=seed)
+    print(format_scaling_table(cond_rows))
+    export_data.setdefault("scaling_cond", []).extend(flatten_scaling_rows(cond_rows))
+    print()
+
+    # Dimension scaling on bilinear
+    print("  bilinear (dimension):")
+    rows = scale_dimension("bilinear", scale_dims, epsilon=epsilon,
+                           n_repeats=max(1, n_repeats // 2), seed=seed)
+    print(format_scaling_table(rows))
+    export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
+    print()
+
+    # ρ scaling
+    print("  nonzero_rho (ρ sweep):")
+    rho_rows = scale_rho([0.1, 0.5, 1.0, 5.0, 10.0], dim=10, epsilon=epsilon,
+                         n_repeats=max(1, n_repeats // 2), seed=seed)
+    header = f"{'ρ':>8}  {'NPE (s)':>10}  {'NPE calls':>10}"
+    print(header)
+    print("─" * len(header))
+    for r in rho_rows:
+        print(f"{r['rho']:>8.1f}  {r['npe_time']:>10.4f}  {r['npe_calls']:>10}")
+    export_data.setdefault("scaling_rho", []).extend(rho_rows)
+    print()
+
+
+def _run_memory(problems, epsilon, export_data):
+    from benchmarks.memory import benchmark_memory_scaling, format_memory_table
+    print(_header("Memory Usage"))
+    mem_problems = problems[:4] if len(problems) > 4 else problems
+    mem_results = benchmark_memory_scaling(mem_problems, epsilon=epsilon)
+    print(format_memory_table(mem_results))
+    print()
+    export_data["memory"] = flatten_memory_rows(mem_results)
+
+
+def _run_convergence(problems, epsilon, export_data):
+    from benchmarks.convergence import sweep_epsilon, format_convergence_table
+    print(_header("Convergence: ε-Sweep"))
+    epsilons = [0.1, 0.05, 0.01, 0.005]
+    for prob_dict in problems[:2]:
+        name = prob_dict.get("name", "?")
+        dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+        print(f"  {name} dim={dim}:")
+        rows = sweep_epsilon(prob_dict, epsilons)
+        print(format_convergence_table(rows))
+        print()
+        export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
+
+
+def _run_ablation(problems, epsilon, n_repeats, export_data):
+    from benchmarks.ablation import (
+        ablation_m_lazy,
+        ablation_npe_vs_len,
+        ablation_npe_t_factor,
+        format_ablation_m_table,
+        format_ablation_t_table,
+    )
+    print(_header("Ablation"))
+
+    # m_lazy sweep
+    prob_dict = problems[0]
+    name = prob_dict.get("name", "?")
+    dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+    print(f"  m_lazy sweep on {name} dim={dim}:")
+    m_rows = ablation_m_lazy(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+    print(format_ablation_m_table(m_rows))
+    export_data.setdefault("ablation_m", []).extend(m_rows)
+    print()
+
+    # T_factor sweep
+    print(f"  T_factor sweep on {name} dim={dim}:")
+    t_rows = ablation_npe_t_factor(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+    print(format_ablation_t_table(t_rows))
+    export_data.setdefault("ablation_t", []).extend(flatten_ablation_rows(t_rows))
+    print()
+
+    # NPE vs LEN head-to-head
+    print("  NPE vs LEN head-to-head:")
+    for prob_dict in problems[:3]:
+        r = ablation_npe_vs_len(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+        npe_t = r["npe"]["time_mean"]
+        len_t = r["len"]["time_mean"]
+        print(f"    {r['name']:18s} dim={r['dim']:>4}  "
+              f"NPE: {npe_t:.4f}s ({r['npe']['oracle_calls']} calls)  "
+              f"LEN: {len_t:.4f}s ({r['len']['oracle_calls']} calls)")
+        export_data.setdefault("ablation_compare", []).append(r)
+    print()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Benchmark suite for Minimax-AIPE solver."
-    )
-    parser.add_argument(
-        "--epsilon", type=float, default=0.01,
-        help="Target duality gap (default: 0.01).",
-    )
-    parser.add_argument(
-        "--dims", type=str, default=None,
-        help="Comma-separated dimensions to test (default: per-problem defaults).",
-    )
-    parser.add_argument(
-        "--quick", action="store_true",
-        help="Reduced set: 2 problems, 1 repeat, smaller dims.",
-    )
-    parser.add_argument(
-        "--section", type=str, default="all",
-        choices=["all", "speed", "jit", "scaling", "memory"],
-        help="Which benchmark section to run.",
-    )
-    parser.add_argument(
-        "--names", type=str, default=None,
-        help="Comma-separated problem names (default: all).",
-    )
-    parser.add_argument(
-        "--repeats", type=int, default=None,
-        help="Number of timed repeats (default: 3, or 1 with --quick).",
-    )
-    args = parser.parse_args()
+    args = _parse_args()
 
-    # ── Parse arguments ─────────────────────────────────────────────
-    dims = None
-    if args.dims:
-        dims = [int(d.strip()) for d in args.dims.split(",")]
-
-    names = None
-    if args.names:
-        names = [n.strip() for n in args.names.split(",")]
-
-    n_repeats = args.repeats or (1 if args.quick else 3)
+    dims = [int(d.strip()) for d in args.dims.split(",")] if args.dims else None
+    names = [n.strip() for n in args.names.split(",")] if args.names else None
+    n_repeats = args.repeats or (1 if args.quick else 5)
     epsilon = args.epsilon
+
+    output_fmt, output_path = None, None
+    if args.output:
+        parts = args.output.split(":", 1)
+        output_fmt = parts[0].strip().lower()
+        if len(parts) > 1 and parts[1].strip():
+            output_path = parts[1].strip()
+        if output_fmt not in ("csv", "json"):
+            print(f"Error: --output format must be 'csv' or 'json', got {output_fmt!r}")
+            sys.exit(1)
 
     # ── Header ──────────────────────────────────────────────────────
     print(_header("Minimax-AIPE Benchmark Suite"))
@@ -93,13 +225,17 @@ def main():
     print(f"Epsilon: {epsilon}")
     print(f"Repeats: {n_repeats}")
     print(f"Quick mode: {args.quick}")
+    if args.seed is not None:
+        print(f"Seed: {args.seed}")
+    if output_fmt:
+        print(f"Output: {output_fmt}" + (f" → {output_path}" if output_path else " → stdout"))
     print()
 
     # ── Problem zoo ─────────────────────────────────────────────────
     if args.quick:
-        problems = get_all_problems(dims=[2], names=["bilinear"])
+        problems = get_all_problems(dims=[2], names=["bilinear"], seed=args.seed)
     else:
-        problems = get_all_problems(dims=dims, names=names)
+        problems = get_all_problems(dims=dims, names=names, seed=args.seed)
 
     if not problems:
         print("No problems to benchmark. Check --dims / --names.")
@@ -110,50 +246,42 @@ def main():
         print(f"  {p['name']:22s}  dim={p['dim']}")
     print()
 
-    # ── Speed benchmarks ────────────────────────────────────────────
+    # ── Metadata ────────────────────────────────────────────────────
+    metadata = collect_metadata(
+        epsilon=epsilon, n_repeats=n_repeats, seed=args.seed,
+        section=args.section, dims=args.dims, names=args.names,
+        quick=args.quick, problems=problems,
+    )
+    write_metadata(metadata)
+    print()
+
+    # ── Collect results ─────────────────────────────────────────────
+    export_data: dict[str, list[dict]] = {"metadata": [metadata]}
+
+    # ── Sections ────────────────────────────────────────────────────
     if args.section in ("all", "speed"):
-        print(_header("Speed: Solver Comparison"))
-        t0 = time.perf_counter()
-        rows = benchmark_solver_comparison(problems, epsilon=epsilon, n_repeats=n_repeats)
-        elapsed = time.perf_counter() - t0
-        print()
-        print(format_solver_comparison_table(rows))
-        print(f"\n  Total time: {elapsed:.1f}s\n")
+        _run_speed(problems, epsilon, n_repeats, export_data)
 
-    # ── JIT vs Eager ────────────────────────────────────────────────
     if args.section in ("all", "jit"):
-        print(_header("JIT vs Eager"))
-        jit_problems = problems[:3] if len(problems) > 3 else problems
-        jit_rows = []
-        for prob_dict in jit_problems:
-            name = prob_dict.get("name", "?")
-            dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
-            print(f"  JIT vs eager: {name} dim={dim} ...")
-            r = benchmark_jit_vs_eager(prob_dict, epsilon=epsilon, n_repeats=n_repeats)
-            jit_rows.append({"name": name, "dim": dim, **r})
-        print()
-        print(format_jit_table(jit_rows))
-        print()
+        _run_jit(problems, epsilon, n_repeats, export_data)
 
-    # ── Scaling ─────────────────────────────────────────────────────
     if args.section in ("all", "scaling"):
-        print(_header("Scaling Analysis"))
-        scale_dims = [2, 5] if args.quick else [2, 5, 10, 20]
-        for ptype in ["bilinear", "quadratic"]:
-            print(f"  {ptype}:")
-            scaling_rows = benchmark_scaling(scale_dims, epsilon=epsilon, problem_type=ptype, n_repeats=max(1, n_repeats // 2))
-            print(format_scaling_table(scaling_rows))
-            print()
+        _run_scaling(epsilon, n_repeats, args.seed, export_data)
 
-    # ── Memory ──────────────────────────────────────────────────────
     if args.section in ("all", "memory"):
-        print(_header("Memory Usage"))
-        mem_problems = problems[:4] if len(problems) > 4 else problems
-        mem_results = benchmark_memory_scaling(mem_problems, epsilon=epsilon)
-        print(format_memory_table(mem_results))
-        print()
+        _run_memory(problems, epsilon, export_data)
 
-    # ── Done ────────────────────────────────────────────────────────
+    if args.section in ("all", "convergence"):
+        _run_convergence(problems, epsilon, export_data)
+
+    if args.section in ("all", "ablation"):
+        _run_ablation(problems, epsilon, n_repeats, export_data)
+
+    # ── Export ──────────────────────────────────────────────────────
+    if output_fmt:
+        print()
+        export_results(export_data, output_fmt, output_path)
+
     print(_header("Done"))
     return 0
 

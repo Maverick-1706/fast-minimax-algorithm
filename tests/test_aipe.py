@@ -148,7 +148,7 @@ class TestOracleCalls:
         Q = jnp.array([[2.0]])
         prox = make_crn_prox_oracle(lambda z: Q @ z, lambda z: Q, gamma=0.1)
         _, calls = aipe(prox, lambda z: Q @ z, jnp.array([1.0]), T=5, gamma=0.1)
-        assert calls == 6  # T + 1
+        assert calls == 5  # Algorithm 1 makes T proximal oracle calls.
 
     def test_restart_count(self):
         Q = jnp.array([[2.0]])
@@ -156,7 +156,7 @@ class TestOracleCalls:
         _, calls = aipe_restart(
             prox, lambda z: Q @ z, jnp.array([1.0]), T=5, gamma=0.1, S=3,
         )
-        assert calls == 18  # 3 × (5 + 1)
+        assert calls == 15  # 3 × T
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -225,7 +225,7 @@ class TestJIT:
 
         z_out, calls = run(prox, grad_f, jnp.array([1.0]), 5, 0.1)
         assert z_out.shape == (1,)
-        assert calls == 6
+        assert calls == 5
 
     def test_aipe_jit_twice(self):
         """Second JIT call should hit the cache (no re-trace)."""

@@ -678,10 +678,9 @@ def _iProx_Phi(
     if x_hat_warm.value is not None:
         x_hat = problem.project_x(x_hat_warm.value)
     else:
-        x_hat = _minimize_x_auto(
+        x_hat = _minimize_x(
             g_problem, y_hat,
             steps=max(20, params.T_inner * params.S_inner),
-            M_saddle=M_saddle, gamma=gamma, m_lazy=params.m_lazy,
         )
 
     gx, _ = g_problem.grad_f(x_hat, y_hat)
@@ -767,9 +766,6 @@ def _iProx_Psi(
             kernel.project_y(z0[kernel.dim_x :]),
         ])
 
-    # ── Build a JIT-stable CRN oracle using the kernel ────────────────
-    crn_oracle_fn = kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=zeta_3)
-
     def _F_h(z: Array) -> Array:
         return kernel.operator_F_h(z, x_bar, y_bar)
 
@@ -779,11 +775,172 @@ def _iProx_Psi(
     ])
     merit = lambda z: jnp.dot(_F_h(z), _F_h(z))
 
-    def _run_inner(z: Array) -> tuple[Array, int]:
-        return npe(
-            crn_oracle_fn, _F_h, z,
-            inner_T, npe_gamma, project=proj, fn=merit,
+    if M_saddle == "npe":
+        crn_oracle_fn = kernel.make_crn_oracle(
+            x_bar, y_bar, npe_gamma, tol=zeta_3
         )
+
+        def _run_inner(z: Array) -> tuple[Array, int]:
+            return npe(
+                crn_oracle_fn, _F_h, z,
+                inner_T, npe_gamma, project=proj, fn=merit,
+            )
+    elif M_saddle == "len":
+        def _run_inner(z: Array) -> tuple[Array, int]:
+            dtype = z.dtype
+            tiny = jnp.asarray(1e-12, dtype=dtype)
+            eta_floor = jnp.asarray(1e-8, dtype=dtype)
+            max_eta = jnp.asarray(1e12, dtype=dtype)
+            two_gamma = jnp.asarray(2.0 * npe_gamma, dtype=dtype)
+            m_jax = jnp.int32(params.m_lazy)
+
+            def jac_at(z_snapshot: Array) -> Array:
+                xs, ys = z_snapshot[: kernel.dim_x], z_snapshot[kernel.dim_x :]
+                return kernel.jacobian_F_h(xs, ys, x_bar, y_bar)
+
+            def crn_with_cached_hessian(
+                z_bar: Array, H_snapshot: Array
+            ) -> tuple[Array, Array]:
+                g = _F_h(z_bar)
+                d = z_bar.shape[0]
+                eye = jnp.eye(d, dtype=dtype)
+                tol_jax = jnp.asarray(zeta_3, dtype=dtype)
+
+                def cond(state):
+                    lam, _z, i, prev_lam = state
+                    change = jnp.abs(lam - prev_lam)
+                    return (i < 50) & (change > jnp.maximum(tol_jax * lam, tiny))
+
+                def body(state):
+                    lam, _z, i, _prev = state
+                    delta = jnp.linalg.solve(
+                        H_snapshot + (lam + tiny) * eye, -g
+                    )
+                    z_new = proj(z_bar + delta)
+                    d_eff = z_new - z_bar
+                    return (
+                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
+                        z_new,
+                        i + 1,
+                        lam,
+                    )
+
+                lam, z_half, _i, _prev = jax.lax.while_loop(
+                    cond,
+                    body,
+                    (
+                        jnp.zeros((), dtype=dtype),
+                        z_bar,
+                        jnp.int32(0),
+                        jnp.asarray(-1.0, dtype=dtype),
+                    ),
+                )
+                d_eff = z_half - z_bar
+                u = -(_F_h(z_bar) + H_snapshot @ d_eff + lam * d_eff)
+                return z_half, u
+
+            H0 = jac_at(z)
+            if inner_T <= params.m_lazy:
+                init_short = (
+                    z,
+                    jnp.zeros_like(z),
+                    jnp.zeros((), dtype=dtype),
+                    z,
+                    merit(z),
+                )
+
+                def step_short(carry, _unused):
+                    z_cur, weighted_sum, eta_sum, best_z, best_val = carry
+                    z_half, _u = crn_with_cached_hessian(z_cur, H0)
+                    dist = jnp.maximum(jnp.linalg.norm(z_cur - z_half), eta_floor)
+                    eta = jnp.minimum(1.0 / (two_gamma * dist), max_eta)
+                    z_new = proj(z_cur - eta * _F_h(z_half))
+
+                    val_half = merit(z_half)
+                    improve_half = val_half < best_val
+                    best_val = jnp.where(improve_half, val_half, best_val)
+                    best_z = jnp.where(improve_half, z_half, best_z)
+
+                    val_new = merit(z_new)
+                    improve_new = val_new < best_val
+                    best_val = jnp.where(improve_new, val_new, best_val)
+                    best_z = jnp.where(improve_new, z_new, best_z)
+
+                    return (
+                        z_new,
+                        weighted_sum + eta * z_half,
+                        eta_sum + eta,
+                        best_z,
+                        best_val,
+                    ), None
+
+                final_short, _ = jax.lax.scan(
+                    step_short, init_short, length=inner_T
+                )
+                return final_short[3], inner_T
+
+            init = (
+                z,                      # current iterate
+                z,                      # snapshot point
+                H0,                     # cached snapshot Jacobian
+                jnp.zeros_like(z),      # eta-weighted sum
+                jnp.zeros((), dtype=dtype),
+                z,                      # best candidate
+                merit(z),
+                jnp.int32(0),
+            )
+
+            def step(carry, _unused):
+                (
+                    z_cur,
+                    z_snapshot,
+                    H_snapshot,
+                    weighted_sum,
+                    eta_sum,
+                    best_z,
+                    best_val,
+                    t,
+                ) = carry
+
+                refresh = (t % m_jax) == 0
+                z_snapshot_new = jax.lax.cond(
+                    refresh, lambda _: z_cur, lambda _: z_snapshot, operand=None
+                )
+                H_snapshot_new = jax.lax.cond(
+                    refresh, lambda zz: jac_at(zz), lambda _: H_snapshot,
+                    z_snapshot_new,
+                )
+
+                z_half, _u = crn_with_cached_hessian(z_cur, H_snapshot_new)
+                dist = jnp.maximum(jnp.linalg.norm(z_cur - z_half), eta_floor)
+                eta = jnp.minimum(1.0 / (two_gamma * dist), max_eta)
+                z_new = proj(z_cur - eta * _F_h(z_half))
+
+                val_half = merit(z_half)
+                improve_half = val_half < best_val
+                best_val = jnp.where(improve_half, val_half, best_val)
+                best_z = jnp.where(improve_half, z_half, best_z)
+
+                val_new = merit(z_new)
+                improve_new = val_new < best_val
+                best_val = jnp.where(improve_new, val_new, best_val)
+                best_z = jnp.where(improve_new, z_new, best_z)
+
+                return (
+                    z_new,
+                    z_snapshot_new,
+                    H_snapshot_new,
+                    weighted_sum + eta * z_half,
+                    eta_sum + eta,
+                    best_z,
+                    best_val,
+                    t + 1,
+                ), None
+
+            final, _ = jax.lax.scan(step, init, length=inner_T)
+            return final[5], inner_T
+    else:
+        raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
     z_hat, epochs = _restart_jax(
         _run_inner, z0, params.S_inner,
@@ -837,6 +994,7 @@ def solve(
     M_saddle: str = "npe",
     m_lazy: int = 5,
     npe_T_factor: float = 1.0,
+    z0: Optional[Array] = None,
     verbose: bool = False,
 ) -> SolverResult:
     """Solve ``min_x max_y f(x, y)`` to approximately ``epsilon`` gap.
@@ -872,10 +1030,19 @@ def solve(
     if verbose:
         logger.setLevel(logging.DEBUG)
 
-    z0 = _initial_z(problem)
+    if z0 is None:
+        z0_start = _initial_z(problem)
+    else:
+        z0_arr = jnp.asarray(z0)
+        expected = problem.dim_x + problem.dim_y
+        if z0_arr.shape != (expected,):
+            raise ValueError(f"z0 must have shape ({expected},), got {z0_arr.shape}")
+        x0, y0 = _split(problem, z0_arr)
+        z0_start = jnp.concatenate([problem.project_x(x0), problem.project_y(y0)])
+
     z_hat, calls = _algorithm_3(
         problem, gamma, mu_x, mu_y, params.zeta_1,
-        params=params, M_saddle=M_saddle, z0=z0, verbose=verbose,
+        params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
     )
 
     eta = 1.0 / (2.0 * max(_ell(problem), _ABS_TOL))
@@ -1003,10 +1170,9 @@ def _algorithm_3(
     )
 
     # ── Recover y ≈ argmax_y f(x_hat, y) ────────────────────────────
-    y_hat = _maximize_y_auto(
+    y_hat = _maximize_y(
         problem, x_hat,
         steps=max(20, params.T_middle * params.S_middle),
-        M_saddle=M_saddle, gamma=gamma, m_lazy=params.m_lazy,
     )
 
     total_calls = counter.total
@@ -1041,15 +1207,17 @@ def _make_phi_oracle(
 ]:
     """Build approximate value, gradient, and Hessian oracles for Φ.
 
-    ``Φ(x) = max_{y∈D_y} f(x, y)``.
-    When ``M_saddle="len"``, uses ALEN (lazy Hessians) for the inner
-    maximisation over y.
+    ``Φ(x) = max_{y∈D_y} f(x, y)``.  These are auxiliary value/gradient
+    oracles evaluated many times inside AIPE; using ALEN here causes a full
+    nested accelerated second-order solve for every oracle evaluation and
+    overwhelms the LEN saddle speedup.  The paper only needs inexact
+    zeroth-/first-order oracles here, so use the lightweight first-order
+    helper regardless of the saddle solver selected for Algorithm 5.
     """
     def _solve_y(x: Array) -> Array:
-        return _maximize_y_auto(
+        return _maximize_y(
             problem, x,
             steps=max(20, params.T_middle * params.S_middle),
-            M_saddle=M_saddle, gamma=gamma, m_lazy=m_lazy,
         )
 
     def phi(x: Array):
@@ -1080,17 +1248,17 @@ def _make_psi_oracle(
     """Build approximate oracles for the convex function ``-Ψ(y; x̄)``.
 
     ``Ψ(y; x̄) = min_{x∈D_x} g(x, y; x̄)`` where ``g`` is the
-    cubic-regularised surrogate.
-    When ``M_saddle="len"``, uses ALEN (lazy Hessians) for the inner
-    minimisation over x.
+    cubic-regularised surrogate.  As for Φ, these are high-frequency
+    value/gradient oracle evaluations, not the Algorithm 5 saddle solver;
+    keep them on the lightweight first-order helper so LEN mode does not
+    spend most of its time in scalar ALEN sub-solves.
     """
     g_problem = _make_g_problem(problem, x_bar, gamma)
 
     def _solve_x(y: Array) -> Array:
-        return _minimize_x_auto(
+        return _minimize_x(
             g_problem, y,
             steps=max(20, params.T_inner * params.S_inner),
-            M_saddle=M_saddle, gamma=gamma, m_lazy=m_lazy,
         )
 
     def neg_psi(y: Array):
@@ -1283,7 +1451,7 @@ def _compute_loop_params(
     problem: MinimaxProblem,
     epsilon: float,
     gamma: float,
-    npe_T_factor: float = 1.0,
+    npe_T_factor: float = 0.5,
     m_lazy: int = 5,
 ) -> _LoopParams:
     """Compute iteration counts and accuracy parameters for all three loops.
@@ -1305,9 +1473,9 @@ def _compute_loop_params(
     zeta_1_raw = mu_y * epsilon**2 / (147.0 * ell**3 * D**2 + _ABS_TOL)
     # Keep tolerances numerically meaningful in finite precision while
     # preserving strict hierarchy: zeta_1 > zeta_2 > zeta_3.
-    zeta_1 = min(epsilon, max(zeta_1_raw, epsilon * 1e-2, 1e-8))
-    zeta_2 = min(zeta_1 * 0.1, 1e-2)
-    zeta_3 = min(zeta_2 * 0.1, 1e-3)
+    zeta_1 = min(epsilon, max(zeta_1_raw, epsilon * 0.1, 1e-6))
+    zeta_2 = min(zeta_1 * 0.2, 1e-3)
+    zeta_3 = min(zeta_2 * 0.2, 1e-4)
 
     # ── Restart counts: epsilon-based with practical cap ──────────────
     _S_CAP = 4
@@ -1343,6 +1511,15 @@ def _compute_loop_params(
         npe_T_factor * (npe_gamma / max(gamma, _ABS_TOL)) ** (4.0 / 7.0)
     ))))
 
+    # ── Adaptive m_lazy heuristic ─────────────────────────────────────
+    if m_lazy <= 0 or m_lazy == 5:
+        dim_total = problem.dim_x + problem.dim_y
+        eff_cond = ell / max(gamma, _ABS_TOL)
+        adaptive_m = int(max(3, (dim_total ** 0.5) * max(1.0, 0.5 * log2(eff_cond + 1))))
+        m_lazy = max(1, min(adaptive_m, 50))
+    else:
+        m_lazy = max(1, m_lazy)
+
     return _LoopParams(
         T_outer=T_outer,
         S_outer=S,
@@ -1353,7 +1530,7 @@ def _compute_loop_params(
         zeta_1=zeta_1,
         zeta_2=zeta_2,
         zeta_3=zeta_3,
-        m_lazy=max(1, m_lazy),
+        m_lazy=m_lazy,
     )
 
 
