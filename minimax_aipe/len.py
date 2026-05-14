@@ -632,12 +632,13 @@ def make_len_saddle_solver(
 
         oracle = make_lazy_crn_npe_oracle(h_problem, len_gamma)
 
+        from minimax_aipe._precision import ABS_TOL as _ABS_TOL
         # Empirical complexity estimate from the paper's rate analysis.
         D = max(
             max(float(h_problem.D_x or 1.0), float(h_problem.D_y or 1.0)),
-            1e-12,
+            _ABS_TOL,
         )
-        rho_ratio = sub_rho / max(len_gamma, 1e-12)
+        rho_ratio = sub_rho / max(len_gamma, _ABS_TOL)
         complexity = (D ** (12.0 / 7.0)) * (rho_ratio ** (4.0 / 7.0))
         inner_T = max(8, min(int(round(complexity)), params.T_inner))
 

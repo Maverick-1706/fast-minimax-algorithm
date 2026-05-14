@@ -8,6 +8,7 @@ if you want to test Metal.
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 """Shared fixtures for the comprehensive test suite.
 
 Problem constructors return a dict with:
@@ -15,6 +16,11 @@ Problem constructors return a dict with:
     x_star, y_star — known optimal solution
     gap_star     — known optimal gap (0.0 for most toy problems)
 """
+
+# Import the package first so _precision.py sets jax_enable_x64=False before
+# any JAX array is created by this file or downstream test modules.
+import minimax_aipe  # noqa: F401 — side-effect: FP32 config
+from minimax_aipe._precision import TEST_ATOL as ATOL, PROJ_EPS as _PROJ_EPS
 
 import jax
 import jax.numpy as jnp
@@ -36,7 +42,6 @@ def grid_gap(problem, x: Array, y: Array, n_grid: int = 64) -> float:
     Uses uniform random samples on the feasible ball for better coverage
     than normal-distributed points.
     """
-    import jax
     key = jax.random.PRNGKey(0)
     k1, k2 = jax.random.split(key)
 
@@ -47,7 +52,7 @@ def grid_gap(problem, x: Array, y: Array, n_grid: int = 64) -> float:
     y_raw = jax.random.normal(k1, (n_grid, problem.dim_y))
     y_norms = jnp.linalg.norm(y_raw, axis=1, keepdims=True)
     y_r = jax.random.uniform(k2, (n_grid, 1)) ** (1.0 / problem.dim_y)
-    y_candidates = y_raw / (y_norms + 1e-12) * y_r * (D_y / 2)
+    y_candidates = y_raw / (y_norms + _PROJ_EPS) * y_r * (D_y / 2)
     y_candidates = jax.vmap(problem.project_y)(y_candidates)
     # Include the origin and a few axis-aligned points
     origin_y = jnp.zeros((1, problem.dim_y))
@@ -58,7 +63,7 @@ def grid_gap(problem, x: Array, y: Array, n_grid: int = 64) -> float:
     x_raw = jax.random.normal(k3, (n_grid, problem.dim_x))
     x_norms = jnp.linalg.norm(x_raw, axis=1, keepdims=True)
     x_r = jax.random.uniform(k4, (n_grid, 1)) ** (1.0 / problem.dim_x)
-    x_candidates = x_raw / (x_norms + 1e-12) * x_r * (D_x / 2)
+    x_candidates = x_raw / (x_norms + _PROJ_EPS) * x_r * (D_x / 2)
     x_candidates = jax.vmap(problem.project_x)(x_candidates)
     origin_x = jnp.zeros((1, problem.dim_x))
     x_candidates = jnp.concatenate([x_candidates, origin_x], axis=0)
@@ -73,7 +78,6 @@ def make_bilinear_problem(dim: int = 3, seed: int = 42) -> dict:
 
     Solution: x* = y* = 0, gap = 0.
     """
-    import jax
     key = jax.random.PRNGKey(seed)
     A = jax.random.normal(key, (dim, dim))
     D = 2.0
@@ -108,7 +112,6 @@ def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> dict:
 
     With Q, R ≻ 0.  KKT at the origin for all valid Q, R, B.
     """
-    import jax
     k1, k2, k3 = jax.random.split(jax.random.PRNGKey(seed), 3)
 
     L_q = jax.random.normal(k1, (dim, dim))
@@ -219,8 +222,6 @@ def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, s
     Constructs A = U @ diag(σ) @ V^T with σ log-spaced from 1 to condition_number.
     Saddle at origin, gap = 0.
     """
-    import jax
-
     key = jax.random.PRNGKey(seed)
     k1, k2 = jax.random.split(key)
 
@@ -265,8 +266,6 @@ def make_ill_conditioned_quadratic(dim: int = 4, condition_number: float = 1e4, 
     R = I, B = small random.
     Saddle at origin, gap = 0.
     """
-    import jax
-
     key = jax.random.PRNGKey(seed)
     k1, k2, k3 = jax.random.split(key, 3)
 
@@ -367,7 +366,6 @@ def make_10d_quadratic(seed: int = 0) -> dict:
     Q ∈ R^{5×5}, R ∈ R^{5×5} positive definite with controlled eigenvalue
     spread.  B provides coupling between x and y.  Saddle at origin.
     """
-    import jax
     from minimax_aipe import MinimaxProblem
 
     dim = 5

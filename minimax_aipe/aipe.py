@@ -37,6 +37,7 @@ import jax.numpy as jnp
 from jax import Array
 from functools import partial
 
+from minimax_aipe._precision import TINY as _TINY_AIPE
 from minimax_aipe.oracles import crn_oracle_minimization
 
 
@@ -160,7 +161,7 @@ def aipe(
         Number of proximal oracle invocations (= T).
     """
     dtype = z0.dtype
-    tiny = jnp.asarray(1e-12, dtype=dtype)
+    tiny = jnp.asarray(_TINY_AIPE, dtype=dtype)
     one = jnp.asarray(1.0, dtype=dtype)
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
 

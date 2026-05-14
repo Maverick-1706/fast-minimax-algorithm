@@ -99,7 +99,7 @@ class TestQuadraticCorrectness:
         p = quadratic_problem
         f = p["problem"].f
         x_star, y_star = p["x_star"], p["y_star"]
-        assert abs(float(f(x_star, y_star))) < 1e-10
+        assert abs(float(f(x_star, y_star))) < 1e-4
         # f(x*, y*) = 0 for all-zero saddle
         assert p["gap_star"] == 0.0
 

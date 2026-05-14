@@ -3,8 +3,15 @@
 Solves min_x max_y f(x, y) to ε-accuracy with Õ(ε^{-4/7}) second-order
 oracle complexity via a triple-loop reduction (Chen, Liu, Luo & Zhang, 2025).
 
+Precision
+---------
+The package runs in FP32 by default (GPU-safe).  Import this module before
+creating any JAX arrays.  Set JAX_ENABLE_X64=1 in the environment before
+import to opt back into FP64.
+
 Modules
 -------
+_precision    Central FP32 numerical guard constants.
 problem       Core types: MinimaxProblem, SolverResult.
 framework     Full triple-loop solver (Algorithms 3–5) + RegularizedSubproblem.
 npe           Newton Proximal Extragradient (Algorithms 6–7).
@@ -15,6 +22,18 @@ oracles       Cubic-regularised Newton oracles + extragradient step.
 operators     Monotone operator F(z) = [∇_x f, −∇_y f] construction.
 gap           Duality gap estimation.
 """
+
+# Must be imported first — sets jax_enable_x64=False before any JAX array
+# is created by downstream modules.
+from minimax_aipe._precision import (  # noqa: F401
+    ABS_TOL,
+    CUBIC_ZERO,
+    GAP_FLOOR,
+    PROJ_EPS,
+    REG_MIN,
+    TEST_ATOL,
+    TINY,
+)
 
 from minimax_aipe.problem import MinimaxProblem, SolverResult
 
@@ -62,6 +81,14 @@ from minimax_aipe.gap import estimate_gap
 __version__ = "0.1.0"
 
 __all__ = [
+    # Precision constants (FP32 guards)
+    "ABS_TOL",
+    "CUBIC_ZERO",
+    "GAP_FLOOR",
+    "PROJ_EPS",
+    "REG_MIN",
+    "TEST_ATOL",
+    "TINY",
     # Core types
     "MinimaxProblem",
     "SolverResult",

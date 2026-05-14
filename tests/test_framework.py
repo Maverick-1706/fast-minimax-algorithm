@@ -298,7 +298,7 @@ def test_iProx_Phi_returns_proximal_point():
 
     # x_out should be in (or close to) the domain
     x_proj = problem.project_x(x_out)
-    assert jnp.allclose(x_out, x_proj, atol=1e-12)
+    assert jnp.allclose(x_out, x_proj, atol=1e-4)
 
     # The subgradient certificate should be finite
     assert jnp.all(jnp.isfinite(u_out))
@@ -371,7 +371,7 @@ def test_iProx_Psi_returns_proximal_point():
     )
 
     y_proj = problem.project_y(y_out)
-    assert jnp.allclose(y_out, y_proj, atol=1e-12)
+    assert jnp.allclose(y_out, y_proj, atol=1e-4)
     assert jnp.all(jnp.isfinite(v_out))
     assert v_out.shape == y_bar.shape
 

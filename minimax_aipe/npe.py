@@ -28,6 +28,7 @@ from jax import Array
 from functools import partial
 
 from minimax_aipe.oracles import crn_oracle
+from minimax_aipe._precision import TINY as _TINY_NPE
 
 
 # ── public types ───────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ class NPEState(NamedTuple):
 
 # Maximum allowed step size η.  The theoretical formula η = 1/(2γ·‖z−z_{t+1/2}‖)
 # can produce enormous values (≥ 1e14) when the half-step is extremely close to
-# the current iterate (dist ≤ 1e-15).  This cap prevents overflow in the
+# the current iterate (dist ≤ 1e-7).  This cap prevents overflow in the
 # subsequent z-update ``z − η·F`` while being large enough that it does not
 # affect convergence on well-conditioned problems.
 _MAX_ETA = 1e12
@@ -148,7 +149,7 @@ def npe(
         Number of oracle invocations (= T).
     """
     dtype = z0.dtype
-    tiny = jnp.asarray(1e-15, dtype=dtype)
+    tiny = jnp.asarray(_TINY_NPE, dtype=dtype)
     one = jnp.asarray(1.0, dtype=dtype)
     two_gamma = jnp.asarray(2.0 * gamma, dtype=dtype)
     max_eta = jnp.asarray(_MAX_ETA, dtype=dtype)

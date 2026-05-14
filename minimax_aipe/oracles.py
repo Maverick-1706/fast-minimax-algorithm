@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 from jax import Array
 
+from minimax_aipe._precision import TINY as _TINY
 from minimax_aipe.problem import MinimaxProblem
 
 
@@ -72,14 +73,9 @@ def _stable_lam_update(lam: Array, lam_candidate: Array) -> Array:
 
 
 def _residual(g: Array, H: Array, d_eff: Array, lam: Array,
-              out_dtype, mixed_precision: bool) -> Array:
-    """Certificate  u = −(g + H δ + λδ)  with optional float64 accumulation."""
-    rdtype = jnp.float64 if mixed_precision else out_dtype
-    g_r = g.astype(rdtype)
-    H_r = H.astype(rdtype)
-    d_r = d_eff.astype(rdtype)
-    lam_r = lam.astype(rdtype)
-    u = -(g_r + H_r @ d_r + lam_r * d_r)
+              out_dtype) -> Array:
+    """Certificate  u = −(g + H δ + λδ)  computed in ``out_dtype`` (FP32-safe)."""
+    u = -(g + H @ d_eff + lam * d_eff)
     return u.astype(out_dtype)
 
 # ── 1. extragradient step (Definition 3.3 / Eq. 3) ────────────────────────
@@ -124,7 +120,6 @@ def crn_oracle(
     gamma: float,
     n_iters: int = 50,
     tol: float = 0.0,
-    mixed_precision: bool = False,
 ) -> tuple[Array, Array]:
     """Cubic-regularised Newton oracle for a minimax problem.
 
@@ -133,13 +128,8 @@ def crn_oracle(
 
     Uses Cholesky-based linear solves for numerical stability and adds
     a secular-equation safeguard (clipping to [0.5λ, 2λ]) to prevent
-    oscillation.
-
-    Parameters
-    ----------
-    mixed_precision : bool
-        When True, linear solves use float32 with float64 residual
-        accumulation.  Recommended for d > 500.
+    oscillation.  All arithmetic is performed in the dtype of ``z_bar``
+    (FP32 on GPU, FP64 on CPU when JAX_ENABLE_X64=1).
     """
     x_bar, y_bar = _split(z_bar, problem.dim_x)
     g = problem.operator_F(z_bar)
@@ -147,26 +137,19 @@ def crn_oracle(
     d = z_bar.shape[0]
     dtype = z_bar.dtype
     eye = jnp.eye(d, dtype=dtype)
-    tiny = jnp.asarray(1e-12, dtype=dtype)
+    tiny = jnp.asarray(_TINY, dtype=dtype)
 
     def body(i, state):
         lam, z = state
-        H_reg = H + (lam + tiny) * eye
-        g_neg = -g
-        if mixed_precision:
-            H_reg = H_reg.astype(jnp.float32)
-            g_neg = g_neg.astype(jnp.float32)
-        delta = _cholesky_solve(H_reg, g_neg)
-        if mixed_precision:
-            delta = delta.astype(dtype)
+        delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
         z_new = _project_z(problem, z_bar + delta)
         d_eff = z_new - z_bar
         lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
         return _stable_lam_update(lam, lam_candidate), z_new
 
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
+    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar))
     d_eff = z - z_bar
-    u = _residual(g, H, d_eff, lam, dtype, mixed_precision)
+    u = _residual(g, H, d_eff, lam, dtype)
     return z, u
 
 
@@ -178,29 +161,22 @@ def crn_oracle_minimization(
     n_iters: int = 50,
     project: Optional[Callable[[Array], Array]] = None,
     tol: float = 0.0,
-    mixed_precision: bool = False,
 ) -> tuple[Array, Array]:
     """CRN oracle for a scalar convex objective ``min h(z)``.
 
     Uses Cholesky-based linear solves and secular-equation safeguards.
+    All arithmetic is performed in the dtype of ``z_bar`` (FP32 on GPU).
     """
     g = grad_fn(z_bar)
     H = hess_fn(z_bar)
     d = z_bar.shape[0]
     dtype = z_bar.dtype
     eye = jnp.eye(d, dtype=dtype)
-    tiny = jnp.asarray(1e-12, dtype=dtype)
+    tiny = jnp.asarray(_TINY, dtype=dtype)
 
     def body(i, state):
         lam, z = state
-        H_reg = H + (lam + tiny) * eye
-        g_neg = -g
-        if mixed_precision:
-            H_reg = H_reg.astype(jnp.float32)
-            g_neg = g_neg.astype(jnp.float32)
-        delta = _cholesky_solve(H_reg, g_neg)
-        if mixed_precision:
-            delta = delta.astype(dtype)
+        delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
         z_new = z_bar + delta
         if project is not None:
             z_new = project(z_new)
@@ -208,9 +184,9 @@ def crn_oracle_minimization(
         lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
         return _stable_lam_update(lam, lam_candidate), z_new
 
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
+    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar))
     d_eff = z - z_bar
-    u = _residual(g, H, d_eff, lam, dtype, mixed_precision)
+    u = _residual(g, H, d_eff, lam, dtype)
     return z, u
 
 
@@ -221,20 +197,17 @@ def lazy_crn_oracle(
     gamma: float,
     n_iters: int = 50,
     tol: float = 0.0,
-    mixed_precision: bool = False,
 ) -> tuple[Array, Array]:
     """Lazy CRN oracle — reuses a stale Hessian from *z_snapshot*.
 
     Uses Cholesky-based linear solves and secular-equation safeguards.
+    All arithmetic is performed in the dtype of ``z_bar`` (FP32 on GPU).
 
     Parameters
     ----------
     tol : float
         Adaptive secular-equation convergence tolerance.
         See :func:`crn_oracle` for details.
-    mixed_precision : bool
-        When True, linear solves use float32 with float64 residual
-        accumulation.  Recommended for d > 500.
     """
     x_ss, y_ss = _split(z_snapshot, problem.dim_x)
     g = problem.operator_F(z_bar)
@@ -242,7 +215,7 @@ def lazy_crn_oracle(
     d = z_bar.shape[0]
     dtype = z_bar.dtype
     eye = jnp.eye(d, dtype=dtype)
-    tiny = jnp.asarray(1e-12, dtype=dtype)
+    tiny = jnp.asarray(_TINY, dtype=dtype)
 
     if tol > 0:
         def cond(state):
@@ -252,14 +225,7 @@ def lazy_crn_oracle(
 
         def body(state):
             lam, _z, i, _prev = state
-            H_reg = H + (lam + tiny) * eye
-            g_neg = -g
-            if mixed_precision:
-                H_reg = H_reg.astype(jnp.float32)
-                g_neg = g_neg.astype(jnp.float32)
-            delta = _cholesky_solve(H_reg, g_neg)
-            if mixed_precision:
-                delta = delta.astype(dtype)
+            delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -267,28 +233,24 @@ def lazy_crn_oracle(
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
-            (jnp.zeros(()), z_bar, 0, jnp.asarray(-1.0, dtype=dtype)),
+            (jnp.zeros((), dtype=dtype), z_bar,
+             jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
     else:
         def body(i, state):
             lam, z = state
-            H_reg = H + (lam + tiny) * eye
-            g_neg = -g
-            if mixed_precision:
-                H_reg = H_reg.astype(jnp.float32)
-                g_neg = g_neg.astype(jnp.float32)
-            delta = _cholesky_solve(H_reg, g_neg)
-            if mixed_precision:
-                delta = delta.astype(dtype)
+            delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
             return _stable_lam_update(lam, lam_candidate), z_new
 
-        lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros(()), z_bar))
+        lam, z = jax.lax.fori_loop(
+            0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar)
+        )
 
     d_eff = z - z_bar
-    u = _residual(g, H, d_eff, lam, dtype, mixed_precision)
+    u = _residual(g, H, d_eff, lam, dtype)
     return z, u
 
 

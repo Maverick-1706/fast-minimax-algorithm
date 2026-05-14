@@ -14,6 +14,8 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
+
 # ── Import existing constructors from tests/conftest.py ──────────────────
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,8 +74,8 @@ def make_nonzero_rho_quadratic(dim: int = 5, rho: float = 1.0, seed: int = 0) ->
     def hessian_f(x, y):
         norm_x = jnp.linalg.norm(x)
         norm_y = jnp.linalg.norm(y)
-        H_cubic_x = rho * (norm_x * jnp.eye(dim) + jnp.outer(x, x) / jnp.maximum(norm_x, 1e-12))
-        H_cubic_y = rho * (norm_y * jnp.eye(dim) + jnp.outer(y, y) / jnp.maximum(norm_y, 1e-12))
+        H_cubic_x = rho * (norm_x * jnp.eye(dim) + jnp.outer(x, x) / jnp.maximum(norm_x, _PROJ_EPS))
+        H_cubic_y = rho * (norm_y * jnp.eye(dim) + jnp.outer(y, y) / jnp.maximum(norm_y, _PROJ_EPS))
         H_xx = Q + H_cubic_x
         H_yy = -R - H_cubic_y
         # Note: We return a tuple of tuples ((H_xx, H_xy), (H_yx, H_yy)).
@@ -236,8 +238,8 @@ def generate_benchmark_z0(problem) -> jnp.ndarray:
     """Deterministic nonzero start so origin-saddle problems do real work."""
     x_dir = jnp.linspace(1.0, 2.0, problem.dim_x)
     y_dir = -jnp.linspace(2.0, 1.0, problem.dim_y)
-    x_dir = x_dir / jnp.maximum(jnp.linalg.norm(x_dir), 1e-12)
-    y_dir = y_dir / jnp.maximum(jnp.linalg.norm(y_dir), 1e-12)
+    x_dir = x_dir / jnp.maximum(jnp.linalg.norm(x_dir), _PROJ_EPS)
+    y_dir = y_dir / jnp.maximum(jnp.linalg.norm(y_dir), _PROJ_EPS)
     x0 = problem.project_x(0.25 * float(problem.D_x) * x_dir)
     y0 = problem.project_y(0.25 * float(problem.D_y) * y_dir)
     return jnp.concatenate([x0, y0])

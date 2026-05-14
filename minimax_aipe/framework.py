@@ -41,6 +41,13 @@ from minimax_aipe.len import len_loop, len_restart, make_lazy_crn_npe_oracle
 from minimax_aipe.npe import make_crn_npe_oracle, npe, npe_restart, project_z
 from minimax_aipe.oracles import eg_step
 from minimax_aipe.problem import MinimaxProblem, SolverResult
+from minimax_aipe._precision import (
+    ABS_TOL as _ABS_TOL,
+    CUBIC_ZERO as _CUBIC_ZERO,
+    GAP_FLOOR as _GAP_FLOOR,
+    REG_MIN as _REG_MIN,
+    TINY as _TINY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +56,6 @@ logger = logging.getLogger(__name__)
 # Numerical guard constants
 # ═════════════════════════════════════════════════════════════════════════════
 
-_ABS_TOL = 1e-12
-_REG_MIN = 1e-6
-_CUBIC_ZERO = 1e-15
-_GAP_FLOOR = 1e-6
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -304,7 +307,7 @@ class RegularizedSubproblem:
         easy subproblems.
         """
         dim_x = self.dim_x
-        _tiny = 1e-12
+        _tiny = _TINY
         gamma = self._gamma
 
         def _project_z_h(z: Array) -> Array:
@@ -788,8 +791,8 @@ def _iProx_Psi(
     elif M_saddle == "len":
         def _run_inner(z: Array) -> tuple[Array, int]:
             dtype = z.dtype
-            tiny = jnp.asarray(1e-12, dtype=dtype)
-            eta_floor = jnp.asarray(1e-8, dtype=dtype)
+            tiny = jnp.asarray(_TINY, dtype=dtype)
+            eta_floor = jnp.asarray(_ABS_TOL, dtype=dtype)
             max_eta = jnp.asarray(1e12, dtype=dtype)
             two_gamma = jnp.asarray(2.0 * npe_gamma, dtype=dtype)
             m_jax = jnp.int32(params.m_lazy)
@@ -944,7 +947,7 @@ def _iProx_Psi(
 
     z_hat, epochs = _restart_jax(
         _run_inner, z0, params.S_inner,
-        step_tol=max(zeta_3 * 0.01, 1e-14),
+        step_tol=max(zeta_3 * 0.01, _ABS_TOL),
     )
     calls = epochs * inner_T
 
@@ -1339,7 +1342,7 @@ def _solve_saddle_subproblem(
 
     z_hat, epochs = _restart_jax(
         _run_inner, z0, params.S_inner,
-        step_tol=max(tolerance * 0.01, 1e-14),
+        step_tol=max(tolerance * 0.01, _ABS_TOL),
     )
     # epochs is JAX int32 inside a trace, Python int outside.
     # Multiply by inner_T to get total oracle calls.

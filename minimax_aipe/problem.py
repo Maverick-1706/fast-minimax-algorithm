@@ -15,6 +15,8 @@ from typing import Callable, NamedTuple, Optional
 import jax.numpy as jnp
 from jax import Array
 
+from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
+
 
 class MinimaxProblem:
     """A convex-concave minimax problem min_x max_y f(x, y).
@@ -166,7 +168,7 @@ class MinimaxProblem:
     def _default_project(D: float) -> Callable[[Array], Array]:
         def project(z: Array) -> Array:
             norm = jnp.linalg.norm(z)
-            return jnp.where(norm <= D / 2, z, z * (D / 2) / (norm + 1e-12))
+            return jnp.where(norm <= D / 2, z, z * (D / 2) / (norm + _PROJ_EPS))
 
         return project
 
