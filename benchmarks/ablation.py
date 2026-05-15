@@ -13,11 +13,12 @@ import statistics
 import time
 
 from minimax_aipe import solve
+from minimax_aipe.problem import BenchmarkProblem
 from benchmarks.stats import bootstrap_ci
 
 
 def ablation_m_lazy(
-    problem_dict: dict,
+    prob,
     epsilon: float = 0.01,
     m_values: list[int] | None = None,
     n_repeats: int = 3,
@@ -28,7 +29,7 @@ def ablation_m_lazy(
 
     Parameters
     ----------
-    problem_dict : dict
+    prob : BenchmarkProblem
         From the problem zoo.
     epsilon : float
         Target gap.
@@ -41,21 +42,22 @@ def ablation_m_lazy(
     -------
     list[dict]
     """
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     m_values = m_values or [1, 3, 5, 10, 20]
-    problem = problem_dict["problem"]
-    name = problem_dict.get("name", "?")
-    dim = problem_dict.get("dim", problem.dim_x)
+    problem = prob.problem
+    name = prob.name or "?"
+    dim = prob.dim or problem.dim_x
 
     rows = []
     for m in m_values:
         # Warmup run to avoid JIT compilation overhead in the first timed run
-        _ = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=problem_dict.get("z0"))
+        _ = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=prob.z0)
         
         times = []
         result = None
         for _ in range(n_repeats):
             t0 = time.perf_counter()
-            r = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=problem_dict["z0"])
+            r = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=prob.z0)
             times.append(time.perf_counter() - t0)
             result = r
 
@@ -76,19 +78,19 @@ def ablation_m_lazy(
 
 
 def ablation_npe_t_factor(
-    problem_dict: dict,
+    prob,
     epsilon: float = 0.01,
     t_factors: list[float] | None = None,
     n_repeats: int = 3,
 ) -> list[dict]:
     """Measure solve time and oracle calls as npe_T_factor varies.
 
-    npe_T_factor scales the computed iteration count for inner loops.
     """
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     t_factors = t_factors or [0.5, 1.0, 1.5, 2.0, 3.0]
-    problem = problem_dict["problem"]
-    name = problem_dict.get("name", "?")
-    dim = problem_dict.get("dim", problem.dim_x)
+    problem = prob.problem
+    name = prob.name or "?"
+    dim = prob.dim or problem.dim_x
 
     rows = []
     for tf in t_factors:
@@ -98,7 +100,7 @@ def ablation_npe_t_factor(
             t0 = time.perf_counter()
             r = solve(
                 problem, epsilon=epsilon, M_saddle="npe",
-                npe_T_factor=tf, z0=problem_dict["z0"],
+                npe_T_factor=tf, z0=prob.z0,
             )
             times.append(time.perf_counter() - t0)
             result = r
@@ -120,20 +122,20 @@ def ablation_npe_t_factor(
 
 
 def ablation_npe_vs_len(
-    problem_dict: dict,
+    prob,
     epsilon: float = 0.01,
     n_repeats: int = 3,
 ) -> dict:
     """Head-to-head NPE vs LEN on a single problem.
 
-    Returns a dict with 'npe' and 'len' sub-dicts.
     """
-    problem = problem_dict["problem"]
-    name = problem_dict.get("name", "?")
-    dim = problem_dict.get("dim", problem.dim_x)
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
+    name = prob.name or "?"
+    dim = prob.dim or problem.dim_x
 
     def _run(M_saddle: str):
-        kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": problem_dict["z0"]}
+        kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
         if M_saddle == "len":
             kwargs["m_lazy"] = 5
         _ = solve(problem, **kwargs)

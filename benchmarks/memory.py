@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import jax
 
 from minimax_aipe import solve
+from minimax_aipe.problem import BenchmarkProblem
 
 
 @dataclass
@@ -47,18 +48,33 @@ def _bytes_to_mb(b: int) -> float:
 
 
 def benchmark_memory(
-    problem_dict: dict,
+    prob,
     epsilon: float = 0.01,
     M_saddle: str = "npe",
 ) -> MemoryResult:
-    """Measure memory during a single solve() call."""
-    problem = problem_dict["problem"]
-    name = problem_dict.get("name", "?")
-    dim = problem_dict.get("dim", problem.dim_x)
+    """Measure memory during a single solve() call.
+
+    Parameters
+    ----------
+    prob : BenchmarkProblem
+        The problem to benchmark.
+    epsilon : float
+        Target gap.
+    M_saddle : str
+        Solver type ("npe" or "len").
+
+    Returns
+    -------
+    MemoryResult
+    """
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
+    name = prob.name or "?"
+    dim = prob.dim or problem.dim_x
 
     gc.collect()
 
-    result = solve(problem, epsilon=epsilon, M_saddle=M_saddle, z0=problem_dict.get("z0"))
+    result = solve(problem, epsilon=epsilon, M_saddle=M_saddle, z0=prob.z0)
 
     # Force materialization BEFORE measuring memory, fixing the lazy array issue
     result.x.block_until_ready()
@@ -78,15 +94,15 @@ def benchmark_memory(
 
 
 def benchmark_memory_scaling(
-    problems: list[dict],
+    problems: list,
     epsilon: float = 0.01,
     M_saddle: str = "npe",
 ) -> list[MemoryResult]:
     """Measure memory for each problem in the list."""
     results = []
-    for prob_dict in problems:
+    for prob in problems:
         gc.collect()
-        r = benchmark_memory(prob_dict, epsilon=epsilon, M_saddle=M_saddle)
+        r = benchmark_memory(prob, epsilon=epsilon, M_saddle=M_saddle)
         results.append(r)
     return results
 

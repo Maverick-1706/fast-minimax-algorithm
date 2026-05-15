@@ -252,7 +252,7 @@ prox = make_crn_prox_oracle(grad_fn, hess_fn, gamma=1.0)
 
 z_out, calls = aipe_restart(
     prox, grad_fn, z0,
-    T=50, gamma=1.0, S=5,
+    T=200, gamma=1.0, S=5,
 )
 ```
 

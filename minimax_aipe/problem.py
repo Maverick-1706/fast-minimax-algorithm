@@ -184,6 +184,82 @@ class MinimaxProblem:
             "Override this method or use gap.estimate_gap()."
         )
 
+@dataclass(frozen=True)
+class BenchmarkMeta:
+    """Metadata describing a benchmark problem."""
+
+    rho: float | None
+    """Hessian Lipschitz constant."""
+    ell: float | None
+    """Gradient Lipschitz constant."""
+    kappa: float | None
+    """Condition number estimate."""
+    D_x: float
+    """Diameter of primal feasible set."""
+    D_y: float
+    """Diameter of dual feasible set."""
+    mu_x: float | None
+    """Strong convexity constant in x."""
+    mu_y: float | None
+    """Strong concavity constant in y."""
+    has_analytical_solution: bool
+    """Whether a closed-form saddle point is known."""
+
+    @property
+    def strongly_convex_concave(self) -> bool:
+        return (
+            self.mu_x is not None
+            and self.mu_y is not None
+            and self.mu_x > 0
+            and self.mu_y > 0
+        )
+
+@dataclass(frozen=True)
+class BenchmarkProblem:
+    """Typed benchmark problem container."""
+
+    problem: MinimaxProblem
+    x_star: Array | None
+    y_star: Array | None
+    gap_star: float | None
+    meta: BenchmarkMeta
+    z0: Array | None = None
+    name: str | None = None
+    dim: int | None = None
+
+    def __getitem__(self, key):
+        """Allow dict-style access for backward compatibility."""
+        return getattr(self, key)
+
+def build_benchmark_meta(
+    problem,
+    *,
+    mu_x: float | None,
+    mu_y: float | None,
+    has_analytical_solution: bool = True,
+) -> BenchmarkMeta:
+    """Construct standardized benchmark metadata."""
+
+    positive_mus = [
+        m for m in (mu_x, mu_y)
+        if m is not None and m > 0
+    ]
+
+    if positive_mus and problem.ell is not None:
+        kappa = float(problem.ell) / min(positive_mus)
+    else:
+        kappa = None
+
+    return BenchmarkMeta(
+        rho=problem.rho,
+        ell=problem.ell,
+        kappa=kappa,
+        D_x=problem.D_x,
+        D_y=problem.D_y,
+        mu_x=mu_x,
+        mu_y=mu_y,
+        has_analytical_solution=has_analytical_solution,
+    )
 
 class SolverResult(NamedTuple):
     """Result returned by a minimax solver.
@@ -214,4 +290,10 @@ class SolverResult(NamedTuple):
     converged: bool
     history: dict = field(default_factory=dict)
 
-__all__ = ["MinimaxProblem", "SolverResult"]
+__all__ = [
+    "MinimaxProblem",
+    "SolverResult",
+    "BenchmarkMeta",
+    "BenchmarkProblem",
+    "build_benchmark_meta",
+]

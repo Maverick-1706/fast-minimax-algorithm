@@ -459,8 +459,8 @@ def _len_scan_loop(
 
 @partial(
     jax.jit,
-    static_argnums=(0, 1, 3, 5, 6, 7),
-    static_argnames=("adaptive_refresh", "safety_checks", "return_full"),
+    static_argnums=(0, 1, 3, 4, 5, 6, 7),
+        static_argnames=("project", "fn", "adaptive_refresh", "safety_checks", "return_full"),
 )
 def len(
     oracle: LENOracle,

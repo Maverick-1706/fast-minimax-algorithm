@@ -11,16 +11,18 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 """Shared fixtures for the comprehensive test suite.
 
-Problem constructors return a dict with:
+Problem constructors return a BenchmarkProblem instance with fields:
     problem      — MinimaxProblem
     x_star, y_star — known optimal solution
     gap_star     — known optimal gap (0.0 for most toy problems)
+    meta         — BenchmarkMeta instance containing:
 """
 
 # Import the package first so _precision.py sets jax_enable_x64=False before
 # any JAX array is created by this file or downstream test modules.
 import minimax_aipe  # noqa: F401 — side-effect: FP32 config
 from minimax_aipe._precision import TEST_ATOL as ATOL, PROJ_EPS as _PROJ_EPS
+from minimax_aipe.problem import BenchmarkMeta, BenchmarkProblem, build_benchmark_meta
 
 import jax
 import jax.numpy as jnp
@@ -31,6 +33,7 @@ from jax import Array
 TOLERANCE_LEVELS = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3]
 
 MAX_DIM = 6   # keep problems small for test speed
+
 
 
 # ── Gap estimation helper ────────────────────────────────────────────────
@@ -71,9 +74,10 @@ def grid_gap(problem, x: Array, y: Array, n_grid: int = 64) -> float:
 
     return max(0.0, max_f - min_f)
 
+
 # ── Problem constructors ─────────────────────────────────────────────────
 
-def make_bilinear_problem(dim: int = 3, seed: int = 42) -> dict:
+def make_bilinear_problem(dim: int = 3, seed: int = 42) -> BenchmarkProblem:
     """Bilinear game  f(x,y) = x^T A y.
 
     Solution: x* = y* = 0, gap = 0.
@@ -99,15 +103,20 @@ def make_bilinear_problem(dim: int = 3, seed: int = 42) -> dict:
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=0.0,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        name="bilinear",
+        dim=dim,
+        z0=None,
     )
 
 
-def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> dict:
+
+def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> BenchmarkProblem:
     """Quadratic minimax  f(x,y) = ½ x^T Q x + x^T B y - ½ y^T R y.
 
     With Q, R ≻ 0.  KKT at the origin for all valid Q, R, B.
@@ -137,15 +146,22 @@ def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> dict:
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=float(jnp.linalg.norm(jnp.block([[Q, B], [B.T, R]]), ord=2)),
     )
-    return dict(
+    mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
+    mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
+
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        name="quadratic",
+        dim=dim,
+        z0=None,
     )
 
 
-def make_1d_bilinear() -> dict:
+def make_1d_bilinear() -> BenchmarkProblem:
     """Simplest case: f(x,y) = xy on [-1, 1]^2.
 
     Solution: x* = y* = 0, gap = 0.
@@ -159,21 +175,29 @@ def make_1d_bilinear() -> dict:
         f=f, dim_x=1, dim_y=1, D_x=2.0, D_y=2.0,
         rho=0.0, ell=0.0,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.array([0.0]),
         y_star=jnp.array([0.0]),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        name="1d_bilinear",
+        dim=1,
+        z0=None,
     )
 
 
-def make_separable_problem() -> dict:
+
+def make_separable_problem(dim: int = 2) -> BenchmarkProblem:
     """Separable convex-concave: f(x,y) = h1(x) - h2(y).
 
     h1(x) = ½·(3x₁² + x₂²),  h2(y) = ½·(y₁² + 2y₂²).
 
     Solution: x* = y* = 0, gap = 0.
     """
+    if dim != 2:
+        import warnings
+        warnings.warn(f"make_separable_problem is fixed at dim=2; ignoring dim={dim}", RuntimeWarning)
     from minimax_aipe import MinimaxProblem
 
     def f(x, y):
@@ -195,11 +219,15 @@ def make_separable_problem() -> dict:
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=3.0,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(2),
         y_star=jnp.zeros(2),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=1.0, mu_y=1.0),
+        name="separable",
+        dim=2,
+        z0=None,
     )
 
 
@@ -216,7 +244,7 @@ def bilinear_problem(request):
     _, dim, seed = request.param
     return make_bilinear_problem(dim=dim, seed=seed)
 
-def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, seed: int = 42) -> dict:
+def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, seed: int = 42) -> BenchmarkProblem:
     """Bilinear game  f(x,y) = x^T A y  where  κ(A) = condition_number.
 
     Constructs A = U @ diag(σ) @ V^T with σ log-spaced from 1 to condition_number.
@@ -249,16 +277,20 @@ def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, s
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        condition_number=float(condition_number),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        name="ill_conditioned_bilinear",
+        dim=dim,
+        z0=None,
     )
 
 
-def make_ill_conditioned_quadratic(dim: int = 4, condition_number: float = 1e4, seed: int = 0) -> dict:
+
+def make_ill_conditioned_quadratic(dim: int = 4, condition_number: float = 1e4, seed: int = 0) -> BenchmarkProblem:
     """Quadratic minimax with ill-conditioned Hessian block Q.
 
     f(x,y) = ½ x^T Q x + x^T B y - ½ y^T R y
@@ -296,17 +328,22 @@ def make_ill_conditioned_quadratic(dim: int = 4, condition_number: float = 1e4, 
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
-    return dict(
+    mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
+    mu_y = 1.0
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        condition_number=float(condition_number),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        name="ill_conditioned_quadratic",
+        dim=dim,
+        z0=None,
     )
 
 # ── Nontrivial problem constructors ──────────────────────────────────────
 
-def make_offset_quadratic() -> dict:
+def make_offset_quadratic(dim: int = 1) -> BenchmarkProblem:
     """1D quadratic with nonzero saddle point.
 
     f(x,y) = ½(5x² - 3y²) + 2xy + x − y
@@ -314,6 +351,9 @@ def make_offset_quadratic() -> dict:
     Saddle at x* = -1/19, y* = -7/19 (inside ball of radius 2).
     Gap = 0 at the saddle.
     """
+    if dim != 1:
+        import warnings
+        warnings.warn(f"make_offset_quadratic is fixed at dim=1; ignoring dim={dim}", RuntimeWarning)
     from minimax_aipe import MinimaxProblem
 
     x_star = jnp.array([-1.0 / 19.0])
@@ -350,15 +390,19 @@ def make_offset_quadratic() -> dict:
         rho=0.0,
         ell=float(4.0 + jnp.sqrt(jnp.array(5.0))),
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=x_star,
         y_star=y_star,
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=5.0, mu_y=3.0),
+        name="offset_quadratic",
+        dim=1,
+        z0=None,
     )
 
 
-def make_10d_quadratic(seed: int = 0) -> dict:
+def make_10d_quadratic(seed: int = 0) -> BenchmarkProblem:
     """10D (5+5) strongly convex quadratic with coupling.
 
     f(x,y) = ½ x^T Q x + x^T B y − ½ y^T R y
@@ -406,11 +450,18 @@ def make_10d_quadratic(seed: int = 0) -> dict:
         rho=0.0,
         ell=ell,
     )
-    return dict(
+    mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
+    mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
+
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        name="10d_quadratic",
+        dim=dim,
+        z0=None,
     )
 
 

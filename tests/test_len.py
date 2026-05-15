@@ -448,7 +448,7 @@ class TestLenVsNPE:
         """
         problem = _nonlinear_problem(rho=1.0)
         gamma = 2.0 * (problem.rho + 0.1)
-        T = 50
+        T = 200
         z0 = jnp.array([0.5, -0.5, 0.3, -0.3])
         proj = _project_for(problem)
 

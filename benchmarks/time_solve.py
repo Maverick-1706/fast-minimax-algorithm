@@ -17,6 +17,7 @@ from minimax_aipe import solve
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
 from benchmarks.oracles import count_solver_oracles, count_eg_oracles, count_gda_oracles
 from benchmarks.stats import summarise
+from minimax_aipe.problem import BenchmarkProblem
 
 
 # ── Timing infrastructure ────────────────────────────────────────────────
@@ -25,7 +26,7 @@ from benchmarks.stats import summarise
 def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
     """Time a callable with warmup runs.
 
-    Returns dict with {mean, std, min, max, ci_95, raw_times, summary}.
+    Returns dict with {mean, std, min, max, ci, raw_times, summary}.
     """
     last_result = None
     for _ in range(n_warmup):
@@ -46,7 +47,7 @@ def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
         "std": s.std,
         "min": s.min,
         "max": s.max,
-        "ci_95": s.ci_95,
+        "ci": s.ci,
         "raw": times,
         "n_outliers": s.n_outliers,
         "outliers": s.outliers,
@@ -58,14 +59,15 @@ def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
 
 
 def benchmark_jit_vs_eager(
-    problem_dict: dict,
+    prob: BenchmarkProblem,
     epsilon: float = 0.01,
     n_warmup: int = 1,
     n_repeats: int = 5,
     M_saddle: str = "npe",
 ) -> dict:
     """Compare JAX JIT enabled vs disabled on the pure numerical core."""
-    problem = problem_dict["problem"]
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
     
     # Pre-setup the computational core to isolate JIT numerical speedup
     from minimax_aipe.framework import RegularizedSubproblem
@@ -73,7 +75,7 @@ def benchmark_jit_vs_eager(
 
     gamma = 1.0
     kernel = RegularizedSubproblem(problem, gamma)
-    z0 = problem_dict.get("z0")
+    z0 = prob.z0
     if z0 is None:
         z0 = jnp.zeros(problem.dim_x + problem.dim_y)
         
@@ -123,7 +125,7 @@ def benchmark_jit_vs_eager(
 
 
 def benchmark_solver_comparison(
-    problems: list[dict],
+    problems: list[BenchmarkProblem],
     epsilon: float = 0.01,
     n_repeats: int = 5,
 ) -> list[dict]:
@@ -131,16 +133,18 @@ def benchmark_solver_comparison(
 
     All baselines are JIT-compiled.  Reports oracle calls alongside timing.
     """
+    for prob in problems:
+        assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     rows = []
 
-    for prob_dict in problems:
-        problem = prob_dict["problem"]
-        name = prob_dict.get("name", "?")
-        dim = prob_dict.get("dim", problem.dim_x)
+    for prob in problems:
+        problem = prob.problem
+        name = prob.name or "?"
+        dim = prob.dim or problem.dim_x
 
         print(f"  Benchmarking {name} dim={dim} ...")
         row = {"name": name, "dim": dim}
-        z0 = prob_dict["z0"]
+        z0 = prob.z0
 
         # ── AIPE-NPE ───────────────────────────────────────────────
         def run_npe():
@@ -202,7 +206,7 @@ def benchmark_solver_comparison(
 
 def format_timing(t: dict) -> str:
     """Format a timing dict as 'mean [ci_lo, ci_hi]'."""
-    lo, hi = t["ci_95"]
+    lo, hi = t["ci"]
     return f"{t['mean']:.4f} [{lo:.4f},{hi:.4f}]"
 
 

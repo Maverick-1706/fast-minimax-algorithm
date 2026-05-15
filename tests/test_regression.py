@@ -39,7 +39,7 @@ class TestDeterminism:
 
     def test_deterministic_output(self, fixed_problem):
         """Two runs with the same inputs produce identical results."""
-        p = fixed_problem["problem"]
+        p = fixed_problem.problem
         r1 = solve(p, epsilon=0.1)
         r2 = solve(p, epsilon=0.1)
         assert jnp.allclose(r1.x, r2.x, atol=1e-4)
@@ -49,7 +49,7 @@ class TestDeterminism:
 
     def test_deterministic_npe(self, bilinear_3d):
         """NPE alone is deterministic with a fixed oracle."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z0 = jnp.zeros(p.dim_x + p.dim_y)
         gamma = 1.0
         oracle = make_crn_npe_oracle(p, gamma)
@@ -62,7 +62,7 @@ class TestDeterminism:
 
     def test_convergence_flag_is_stable(self, fixed_problem):
         """converged flag is identical across runs."""
-        p = fixed_problem["problem"]
+        p = fixed_problem.problem
         r1 = solve(p, epsilon=0.1)
         r2 = solve(p, epsilon=0.1)
         assert r1.converged == r2.converged
@@ -78,9 +78,9 @@ class TestGradientConsistency:
         x = jnp.array([0.3, -0.1, 0.5])
         y = jnp.array([0.2, 0.4, -0.3])
 
-        gx_anal, gy_neg_anal = p["problem"].grad_f(x, y)
+        gx_anal, gy_neg_anal = p.problem.grad_f(x, y)
 
-        f = p["problem"].f
+        f = p.problem.f
         gx_ad = jax.grad(f, argnums=0)(x, y)
         gy_ad = jax.grad(f, argnums=1)(x, y)
 
@@ -92,9 +92,9 @@ class TestGradientConsistency:
         x = jnp.array([0.5, -0.3, 0.1])
         y = jnp.array([0.2, 0.6, -0.4])
 
-        gx_anal, gy_neg_anal = p["problem"].grad_f(x, y)
+        gx_anal, gy_neg_anal = p.problem.grad_f(x, y)
 
-        f = p["problem"].f
+        f = p.problem.f
         gx_ad = jax.grad(f, argnums=0)(x, y)
         gy_ad = jax.grad(f, argnums=1)(x, y)
 
@@ -107,9 +107,9 @@ class TestGradientConsistency:
         x = jnp.array([0.3, -0.2, 0.7])
         y = jnp.array([-0.1, 0.5, 0.2])
 
-        (H_xx, H_xy), (H_yx, H_yy) = p["problem"].hessian_f(x, y)
+        (H_xx, H_xy), (H_yx, H_yy) = p.problem.hessian_f(x, y)
 
-        f = p["problem"].f
+        f = p.problem.f
         H_full = jax.hessian(f, argnums=(0, 1))(x, y)
         # H_full is ((H_xx_ad, H_xy_ad), (H_yx_ad, H_yy_ad))
         H_xx_ad, H_xy_ad = H_full[0]
@@ -125,7 +125,7 @@ class TestGradientConsistency:
         p = separable_problem
         x = jnp.array([1.0, -0.5])
         y = jnp.array([0.3, 0.8])
-        (_, H_xy), (H_yx, _) = p["problem"].hessian_f(x, y)
+        (_, H_xy), (H_yx, _) = p.problem.hessian_f(x, y)
         assert jnp.allclose(H_xy, 0.0, atol=1e-4)
         assert jnp.allclose(H_yx, 0.0, atol=1e-4)
 
@@ -141,7 +141,7 @@ class TestCRNOracleVI:
         for all z' in Z.
         This checks the residual u ≈ 0 at the returned point.
         """
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z_bar = jnp.zeros(p.dim_x + p.dim_y)
         gamma = 1.0
 
@@ -154,7 +154,7 @@ class TestCRNOracleVI:
         )
 
     def test_vi_condition_quadratic(self, quadratic_3d):
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         z_bar = jnp.zeros(p.dim_x + p.dim_y)
         gamma = 1.0
 
@@ -163,7 +163,7 @@ class TestCRNOracleVI:
 
     def test_crn_oracle_idempotent_at_saddle(self, bilinear_3d):
         """Calling CRN at the saddle point should not move the iterate."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z_star = jnp.zeros(p.dim_x + p.dim_y)
         gamma = 1.0
 
@@ -172,7 +172,7 @@ class TestCRNOracleVI:
 
     def test_crn_oracle_respects_projection(self, bilinear_3d):
         """CRN output lies in the feasible set Z = X × Y."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z_bar = jnp.ones(p.dim_x + p.dim_y) * 0.3
         gamma = 2.0
 
@@ -188,7 +188,7 @@ class TestEGStep:
 
     def test_eg_at_saddle_produces_zero_residual(self, bilinear_3d):
         """At the saddle point, the EG residual certificate c₁ should be ≈ 0."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z = jnp.zeros(p.dim_x + p.dim_y)
         eta = 1.0 / (2.0 * max(p.ell or 1.0, 1e-8))
 
@@ -199,7 +199,7 @@ class TestEGStep:
 
     def test_eg_residual_is_feasibility_certificate(self, bilinear_3d):
         """The residual c₁ = (z − z¹)/η − F(z½) is a valid certificate."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         z = jnp.array([0.3, -0.1, 0.2, 0.4, -0.3, 0.1])
         eta = 0.5
 
@@ -214,7 +214,7 @@ class TestRegularizedSubproblem:
 
     def test_operator_F_h_at_base_point(self, bilinear_3d):
         """At z = (x_bar, y_bar), the cubic terms vanish and F_h = F."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 2.0
         kernel = RegularizedSubproblem(p, gamma)
 
@@ -230,7 +230,7 @@ class TestRegularizedSubproblem:
 
     def test_jacobian_symmetry(self, bilinear_3d):
         """The Jacobian ∇F_h has the correct saddle-point structure."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 1.0
         kernel = RegularizedSubproblem(p, gamma)
 
@@ -247,7 +247,7 @@ class TestRegularizedSubproblem:
 
     def test_project_method(self, bilinear_3d):
         """kernel.project(z) matches manual slicing + project_x/project_y."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         kernel = RegularizedSubproblem(p, 1.0)
 
         z = jnp.array([0.5, -0.3, 0.8, 0.2, -0.6, 0.1])
@@ -267,7 +267,7 @@ class TestSurrogateProblems:
         """g(x,y;x̄) = f(x,y) + (γ/3)‖x−x̄‖³ at the query point."""
         from minimax_aipe.framework import _make_g_problem
 
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         x_bar = jnp.array([0.1, -0.2, 0.3])
         gamma = 2.0
 
@@ -286,7 +286,7 @@ class TestSurrogateProblems:
         """h(x,y;x̄,ȳ) = f(x,y) + (γ/3)‖x−x̄‖³ − (γ/3)‖y−ȳ‖³."""
         from minimax_aipe.framework import _make_h_problem
 
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         x_bar = jnp.array([0.1, -0.2, 0.3])
         y_bar = jnp.array([0.2, 0.1, -0.1])
         gamma = 2.0
@@ -308,7 +308,7 @@ class TestSurrogateProblems:
         """Adding cubic regularisation increases the ρ constant."""
         from minimax_aipe.framework import _make_g_problem, _make_h_problem
 
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 2.0
 
         g_prob = _make_g_problem(p, jnp.zeros(3), gamma)
@@ -324,7 +324,7 @@ class TestPipelineConsistency:
 
     def test_two_solves_same_problem_same_result(self, bilinear_3d):
         """End-to-end: identical inputs → identical SolverResult."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         r1 = solve(p, epsilon=0.05)
         r2 = solve(p, epsilon=0.05)
 

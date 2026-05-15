@@ -31,13 +31,13 @@ class TestIllConditionedBilinear:
     def test_solver_runs_without_error(self, ill_conditioned_bilinear):
         """Solver completes without raising an exception."""
         p = ill_conditioned_bilinear
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
+        result = solve(p.problem, epsilon=0.1, verbose=False)
         assert result is not None
 
     def test_no_nans_in_output(self, ill_conditioned_bilinear):
         """x, y, and gap contain no NaN or Inf values."""
         p = ill_conditioned_bilinear
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
+        result = solve(p.problem, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x)), "NaN/Inf in x"
         assert jnp.all(jnp.isfinite(result.y)), "NaN/Inf in y"
         assert jnp.isfinite(jnp.asarray(result.gap)), "NaN/Inf in gap"
@@ -45,22 +45,22 @@ class TestIllConditionedBilinear:
     def test_gap_is_nonnegative(self, ill_conditioned_bilinear):
         """Gap is always ≥ 0 by definition."""
         p = ill_conditioned_bilinear
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
+        result = solve(p.problem, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6, f"gap={result.gap:.4e} < 0"
 
     def test_solution_is_feasible(self, ill_conditioned_bilinear):
         """x and y stay inside the feasible ball."""
         p = ill_conditioned_bilinear
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
-        D_x = p["problem"].D_x
-        D_y = p["problem"].D_y
+        result = solve(p.problem, epsilon=0.1, verbose=False)
+        D_x = p.problem.D_x
+        D_y = p.problem.D_y
         assert float(jnp.linalg.norm(result.x)) <= D_x / 2 + 1e-4
         assert float(jnp.linalg.norm(result.y)) <= D_y / 2 + 1e-4
 
     def test_inner_oracle_no_nans(self, ill_conditioned_bilinear):
         """CRN oracle alone produces finite output on ill-conditioned input."""
         from minimax_aipe.oracles import crn_oracle
-        p = ill_conditioned_bilinear["problem"]
+        p = ill_conditioned_bilinear.problem
         z_bar = jnp.ones(p.dim_x + p.dim_y) * 0.5
         gamma = 2.0
         z_half, u = crn_oracle(p, z_bar, gamma, n_iters=50)
@@ -72,16 +72,16 @@ class TestIllConditionedQuadratic:
     """Quadratic minimax with κ(Q) = 10^4."""
 
     def test_solver_runs(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic["problem"], epsilon=0.1, verbose=False)
+        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
         assert result is not None
 
     def test_no_nans(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic["problem"], epsilon=0.1, verbose=False)
+        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
 
     def test_gap_nonnegative(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic["problem"], epsilon=0.1, verbose=False)
+        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6
 
 
@@ -92,7 +92,7 @@ class TestExtremeConditioning:
     def test_bilinear_kappa_1e6_no_nans(self):
         from tests.conftest import make_ill_conditioned_bilinear
         p = make_ill_conditioned_bilinear(dim=3, condition_number=1e6, seed=42)
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
+        result = solve(p.problem, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x)), "NaN at κ=1e6"
         assert jnp.all(jnp.isfinite(result.y)), "NaN at κ=1e6"
 
@@ -113,7 +113,7 @@ class TestJITCompilation:
     def _make_bilinear_oracles(self, dim=3):
         """Shared setup: bilinear problem + CRN oracle + operator F."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=dim, seed=42)["problem"]
+        p = make_bilinear_problem(dim=dim, seed=42).problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -151,7 +151,7 @@ class TestJITCompilation:
     def test_aipe_compiles_and_runs(self):
         """aipe() is JIT-compiled by default."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         gamma = 2.0
 
         def f_z(z):
@@ -182,7 +182,7 @@ class TestJITCompilation:
         from minimax_aipe.len import make_lazy_crn_npe_oracle
         from tests.conftest import make_bilinear_problem
 
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         oracle = make_lazy_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -200,7 +200,7 @@ class TestJITCompilation:
         on traced values.  Users should use npe/aipe/len_loop for JIT.
         """
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         with pytest.raises(Exception):
             jax.jit(solve)(p, 0.1)
 
@@ -215,7 +215,7 @@ class TestVmap:
     def test_npe_vmappable_over_z0(self):
         """Batch NPE over 4 different initial points."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -233,7 +233,7 @@ class TestVmap:
     def test_vmap_different_inits_diverge(self):
         """Different starting points should produce different iterates."""
         from tests.conftest import make_quadratic_saddle_problem
-        p = make_quadratic_saddle_problem(dim=3, seed=0)["problem"]
+        p = make_quadratic_saddle_problem(dim=3, seed=0).problem
         gamma = 2.0
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -254,7 +254,7 @@ class TestVmap:
     def test_vmap_composed_with_outer_jit(self):
         """vmap(npe) works — npe is already JIT, vmap wraps the JIT call."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         gamma = 2.0
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -284,20 +284,20 @@ class TestBadEpsilon:
 
     def test_negative_epsilon_raises(self):
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         with pytest.raises(ValueError, match="epsilon"):
             solve(p, epsilon=-1.0)
 
     def test_zero_epsilon_raises(self):
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         with pytest.raises(ValueError, match="epsilon"):
             solve(p, epsilon=0.0)
 
     def test_very_small_epsilon_doesnt_crash(self):
         """epsilon = 1e-10 should not crash (may not converge, but no exception)."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         # Should complete without raising, even if it doesn't converge
         result = solve(p, epsilon=1e-10, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
@@ -404,7 +404,7 @@ class TestEdgeCaseInputs:
         """Minimum dimensions: dim_x=1, dim_y=1."""
         from tests.conftest import make_1d_bilinear
         p = make_1d_bilinear()
-        result = solve(p["problem"], epsilon=0.1, verbose=False)
+        result = solve(p.problem, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6
 
     def test_asymmetric_dimensions(self):
@@ -430,14 +430,14 @@ class TestEdgeCaseInputs:
     def test_gamma_override(self):
         """User-supplied gamma should be accepted without error."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         result = solve(p, epsilon=0.1, gamma=5.0, verbose=False)
         assert result.history["gamma"] == 5.0
 
     def test_len_mode_runs(self):
         """M_saddle='len' should produce valid output on a simple problem."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42)["problem"]
+        p = make_bilinear_problem(dim=3, seed=42).problem
         result = solve(p, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))

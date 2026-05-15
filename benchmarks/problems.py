@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import warnings
 from typing import Callable
+from dataclasses import replace
 
 import jax
 import jax.numpy as jnp
 from jax import Array
 
 from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
+from minimax_aipe.problem import BenchmarkMeta, BenchmarkProblem, build_benchmark_meta
 
 # ── Import existing constructors from tests/conftest.py ──────────────────
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests.conftest import (  # noqa: E402
+from tests.conftest import ( 
     make_bilinear_problem,
     make_ill_conditioned_bilinear,
     make_ill_conditioned_quadratic,
@@ -33,7 +36,7 @@ from tests.conftest import (  # noqa: E402
 # ── New problem constructors ─────────────────────────────────────────────
 
 
-def make_nonzero_rho_quadratic(dim: int = 5, rho: float = 1.0, seed: int = 0) -> dict:
+def make_nonzero_rho_quadratic(dim: int = 5, rho: float = 1.0, seed: int = 0) -> BenchmarkProblem:
     """Quadratic saddle + cubic perturbation so ρ > 0.
 
     f(x,y) = ½ xᵀQ x + xᵀ B y − ½ yᵀ R y + (ρ/3)(‖x‖³ − ‖y‖³)
@@ -88,15 +91,21 @@ def make_nonzero_rho_quadratic(dim: int = 5, rho: float = 1.0, seed: int = 0) ->
         grad_f=grad_f, hessian_f=hessian_f,
         rho=rho, ell=ell + rho * D,
     )
-    return dict(
+    mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
+    mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        name="nonzero_rho",
+        dim=dim,
+        z0=None,
     )
 
 
-def make_rosenbrock_bilinear(dim: int = 5, seed: int = 0) -> dict:
+def make_rosenbrock_bilinear(dim: int = 5, seed: int = 0) -> BenchmarkProblem:
     """Rosenbrock-style objective in x + bilinear coupling with y.
 
     f(x,y) = Σ_i [100(x_{i+1} − x_i²)² + (1 − x_i)²] + xᵀ A y
@@ -131,15 +140,19 @@ def make_rosenbrock_bilinear(dim: int = 5, seed: int = 0) -> dict:
         rho=200.0,
         ell=1e4,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=None,
+        meta=build_benchmark_meta(problem, mu_x=None, mu_y=0.0, has_analytical_solution=False),
+        name="rosenbrock_bilin",
+        dim=dim,
+        z0=None,
     )
 
 
-def make_diagonal_saddle(dim: int = 10, seed: int = 0) -> dict:
+def make_diagonal_saddle(dim: int = 10, seed: int = 0) -> BenchmarkProblem:
     """Diagonal quadratic saddle — cleanest scaling test bed.
 
     f(x,y) = Σ_i (λ_i/2) x_i² + Σ_i σ_i x_i y_i − Σ_i (μ_i/2) y_i²
@@ -189,21 +202,25 @@ def make_diagonal_saddle(dim: int = 10, seed: int = 0) -> dict:
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
-    return dict(
+    return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=float(jnp.min(lam)), mu_y=float(jnp.min(mu))),
+        name="diagonal_saddle",
+        dim=dim,
+        z0=None,
     )
 
 
 # ── Problem registry ─────────────────────────────────────────────────────
 
 
-def _make_fixed_dim(constructor: Callable, dim: int):
+def _make_fixed_dim(constructor: Callable, dim_fixed: int):
     """Wrap a no-dim constructor so it accepts a dim argument (ignored)."""
     def wrapper(dim=None, **kwargs):
-        return constructor(**kwargs)
+        return constructor(dim=dim_fixed, **kwargs)
     return wrapper
 
 
@@ -212,7 +229,6 @@ def _seed_wrapper(constructor, accepts_seed: bool = True):
     if not accepts_seed:
         def wrapper(dim=None, seed=None, **kwargs):
             if seed is not None:
-                import warnings
                 warnings.warn(f"Constructor {constructor.__name__} does not accept a seed argument; ignoring seed={seed}.", RuntimeWarning)
             return constructor(dim=dim, **kwargs) if dim is not None else constructor(**kwargs)
         return wrapper
@@ -245,7 +261,7 @@ def generate_benchmark_z0(problem) -> jnp.ndarray:
     return jnp.concatenate([x0, y0])
 
 
-def get_problem(name: str, dim: int, *, seed: int | None = None, **kwargs) -> dict:
+def get_problem(name: str, dim: int, *, seed: int | None = None, **kwargs) -> BenchmarkProblem:
     """Return a single problem by name and dimension.
 
     Parameters
@@ -262,17 +278,21 @@ def get_problem(name: str, dim: int, *, seed: int | None = None, **kwargs) -> di
 
     Returns
     -------
-    dict
-        {problem, x_star, y_star, gap_star}
+    BenchmarkProblem
+        The requested problem.
     """
     for reg_name, constructor, _ in _PROBLEM_REGISTRY:
         if reg_name == name:
             kw = dict(kwargs)
             if seed is not None:
                 kw["seed"] = seed
-            prob_dict = constructor(dim=dim, **kw)
-            prob_dict["z0"] = generate_benchmark_z0(prob_dict["problem"])
-            return prob_dict
+            prob  = constructor(dim=dim, **kw)
+            return replace(
+                prob,
+                z0=generate_benchmark_z0(prob.problem),
+                name=reg_name,
+                dim=dim,
+            )
     available = [r[0] for r in _PROBLEM_REGISTRY]
     raise ValueError(f"Unknown problem {name!r}. Available: {available}")
 
@@ -282,8 +302,8 @@ def get_all_problems(
     names: list[str] | None = None,
     *,
     seed: int | None = None,
-) -> list[dict]:
-    """Return every (problem, dim) combination as a list of dicts.
+) -> list[BenchmarkProblem]:
+    """Return every (problem, dim) combination as a list of BenchmarkProblems.
 
     Parameters
     ----------
@@ -298,8 +318,8 @@ def get_all_problems(
 
     Returns
     -------
-    list[dict]
-        Each dict has keys: name, dim, problem, x_star, y_star, gap_star.
+    list[BenchmarkProblem]
+        A list of benchmark problems ready for evaluation.
     """
     from benchmarks import GLOBAL_SEED
     if seed is None and GLOBAL_SEED is not None:
@@ -318,16 +338,22 @@ def get_all_problems(
                 kw = {}
                 if seed is not None:
                     kw["seed"] = seed + idx
-                prob_dict = constructor(dim=dim, **kw)
-                prob_dict["name"] = reg_name
-                prob_dict["dim"] = dim
-                prob_dict["z0"] = generate_benchmark_z0(prob_dict["problem"])
-                results.append(prob_dict)
+                
+                # --- Updated Logic ---
+                prob = constructor(dim=dim, **kw)
+                
+                results.append(
+                    replace(
+                        prob,
+                        z0=generate_benchmark_z0(prob.problem),
+                        name=reg_name,
+                        dim=dim,
+                    )
+                )
             except Exception as e:
-                print(f"  [skip] {reg_name} dim={dim}: {e}")
+                warnings.warn(f"  [skip] {reg_name} dim={dim}: {e}", RuntimeWarning)
             idx += 1
     return results
-
 
 def list_problems() -> list[tuple[str, list[int]]]:
     """Return (name, default_dims) for all registered problems."""

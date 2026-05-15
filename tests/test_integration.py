@@ -32,7 +32,7 @@ class TestToleranceHierarchy:
     """Verify that zeta_1 > zeta_2 > zeta_3 (inner tolerances get tighter)."""
 
     def test_zeta_decreasing(self, bilinear_3d):
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 1.0
         params = _compute_loop_params(p, epsilon=0.01, gamma=gamma)
         assert params.zeta_1 > 0, "zeta_1 must be positive"
@@ -44,7 +44,7 @@ class TestToleranceHierarchy:
         )
 
     def test_tighter_epsilon_tighter_zeta(self, bilinear_3d):
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 1.0
         params_wide = _compute_loop_params(p, epsilon=0.1, gamma=gamma)
         params_tight = _compute_loop_params(p, epsilon=0.01, gamma=gamma)
@@ -54,7 +54,7 @@ class TestToleranceHierarchy:
 
     def test_hierarchy_holds_across_problem_types(self, quadratic_problem):
         """Hierarchy should hold regardless of problem structure."""
-        p = quadratic_problem["problem"]
+        p = quadratic_problem.problem
         gamma = 2.0
         params = _compute_loop_params(p, epsilon=0.005, gamma=gamma)
         assert params.zeta_3 < params.zeta_2 < params.zeta_1
@@ -65,7 +65,7 @@ class TestThreeLoopParameters:
 
     def test_loop_params_structure(self, bilinear_3d):
         """_LoopParams contains all expected fields with positive values."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 1.0
         params = _compute_loop_params(p, epsilon=0.01, gamma=gamma)
         assert params.T_outer >= 1
@@ -78,7 +78,7 @@ class TestThreeLoopParameters:
 
     def test_iteration_counts_bounded(self, bilinear_3d):
         """T values should be capped (max 200), S values capped (max 4)."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         for eps in [0.1, 0.01, 0.001]:
             params = _compute_loop_params(p, epsilon=eps, gamma=1.0)
             assert params.T_outer <= 200, f"T_outer={params.T_outer} at ε={eps}"
@@ -90,7 +90,7 @@ class TestThreeLoopParameters:
 
     def test_history_contains_all_loop_params(self, bilinear_3d):
         """solve() history dict records every scheduling parameter."""
-        result = solve(bilinear_3d["problem"], epsilon=0.05)
+        result = solve(bilinear_3d.problem, epsilon=0.05)
         required_keys = [
             "gamma", "mu_x", "mu_y",
             "zeta_1", "zeta_2", "zeta_3",
@@ -109,7 +109,7 @@ class TestThreeLoopOnHarderProblems:
     def test_offset_quadratic_solved(self, offset_quadratic):
         """Nonzero saddle point: solver should still converge."""
         p = offset_quadratic
-        result = solve(p["problem"], epsilon=0.05, verbose=False)
+        result = solve(p.problem, epsilon=0.05, verbose=False)
         assert result.gap >= -1e-6
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
@@ -117,15 +117,15 @@ class TestThreeLoopOnHarderProblems:
     def test_offset_quadratic_close_to_saddle(self, offset_quadratic):
         """Solution should be near the known nonzero saddle point."""
         p = offset_quadratic
-        result = solve(p["problem"], epsilon=0.05, verbose=False)
-        err_x = float(jnp.linalg.norm(result.x - p["x_star"]))
-        err_y = float(jnp.linalg.norm(result.y - p["y_star"]))
+        result = solve(p.problem, epsilon=0.05, verbose=False)
+        err_x = float(jnp.linalg.norm(result.x - p.x_star))
+        err_y = float(jnp.linalg.norm(result.y - p.y_star))
         assert err_x < 1.0, f"x error {err_x:.4e} too large"
         assert err_y < 1.0, f"y error {err_y:.4e} too large"
 
     def test_10d_quadratic_converges(self, large_quadratic_10d):
         """10D quadratic: solver must produce finite output."""
-        p = large_quadratic_10d["problem"]
+        p = large_quadratic_10d.problem
         result = solve(p, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
@@ -135,13 +135,13 @@ class TestThreeLoopOnHarderProblems:
     @pytest.mark.slow
     def test_10d_quadratic_gap_small(self, large_quadratic_10d):
         """10D quadratic: achieved gap should be bounded."""
-        p = large_quadratic_10d["problem"]
+        p = large_quadratic_10d.problem
         result = solve(p, epsilon=0.05, verbose=False)
         assert result.gap < 1.0, f"gap={result.gap:.4e} too large for 10D quad"
 
     def test_len_mode_on_harder_problem(self, offset_quadratic):
         """M_saddle='len' on a nontrivial problem should produce valid output."""
-        p = offset_quadratic["problem"]
+        p = offset_quadratic.problem
         result = solve(p, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
@@ -317,7 +317,7 @@ class TestGapEstimatorAtKnownSolutions:
     def test_gap_at_saddle_bilinear(self, bilinear_3d):
         p = bilinear_3d
         gap = estimate_gap(
-            p["problem"], p["x_star"], p["y_star"],
+            p.problem, p.x_star, p.y_star,
             num_restarts=20, num_steps=500,
         )
         assert gap < 0.15, f"gap={gap:.4e} at known saddle (bilinear)"
@@ -325,7 +325,7 @@ class TestGapEstimatorAtKnownSolutions:
     def test_gap_at_saddle_quadratic(self, quadratic_3d):
         p = quadratic_3d
         gap = estimate_gap(
-            p["problem"], p["x_star"], p["y_star"],
+            p.problem, p.x_star, p.y_star,
             num_restarts=20, num_steps=500,
         )
         assert gap < 0.2, f"gap={gap:.4e} at known saddle (quadratic)"
@@ -333,7 +333,7 @@ class TestGapEstimatorAtKnownSolutions:
     def test_gap_at_saddle_1d(self, problem_1d):
         p = problem_1d
         gap = estimate_gap(
-            p["problem"], p["x_star"], p["y_star"],
+            p.problem, p.x_star, p.y_star,
             num_restarts=20, num_steps=500,
         )
         assert gap < 0.1, f"gap={gap:.4e} at known saddle (1D)"
@@ -341,7 +341,7 @@ class TestGapEstimatorAtKnownSolutions:
     def test_gap_at_saddle_offset(self, offset_quadratic):
         p = offset_quadratic
         gap = estimate_gap(
-            p["problem"], p["x_star"], p["y_star"],
+            p.problem, p.x_star, p.y_star,
             num_restarts=20, num_steps=500,
         )
         assert gap < 0.15, f"gap={gap:.4e} at known saddle (offset)"
@@ -357,7 +357,7 @@ class TestGapEstimatorAtNonSaddles:
         x_far = jnp.array([0.5])
         y_far = jnp.array([0.5])
         gap = estimate_gap(
-            p["problem"], x_far, y_far,
+            p.problem, x_far, y_far,
             num_restarts=20, num_steps=500,
         )
         assert gap > 0.3, (
@@ -371,7 +371,7 @@ class TestGapEstimatorAtNonSaddles:
         x_far = jnp.ones(3) * 0.3
         y_far = jnp.ones(3) * 0.3
         gap = estimate_gap(
-            p["problem"], x_far, y_far,
+            p.problem, x_far, y_far,
             num_restarts=20, num_steps=500,
         )
         assert gap > 0.0, f"Expected positive gap at non-saddle, got {gap:.4e}"
@@ -385,11 +385,11 @@ class TestGapEstimatorConsistency:
         from tests.conftest import grid_gap
         p = bilinear_3d
         gap_est = estimate_gap(
-            p["problem"], p["x_star"], p["y_star"],
+            p.problem, p.x_star, p.y_star,
             num_restarts=20, num_steps=500,
         )
         gap_grid = grid_gap(
-            p["problem"], p["x_star"], p["y_star"], n_grid=200,
+            p.problem, p.x_star, p.y_star, n_grid=200,
         )
         # Both should be small (close to zero)
         assert gap_est < 0.2
@@ -404,10 +404,10 @@ class TestGapEstimatorConsistency:
         x = jnp.array([0.5])
         y = jnp.array([0.5])
         gap_est = estimate_gap(
-            p["problem"], x, y,
+            p.problem, x, y,
             num_restarts=30, num_steps=1000,
         )
-        gap_grid = grid_gap(p["problem"], x, y, n_grid=200)
+        gap_grid = grid_gap(p.problem, x, y, n_grid=200)
         assert abs(gap_est - gap_grid) < 0.5, (
             f"estimate_gap={gap_est:.4f} vs grid_gap={gap_grid:.4f}"
         )
@@ -420,15 +420,15 @@ class TestGapEstimatorMonotonicity:
         from tests.conftest import make_1d_bilinear
         p = make_1d_bilinear()
         gap_origin = estimate_gap(
-            p["problem"], jnp.array([0.0]), jnp.array([0.0]),
+            p.problem, jnp.array([0.0]), jnp.array([0.0]),
             num_restarts=20, num_steps=500,
         )
         gap_mid = estimate_gap(
-            p["problem"], jnp.array([0.3]), jnp.array([0.3]),
+            p.problem, jnp.array([0.3]), jnp.array([0.3]),
             num_restarts=20, num_steps=500,
         )
         gap_far = estimate_gap(
-            p["problem"], jnp.array([0.8]), jnp.array([0.8]),
+            p.problem, jnp.array([0.8]), jnp.array([0.8]),
             num_restarts=20, num_steps=500,
         )
         assert gap_mid >= gap_origin - 0.05, (
@@ -440,7 +440,7 @@ class TestGapEstimatorMonotonicity:
 
     def test_gap_at_solver_output_is_small(self, bilinear_3d):
         """The solver's own gap estimate should be small for a zero-gap problem."""
-        result = solve(bilinear_3d["problem"], epsilon=0.05, verbose=False)
+        result = solve(bilinear_3d.problem, epsilon=0.05, verbose=False)
         assert result.gap < 0.5, (
             f"Solver's own gap={result.gap:.4e} too large for zero-gap problem"
         )
@@ -480,7 +480,7 @@ class TestLENvsNPEEquivalence:
 
     def test_m1_quadratic(self, quadratic_3d):
         """Quadratic: m=1 LEN should closely match NPE."""
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         z0 = jnp.array([0.3, -0.1, 0.2, 0.4, -0.3, 0.1])
         T = 20
@@ -495,7 +495,7 @@ class TestLENvsNPEEquivalence:
 
     def test_m1_bilinear(self, bilinear_3d):
         """Bilinear: m=1 LEN should closely match NPE."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         z0 = jnp.array([0.2, -0.15, 0.1, 0.3, -0.2, 0.05])
         T = 15
@@ -509,7 +509,7 @@ class TestLENvsNPEEquivalence:
 
     def test_m1_same_oracle_calls(self, quadratic_3d):
         """Both should report exactly T oracle calls."""
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         gamma = 2.0
         z0 = jnp.zeros(p.dim_x + p.dim_y)
         T = 10
@@ -520,7 +520,7 @@ class TestLENvsNPEEquivalence:
 
     def test_m1_both_converge_to_saddle(self, quadratic_3d):
         """With enough iterations, both reach the neighbourhood of z*."""
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         gamma = 2.0
         z0 = jnp.array([0.5, -0.3, 0.2, -0.4, 0.1, 0.3])
         T = 50
@@ -539,7 +539,7 @@ class TestLENvsNPEEquivalence:
         """
         from minimax_aipe.len import make_lazy_crn_npe_oracle, len_loop
 
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         gamma = 2.0
         z0 = jnp.array([0.3, -0.2, 0.1, 0.4, -0.1, 0.2])
         T = 15
@@ -585,19 +585,19 @@ class TestStronglyConvexConcave:
     def test_offset_quadratic_convergence(self, offset_quadratic):
         """Nonzero saddle: verify convergence in both coordinates."""
         p = offset_quadratic
-        result = solve(p["problem"], epsilon=0.05, verbose=False)
-        err_x = float(jnp.linalg.norm(result.x - p["x_star"]))
-        err_y = float(jnp.linalg.norm(result.y - p["y_star"]))
+        result = solve(p.problem, epsilon=0.05, verbose=False)
+        err_x = float(jnp.linalg.norm(result.x - p.x_star))
+        err_y = float(jnp.linalg.norm(result.y - p.y_star))
         assert err_x < 0.5, f"x error {err_x:.4e}"
         assert err_y < 0.5, f"y error {err_y:.4e}"
 
     def test_offset_gap_at_output(self, offset_quadratic):
         """Gap at solver output should be small for a zero-gap problem."""
         p = offset_quadratic
-        result = solve(p["problem"], epsilon=0.05, verbose=False)
+        result = solve(p.problem, epsilon=0.05, verbose=False)
         # Use estimate_gap for independent verification
         gap_check = estimate_gap(
-            p["problem"], result.x, result.y,
+            p.problem, result.x, result.y,
             num_restarts=20, num_steps=500,
         )
         assert gap_check < 0.3, (
@@ -606,7 +606,7 @@ class TestStronglyConvexConcave:
 
     def test_10d_both_solvers(self, large_quadratic_10d):
         """10D problem should work with both NPE and LEN inner solvers."""
-        p = large_quadratic_10d["problem"]
+        p = large_quadratic_10d.problem
         for mode in ["npe", "len"]:
             result = solve(
                 p, epsilon=0.1, M_saddle=mode,
@@ -621,7 +621,7 @@ class TestGapDecreasesWithTighterEpsilon:
     """Across a sequence of ε values, the achieved gap should decrease."""
 
     def test_bilinear_gap_sequence(self, bilinear_3d):
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         epsilons = [0.1, 0.05, 0.02]
         gaps = []
         for eps in epsilons:
@@ -634,7 +634,7 @@ class TestGapDecreasesWithTighterEpsilon:
             )
 
     def test_quadratic_gap_sequence(self, quadratic_3d):
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         epsilons = [0.1, 0.05, 0.02]
         gaps = []
         for eps in epsilons:
@@ -674,7 +674,7 @@ class TestDirectNPEStronglyConvex:
 
     def test_npe_converges_on_10d(self, large_quadratic_10d):
         """NPE on 10D: ‖F(z)‖ should decrease over epochs."""
-        p = large_quadratic_10d["problem"]
+        p = large_quadratic_10d.problem
         gamma = 2.0
         oracle = make_crn_npe_oracle(p, gamma)
         z0 = jnp.ones(p.dim_x + p.dim_y) * 0.25

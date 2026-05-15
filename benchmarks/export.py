@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 
 import jax
+from minimax_aipe.problem import BenchmarkProblem
+from benchmarks.memory import MemoryResult
 
 
 # ── Metadata ──────────────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ def collect_metadata(
     dims: str | None,
     names: str | None,
     quick: bool,
-    problems: list[dict],
+    problems: list[BenchmarkProblem],
 ) -> dict:
     """Collect environment and run metadata.
 
@@ -90,7 +92,7 @@ def collect_metadata(
             "dims": dims,
             "names": names,
         },
-        "problems": [{"name": p["name"], "dim": p["dim"]} for p in problems],
+        "problems": [{"name": p.name, "dim": p.dim} for p in problems],
     }
 
 
@@ -110,7 +112,7 @@ def flatten_speed_rows(rows: list[dict]) -> list[dict]:
         base = {"name": r["name"], "dim": r["dim"]}
         for solver in ("aipe_npe", "aipe_len", "eg", "gda"):
             t = r[solver]
-            lo, hi = t.get("ci_95", (0.0, 0.0))
+            lo, hi = t.get("ci", (0.0, 0.0))
             base[f"{solver}_mean"] = t["mean"]
             base[f"{solver}_std"] = t.get("std", 0.0)
             base[f"{solver}_ci_lo"] = lo
@@ -130,8 +132,8 @@ def flatten_jit_rows(rows: list[dict]) -> list[dict]:
     for r in rows:
         jit = r["jit"]
         eager = r["eager"]
-        jit_lo, jit_hi = jit.get("ci_95", (0.0, 0.0))
-        eager_lo, eager_hi = eager.get("ci_95", (0.0, 0.0))
+        jit_lo, jit_hi = jit.get("ci", (0.0, 0.0))
+        eager_lo, eager_hi = eager.get("ci", (0.0, 0.0))
         flat.append({
             "name": r["name"], "dim": r["dim"],
             "jit_mean": jit["mean"], "jit_std": jit.get("std", 0.0),
@@ -143,13 +145,16 @@ def flatten_jit_rows(rows: list[dict]) -> list[dict]:
     return flat
 
 
-def flatten_memory_rows(rows: list) -> list[dict]:
+def flatten_memory_rows(rows: list[MemoryResult]) -> list[dict]:
     flat = []
     for r in rows:
-        d = {"name": r.name, "dim": r.dim, "peak_mb": r.peak_mb, "current_mb": r.current_mb}
-        if r.device_memory:
-            d["device_peak_mb"] = r.device_memory.get("peak_bytes_in_use", 0) / (1024 * 1024)
-        flat.append(d)
+        flat.append({
+            "name": r.name,
+            "dim": r.dim,
+            "solver": r.solver,
+            "peak_mb": r.peak_bytes / (1024 * 1024),
+            "jax_mb": r.jax_bytes / (1024 * 1024),
+        })
     return flat
 
 

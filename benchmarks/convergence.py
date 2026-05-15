@@ -12,17 +12,18 @@ import jax.numpy as jnp
 from minimax_aipe import solve
 from benchmarks.baselines import run_eg_jit_benchmark
 from benchmarks.oracles import count_eg_oracles
+from minimax_aipe.problem import BenchmarkProblem
 
 
 def sweep_epsilon(
-    problem_dict: dict,
+    prob,
     epsilons: list[float],
 ) -> list[dict]:
     """Run AIPE-NPE, AIPE-LEN, and JIT-EG at each ε and collect gap + oracle calls.
 
     Parameters
     ----------
-    problem_dict : dict
+    prob : BenchmarkProblem
         From the problem zoo.
     epsilons : list[float]
         Target gap values to sweep.
@@ -34,26 +35,27 @@ def sweep_epsilon(
         npe_gap, npe_oracle_calls, len_gap, len_oracle_calls,
         eg_gap, eg_grad_calls.
     """
-    problem = problem_dict["problem"]
-    name = problem_dict.get("name", "?")
-    dim = problem_dict.get("dim", problem.dim_x)
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
+    name = prob.name or "?"
+    dim = prob.dim or problem.dim_x
 
     rows = []
     for eps in epsilons:
         row = {"name": name, "dim": dim, "epsilon": eps}
 
         # AIPE-NPE
-        r_npe = solve(problem, epsilon=eps, M_saddle="npe", z0=problem_dict.get("z0"))
+        r_npe = solve(problem, epsilon=eps, M_saddle="npe", z0=prob.z0)
         row["npe_gap"] = float(r_npe.gap)
         row["npe_oracle_calls"] = r_npe.oracle_calls
 
         # AIPE-LEN
-        r_len = solve(problem, epsilon=eps, M_saddle="len", m_lazy=5, z0=problem_dict.get("z0"))
+        r_len = solve(problem, epsilon=eps, M_saddle="len", m_lazy=5, z0=prob.z0)
         row["len_gap"] = float(r_len.gap)
         row["len_oracle_calls"] = r_len.oracle_calls
 
         # JIT-EG (early stopping enabled via tol)
-        eg_res = run_eg_jit_benchmark(problem, epsilon=eps, max_iters=5000, z0=problem_dict.get("z0"))
+        eg_res = run_eg_jit_benchmark(problem, epsilon=eps, max_iters=5000, z0=prob.z0)
         eg_counter = count_eg_oracles(eg_res.iterations)
         
         row["eg_gap"] = float(eg_res.gap)

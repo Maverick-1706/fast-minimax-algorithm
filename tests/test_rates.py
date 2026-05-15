@@ -52,7 +52,7 @@ class TestBilinearRate:
 
     def test_oracle_calls_increasing(self, bilinear_3d):
         """Oracle calls should increase (or stay flat) as ε decreases."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         calls = []
         for eps in [0.1, 0.05, 0.01, 0.005]:
             result = solve(p, epsilon=eps, verbose=False)
@@ -71,7 +71,7 @@ class TestBilinearRate:
         small sample sizes, and implementation constants, we accept
         0.2 ≤ p ≤ 1.5.
         """
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         epsilons = [0.1, 0.05, 0.02, 0.01, 0.005]
         calls = []
         valid_eps = []
@@ -95,7 +95,7 @@ class TestBilinearRate:
     def test_rate_across_seeds(self, seed):
         """Rate is stable across different random matrix seeds."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=4, seed=seed)["problem"]
+        p = make_bilinear_problem(dim=4, seed=seed).problem
 
         epsilons = [0.1, 0.05, 0.02, 0.01]
         calls = []
@@ -114,7 +114,7 @@ class TestBilinearRate:
 class TestQuadraticRate:
 
     def test_oracle_calls_increasing(self, quadratic_3d):
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         calls = []
         for eps in [0.1, 0.05, 0.02, 0.01]:
             result = solve(p, epsilon=eps, verbose=False)
@@ -124,7 +124,7 @@ class TestQuadraticRate:
             assert calls[i + 1] >= calls[i] - 1
 
     def test_power_law_exponent_bounded(self, quadratic_3d):
-        p = quadratic_3d["problem"]
+        p = quadratic_3d.problem
         epsilons = [0.1, 0.05, 0.02, 0.01, 0.005]
         calls = []
         valid_eps = []
@@ -155,7 +155,7 @@ class TestNPEBaselineRate:
         """NPE-restart oracle calls should increase with 1/ε."""
         from minimax_aipe import npe_restart, make_crn_npe_oracle
 
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -183,7 +183,7 @@ class TestNPEBaselineRate:
         """NPE rate should be steeper than 0.3 (roughly ε^{-2/3})."""
         from minimax_aipe import npe_restart, make_crn_npe_oracle
 
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gamma = 2.0 * max(p.rho or 1.0, 1e-6)
         oracle = make_crn_npe_oracle(p, gamma)
         F_fn = p.operator_F
@@ -213,13 +213,13 @@ class TestGapConvergence:
 
     def test_gap_below_epsilon(self, bilinear_3d, epsilon):
         """For a zero-gap problem, achieved gap should be small."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         result = solve(p, epsilon=epsilon, verbose=False)
         assert result.gap <= epsilon * 1.5, f"Solver failed to reach epsilon. Gap: {result.gap}, Eps: {epsilon}" 
 
     def test_gap_decreasing_sequence(self, bilinear_3d):
         """Gaps form a non-increasing sequence as ε tightens."""
-        p = bilinear_3d["problem"]
+        p = bilinear_3d.problem
         gaps = []
         for eps in [0.1, 0.05, 0.02, 0.01]:
             result = solve(p, epsilon=eps, verbose=False)

@@ -82,11 +82,11 @@ def _run_jit(problems, epsilon, n_repeats, export_data):
     print(_header("JIT vs Eager"))
     jit_problems = problems[:3] if len(problems) > 3 else problems
     jit_rows = []
-    for prob_dict in jit_problems:
-        name = prob_dict.get("name", "?")
-        dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+    for prob in jit_problems:
+        name = prob.name or "?"
+        dim = prob.dim or prob.problem.dim_x
         print(f"  JIT vs eager: {name} dim={dim} ...")
-        r = benchmark_jit_vs_eager(prob_dict, epsilon=epsilon, n_repeats=n_repeats)
+        r = benchmark_jit_vs_eager(prob, epsilon=epsilon, n_repeats=n_repeats)
         jit_rows.append({"name": name, "dim": dim, **r})
     print()
     print(format_jit_table(jit_rows))
@@ -151,11 +151,11 @@ def _run_convergence(problems, epsilon, export_data):
     from benchmarks.convergence import sweep_epsilon, format_convergence_table
     print(_header("Convergence: ε-Sweep"))
     epsilons = [0.1, 0.05, 0.01, 0.005]
-    for prob_dict in problems[:2]:
-        name = prob_dict.get("name", "?")
-        dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+    for prob in problems[:2]:
+        name = prob.name or "?"
+        dim = prob.dim or prob.problem.dim_x
         print(f"  {name} dim={dim}:")
-        rows = sweep_epsilon(prob_dict, epsilons)
+        rows = sweep_epsilon(prob, epsilons)
         print(format_convergence_table(rows))
         print()
         export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
@@ -172,26 +172,26 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     print(_header("Ablation"))
 
     # m_lazy sweep
-    prob_dict = problems[0]
-    name = prob_dict.get("name", "?")
-    dim = prob_dict.get("dim", prob_dict["problem"].dim_x)
+    prob = problems[0]
+    name = prob.name or "?"
+    dim = prob.dim or prob.problem.dim_x
     print(f"  m_lazy sweep on {name} dim={dim}:")
-    m_rows = ablation_m_lazy(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+    m_rows = ablation_m_lazy(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
     print(format_ablation_m_table(m_rows))
     export_data.setdefault("ablation_m", []).extend(m_rows)
     print()
 
     # T_factor sweep
     print(f"  T_factor sweep on {name} dim={dim}:")
-    t_rows = ablation_npe_t_factor(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+    t_rows = ablation_npe_t_factor(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
     print(format_ablation_t_table(t_rows))
     export_data.setdefault("ablation_t", []).extend(flatten_ablation_rows(t_rows))
     print()
 
     # NPE vs LEN head-to-head
     print("  NPE vs LEN head-to-head:")
-    for prob_dict in problems[:3]:
-        r = ablation_npe_vs_len(prob_dict, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+    for prob in problems[:3]:
+        r = ablation_npe_vs_len(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
         npe_t = r["npe"]["time_mean"]
         len_t = r["len"]["time_mean"]
         print(f"    {r['name']:18s} dim={r['dim']:>4}  "
@@ -243,7 +243,7 @@ def main():
 
     print(f"Problems ({len(problems)}):")
     for p in problems:
-        print(f"  {p['name']:22s}  dim={p['dim']}")
+        print(f"  {p.name:22s}  dim={p.dim}")
     print()
 
     # ── Metadata ────────────────────────────────────────────────────

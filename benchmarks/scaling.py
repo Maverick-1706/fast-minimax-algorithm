@@ -17,12 +17,31 @@ import jax
 from minimax_aipe import solve
 from benchmarks.baselines import run_eg_jit_benchmark
 from benchmarks.stats import bootstrap_ci
+from minimax_aipe.problem import BenchmarkProblem
 
 
-def _time_solve(prob_dict, epsilon: float, M_saddle: str, n_repeats: int) -> dict:
-    """Time a single solve configuration and return stats."""
-    problem = prob_dict["problem"]
-    kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob_dict["z0"]}
+def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats: int) -> dict:
+    """Time a single solve configuration and return stats.
+
+    Parameters
+    ----------
+    prob : BenchmarkProblem
+        The problem to solve.
+    epsilon : float
+        Target duality gap.
+    M_saddle : str
+        Saddle point solver ("npe" or "len").
+    n_repeats : int
+        Number of timed repetitions.
+
+    Returns
+    -------
+    dict
+        {time_mean, time_ci, oracle_calls, gap, iterations, converged}
+    """
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
+    kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
     if M_saddle == "len":
         kwargs["m_lazy"] = 5
 
@@ -79,12 +98,12 @@ def scale_dimension(
     rows = []
     for i, dim in enumerate(dims):
         prob_seed = (seed + i) if seed is not None else None
-        prob_dict = get_problem(problem_type, dim, seed=prob_seed)
-        problem = prob_dict["problem"]
+        prob = get_problem(problem_type, dim, seed=prob_seed)
+        problem = prob.problem
 
-        npe = _time_solve(prob_dict, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob_dict, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob_dict["z0"])
+        npe = _time_solve(prob, epsilon, "npe", n_repeats)
+        lnn = _time_solve(prob, epsilon, "len", n_repeats)
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
 
         rows.append({
             "problem": problem_type,
@@ -141,12 +160,12 @@ def scale_condition_number(
     rows = []
     for i, kappa in enumerate(condition_numbers):
         prob_seed = (seed + i) if seed is not None else None
-        prob_dict = get_problem(problem_type, dim, seed=prob_seed, condition_number=kappa)
-        problem = prob_dict["problem"]
+        prob = get_problem(problem_type, dim, seed=prob_seed, condition_number=kappa)
+        problem = prob.problem
 
-        npe = _time_solve(prob_dict, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob_dict, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob_dict["z0"])
+        npe = _time_solve(prob, epsilon, "npe", n_repeats)
+        lnn = _time_solve(prob, epsilon, "len", n_repeats)
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
 
         rows.append({
             "problem": problem_type,
@@ -180,18 +199,36 @@ def scale_rho(
     """Measure solve time vs Hessian Lipschitz constant ρ.
 
     Uses the ``nonzero_rho`` problem constructor.
+
+    Parameters
+    ----------
+    rho_values : list[float]
+        ρ values to test.
+    dim : int
+        Problem dimension.
+    epsilon : float
+        Target gap.
+    n_repeats : int
+        Timed runs per ρ.
+    seed : int or None
+        Seed for problem constructors.
+
+    Returns
+    -------
+    list[dict]
+        One dict per ρ with timing and oracle call stats.
     """
     from benchmarks.problems import get_problem
 
     rows = []
     for i, rho in enumerate(rho_values):
         prob_seed = (seed + i) if seed is not None else None
-        prob_dict = get_problem("nonzero_rho", dim, seed=prob_seed, rho=rho)
-        problem = prob_dict["problem"]
+        prob = get_problem("nonzero_rho", dim, seed=prob_seed, rho=rho)
+        problem = prob.problem
 
-        npe = _time_solve(prob_dict, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob_dict, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob_dict["z0"])
+        npe = _time_solve(prob, epsilon, "npe", n_repeats)
+        lnn = _time_solve(prob, epsilon, "len", n_repeats)
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
 
         rows.append({
             "problem": "nonzero_rho",

@@ -8,7 +8,7 @@ Provides the building blocks called by the outer / middle / inner loops:
 """
 
 from __future__ import annotations
-
+from minimax_aipe import REG_MIN
 from typing import Callable, Optional
 
 import jax
@@ -147,7 +147,8 @@ def crn_oracle(
         lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
         return _stable_lam_update(lam, lam_candidate), z_new
 
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar))
+    lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
+    lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u
@@ -184,7 +185,8 @@ def crn_oracle_minimization(
         lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
         return _stable_lam_update(lam, lam_candidate), z_new
 
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar))
+    lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
+    lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u

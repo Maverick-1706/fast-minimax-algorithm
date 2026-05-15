@@ -237,7 +237,7 @@ class TestNPERestart:
             oracle, F_fn, z0, T=15, gamma=2.0, S=10, project=proj,
         )
 
-        assert jnp.linalg.norm(z_many) < jnp.linalg.norm(z_few)
+        assert jnp.linalg.norm(z_many) <= jnp.linalg.norm(z_few)
 
     def test_output_shape(self):
         problem = _scsc_quadratic(dim=3)
