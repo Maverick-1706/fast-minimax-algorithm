@@ -2,8 +2,8 @@
 
 Common configuration at package import time:
   - Forces CPU backend (set JAX_PLATFORMS=metal explicitly for GPU)
-  - Enforces float64 precision for reproducibility
-  - Sets global random seed if BENCHMARK_SEED env var is set
+  - Enforces float32 precision (configurable via config.ENABLE_X64)
+  - Sets global random seed from config or BENCHMARK_SEED env var
 
 IMPORTANT: JAX_PLATFORMS must be set before JAX is imported.  This module
 is imported before any JAX code runs, so the env var takes effect here.
@@ -19,10 +19,11 @@ os.environ.setdefault("JAX_PLATFORMS", "")
 import jax
 import numpy as np
 
-jax.config.update("jax_enable_x64", False)
+from benchmarks import config
 
-_SEED = os.environ.get("BENCHMARK_SEED")
-GLOBAL_SEED = int(_SEED) if _SEED is not None else None
-if _SEED is not None:
-    random.seed(int(_SEED))
-    np.random.seed(int(_SEED))
+jax.config.update("jax_enable_x64", config.ENABLE_X64)
+
+GLOBAL_SEED: int | None = config.BENCHMARK_SEED
+if GLOBAL_SEED is not None:
+    random.seed(GLOBAL_SEED)
+    np.random.seed(GLOBAL_SEED)

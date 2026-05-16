@@ -2,9 +2,14 @@
 
 Used by both tests (tests/conftest.py) and benchmarks (benchmarks/problems.py).
 Every constructor returns a :class:`minimax_aipe.problem.BenchmarkProblem`.
+
+All constructors accept a ``kappa`` parameter controlling the condition number
+of the problem's eigenvalue spectrum for reproducible scaling-law studies.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -13,13 +18,40 @@ from minimax_aipe import MinimaxProblem
 from minimax_aipe.problem import BenchmarkProblem, build_benchmark_meta
 
 
-def make_bilinear_problem(dim: int = 3, seed: int = 42) -> BenchmarkProblem:
+def _log_spaced_eigenvalues(dim: int, kappa: float) -> jnp.ndarray:
+    """Return *dim* eigenvalues log-spaced from 1 to *kappa*."""
+    if kappa < 1.0:
+        raise ValueError(f"kappa must be >= 1.0, got {kappa}")
+    if kappa == 1.0:
+        return jnp.ones(dim)
+    return jnp.logspace(0.0, jnp.log10(kappa), dim)
+
+
+def make_bilinear_problem(dim: int = 3, kappa: float = 1.0, seed: int = 42) -> BenchmarkProblem:
     """Bilinear game  f(x,y) = x^T A y.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x and y.
+    kappa : float
+        Condition number of A.  Singular values are log-spaced in
+        ``[1, kappa]``.  ``kappa=1`` gives the identity (unit singular
+        values).
+    seed : int
+        Deterministic seed.
 
     Solution: x* = y* = 0, gap = 0.
     """
     key = jax.random.PRNGKey(seed)
-    A = jax.random.normal(key, (dim, dim))
+    k1, k2 = jax.random.split(key)
+
+    U, _ = jnp.linalg.qr(jax.random.normal(k1, (dim, dim)))
+    V, _ = jnp.linalg.qr(jax.random.normal(k2, (dim, dim)))
+    sigmas = _log_spaced_eigenvalues(dim, kappa)
+    A = U @ jnp.diag(sigmas) @ V.T
+
+    ell = float(jnp.max(sigmas))
     D = 2.0
 
     def f(x, y):
@@ -36,7 +68,7 @@ def make_bilinear_problem(dim: int = 3, seed: int = 42) -> BenchmarkProblem:
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=0.0, ell=0.0,
+        rho=0.0, ell=ell,
     )
     return BenchmarkProblem(
         problem=problem,
@@ -49,18 +81,37 @@ def make_bilinear_problem(dim: int = 3, seed: int = 42) -> BenchmarkProblem:
     )
 
 
-def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> BenchmarkProblem:
+def make_quadratic_saddle_problem(
+    dim: int = 3,
+    kappa: float = 1.0,
+    coupling_strength: float = 0.5,
+    seed: int = 0,
+) -> BenchmarkProblem:
     """Quadratic minimax  f(x,y) = ½ x^T Q x + x^T B y - ½ y^T R y.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x and y.
+    kappa : float
+        Condition number of Q.  Eigenvalues are log-spaced in ``[1, kappa]``.
+        R = I (well-conditioned dual side).
+    coupling_strength : float
+        Scale of the random coupling matrix B.
+    seed : int
+        Deterministic seed.
 
     With Q, R ≻ 0.  KKT at the origin for all valid Q, R, B.
     """
-    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(seed), 3)
+    key = jax.random.PRNGKey(seed)
+    k1, k2, k3 = jax.random.split(key, 3)
 
-    L_q = jax.random.normal(k1, (dim, dim))
-    Q = L_q @ L_q.T + jnp.eye(dim)
-    L_r = jax.random.normal(k2, (dim, dim))
-    R = L_r @ L_r.T + jnp.eye(dim)
-    B = jax.random.normal(k3, (dim, dim)) * 0.5
+    eigvals = _log_spaced_eigenvalues(dim, kappa)
+    U_q, _ = jnp.linalg.qr(jax.random.normal(k1, (dim, dim)))
+    Q = U_q @ jnp.diag(eigvals) @ U_q.T
+
+    R = jnp.eye(dim)
+    B = jax.random.normal(k2, (dim, dim)) * coupling_strength
 
     D = 4.0
 
@@ -73,10 +124,11 @@ def make_quadratic_saddle_problem(dim: int = 3, seed: int = 0) -> BenchmarkProbl
     def hessian_f(x, y):
         return ((Q, B), (B.T, -R))
 
+    KKT = jnp.block([[Q, B], [B.T, -R]])
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=0.0, ell=float(jnp.linalg.norm(jnp.block([[Q, B], [B.T, R]]), ord=2)),
+        rho=0.0, ell=float(jnp.linalg.norm(KKT, ord=2)),
     )
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
@@ -151,18 +203,39 @@ def make_separable_problem() -> BenchmarkProblem:
     )
 
 
-def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, seed: int = 42) -> BenchmarkProblem:
-    """Bilinear game  f(x,y) = x^T A y  where  κ(A) = condition_number.
+def make_ill_conditioned_bilinear(dim: int = 4, kappa: float = 1e4, seed: int = 42, **kwargs) -> BenchmarkProblem:
+    """Bilinear game  f(x,y) = x^T A y  where  κ(A) = *kappa*.
 
-    Constructs A = U @ diag(σ) @ V^T with σ log-spaced from 1 to condition_number.
+    Constructs A = U @ diag(σ) @ V^T with σ log-spaced from 1 to *kappa*.
     Saddle at origin, gap = 0.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x and y.
+    kappa : float
+        Condition number of A.
+    seed : int
+        Deterministic seed.
+    **kwargs
+        Deprecated: ``condition_number`` is accepted as an alias for ``kappa``.
     """
+    if "condition_number" in kwargs:
+        warnings.warn(
+            "condition_number is deprecated, use kappa instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kappa = kwargs.pop("condition_number")
+    if kwargs:
+        raise TypeError(f"Unexpected keyword arguments: {list(kwargs)}")
+
     key = jax.random.PRNGKey(seed)
     k1, k2 = jax.random.split(key)
 
     U, _ = jnp.linalg.qr(jax.random.normal(k1, (dim, dim)))
     V, _ = jnp.linalg.qr(jax.random.normal(k2, (dim, dim)))
-    sigmas = jnp.logspace(0.0, jnp.log10(condition_number), dim)
+    sigmas = _log_spaced_eigenvalues(dim, kappa)
     A = U @ jnp.diag(sigmas) @ V.T
 
     ell = float(jnp.max(sigmas))
@@ -194,19 +267,40 @@ def make_ill_conditioned_bilinear(dim: int = 4, condition_number: float = 1e4, s
     )
 
 
-def make_ill_conditioned_quadratic(dim: int = 4, condition_number: float = 1e4, seed: int = 0) -> BenchmarkProblem:
+def make_ill_conditioned_quadratic(dim: int = 4, kappa: float = 1e4, seed: int = 0, **kwargs) -> BenchmarkProblem:
     """Quadratic minimax with ill-conditioned Hessian block Q.
 
     f(x,y) = ½ x^T Q x + x^T B y - ½ y^T R y
-    Q has eigenvalues log-spaced from 1 to condition_number.
+    Q has eigenvalues log-spaced from 1 to *kappa*.
     R = I, B = small random.
     Saddle at origin, gap = 0.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x and y.
+    kappa : float
+        Condition number of Q.
+    seed : int
+        Deterministic seed.
+    **kwargs
+        Deprecated: ``condition_number`` is accepted as an alias for ``kappa``.
     """
+    if "condition_number" in kwargs:
+        warnings.warn(
+            "condition_number is deprecated, use kappa instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kappa = kwargs.pop("condition_number")
+    if kwargs:
+        raise TypeError(f"Unexpected keyword arguments: {list(kwargs)}")
+
     key = jax.random.PRNGKey(seed)
     k1, k2, k3 = jax.random.split(key, 3)
 
     U_q, _ = jnp.linalg.qr(jax.random.normal(k1, (dim, dim)))
-    eigvals = jnp.logspace(0.0, jnp.log10(condition_number), dim)
+    eigvals = _log_spaced_eigenvalues(dim, kappa)
     Q = U_q @ jnp.diag(eigvals) @ U_q.T
 
     R = jnp.eye(dim)
@@ -294,25 +388,31 @@ def make_offset_quadratic() -> BenchmarkProblem:
     )
 
 
-def make_10d_quadratic(seed: int = 0) -> BenchmarkProblem:
-    """10D (5+5) strongly convex quadratic with coupling.
+def make_10d_quadratic(dim: int = 5, kappa: float = 10.0, seed: int = 0) -> BenchmarkProblem:
+    """Strongly convex quadratic with coupling — scalable beyond 10D.
 
     f(x,y) = ½ x^T Q x + x^T B y − ½ y^T R y
 
-    Q ∈ R^{5×5}, R ∈ R^{5×5} positive definite with controlled eigenvalue
-    spread.  B provides coupling between x and y.  Saddle at origin.
+    Q eigenvalues log-spaced in [1, kappa], R = I.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x (and y).  Default 5 (= 10D total).
+    kappa : float
+        Condition number of Q.  Default 10.0.
+    seed : int
+        Deterministic seed.
     """
-    dim = 5
     key = jax.random.PRNGKey(seed)
     k1, k2, k3 = jax.random.split(key, 3)
 
+    eigvals = _log_spaced_eigenvalues(dim, kappa)
     U_q, _ = jnp.linalg.qr(jax.random.normal(k1, (dim, dim)))
-    Q = U_q @ jnp.diag(jnp.linspace(1.0, 10.0, dim)) @ U_q.T
+    Q = U_q @ jnp.diag(eigvals) @ U_q.T
 
-    U_r, _ = jnp.linalg.qr(jax.random.normal(k2, (dim, dim)))
-    R = U_r @ jnp.diag(jnp.linspace(1.0, 5.0, dim)) @ U_r.T
-
-    B = jax.random.normal(k3, (dim, dim)) * 0.3
+    R = jnp.eye(dim)
+    B = jax.random.normal(k2, (dim, dim)) * 0.3
 
     KKT = jnp.block([[Q, B], [B.T, -R]])
     ell = float(jnp.linalg.norm(KKT, ord=2))

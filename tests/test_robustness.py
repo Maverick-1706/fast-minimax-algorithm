@@ -91,7 +91,7 @@ class TestExtremeConditioning:
     @pytest.mark.slow
     def test_bilinear_kappa_1e6_no_nans(self):
         from tests.conftest import make_ill_conditioned_bilinear
-        p = make_ill_conditioned_bilinear(dim=3, condition_number=1e6, seed=42)
+        p = make_ill_conditioned_bilinear(dim=3, kappa=1e6, seed=42)
         result = solve(p.problem, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x)), "NaN at κ=1e6"
         assert jnp.all(jnp.isfinite(result.y)), "NaN at κ=1e6"

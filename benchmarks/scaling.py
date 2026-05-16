@@ -2,8 +2,9 @@
 
 Measures how solver performance scales with:
   - Problem dimension (diagonal_saddle is ideal — O(n) per oracle call)
-  - Condition number (ill_conditioned_* problems)
+  - Condition number κ (ill_conditioned_* problems)
   - Hessian Lipschitz constant ρ (nonzero_rho problem)
+  - Sparsity (diagonal_saddle with sparsity parameter)
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import time
 import jax
 
 from minimax_aipe import solve
+from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark
 from benchmarks.results import BenchmarkResult
 from benchmarks.oracles import count_eg_oracles
@@ -23,24 +25,33 @@ from benchmarks.stats import bootstrap_ci
 from minimax_aipe.problem import BenchmarkProblem
 
 
-def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats: int) -> BenchmarkResult:
+def _time_solve(
+    prob: BenchmarkProblem,
+    epsilon: float | None = None,
+    M_saddle: str = "npe",
+    n_repeats: int | None = None,
+) -> BenchmarkResult:
     """Time a single solve configuration and return a BenchmarkResult.
 
     Parameters
     ----------
     prob : BenchmarkProblem
         The problem to solve.
-    epsilon : float
-        Target duality gap.
+    epsilon : float or None
+        Target duality gap.  Defaults to ``config.EPSILON_DEFAULT``.
     M_saddle : str
         Saddle point solver ("npe" or "len").
-    n_repeats : int
-        Number of timed repetitions.
+    n_repeats : int or None
+        Number of timed repetitions.  Defaults to ``config.N_REPEATS_SCALING``.
 
     Returns
     -------
     BenchmarkResult
     """
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_SCALING
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
     kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
@@ -79,8 +90,8 @@ def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats
 def scale_dimension(
     problem_type: str,
     dims: list[int],
-    epsilon: float = 0.05,
-    n_repeats: int = 3,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
     seed: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time vs dimension for a given problem type.
@@ -138,10 +149,12 @@ def scale_dimension(
 
 def scale_condition_number(
     problem_type: str,
-    condition_numbers: list[float],
+    kappas: list[float] | None = None,
+    *,
+    condition_numbers: list[float] | None = None,
     dim: int = 10,
-    epsilon: float = 0.05,
-    n_repeats: int = 3,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
     seed: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time vs condition number at fixed dimension.
@@ -150,8 +163,10 @@ def scale_condition_number(
     ----------
     problem_type : str
         "ill_bilinear" or "ill_quadratic".
-    condition_numbers : list[float]
-        κ values to test.
+    kappas : list[float] or None
+        κ values to test.  Preferred parameter name.
+    condition_numbers : list[float] or None
+        Deprecated alias for *kappas*.
     dim : int
         Fixed dimension.
     epsilon : float
@@ -165,12 +180,24 @@ def scale_condition_number(
     -------
     list[BenchmarkResult]
     """
+    if condition_numbers is not None:
+        import warnings
+        warnings.warn(
+            "condition_numbers is deprecated, use kappas instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if kappas is None:
+            kappas = condition_numbers
+    if kappas is None:
+        raise TypeError("Must provide kappas (or deprecated condition_numbers)")
+
     from benchmarks.problems import get_problem
 
     rows = []
-    for i, kappa in enumerate(condition_numbers):
+    for i, kappa in enumerate(kappas):
         prob_seed = (seed + i) if seed is not None else None
-        prob = get_problem(problem_type, dim, seed=prob_seed, condition_number=kappa)
+        prob = get_problem(problem_type, dim, seed=prob_seed, kappa=kappa)
         problem = prob.problem
 
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
@@ -202,8 +229,8 @@ def scale_condition_number(
 def scale_rho(
     rho_values: list[float],
     dim: int = 10,
-    epsilon: float = 0.05,
-    n_repeats: int = 3,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
     seed: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time vs Hessian Lipschitz constant ρ.
@@ -277,7 +304,7 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
     def _key_val(r: BenchmarkResult) -> float:
         if key_col == "dim":
             return float(r.dim)
-        elif key_col == "condition_number":
+        elif key_col in ("condition_number", "kappa"):
             return r.condition_number or 0.0
         elif key_col == "rho":
             return r.rho or 0.0
@@ -306,3 +333,70 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
         )
 
     return "\n".join(lines)
+
+
+def scale_sparsity(
+    sparsity_values: list[float],
+    dim: int = 100,
+    kappa: float = 1e4,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
+    seed: int | None = None,
+) -> list[BenchmarkResult]:
+    """Measure solve time vs coupling sparsity at fixed dimension and κ.
+
+    Uses the ``diagonal_saddle`` problem constructor with its ``sparsity``
+    parameter.
+
+    Parameters
+    ----------
+    sparsity_values : list[float]
+        Sparsity values to test (0 = dense, 1 = fully sparse).
+    dim : int
+        Problem dimension.
+    kappa : float
+        Condition number for eigenvalue spectrum.
+    epsilon : float
+        Target gap.
+    n_repeats : int
+        Timed runs per sparsity value.
+    seed : int or None
+        Seed for problem constructors.
+
+    Returns
+    -------
+    list[BenchmarkResult]
+        One BenchmarkResult per (solver, sparsity).
+    """
+    from benchmarks.problems import get_problem
+
+    rows = []
+    for i, sparsity in enumerate(sparsity_values):
+        prob_seed = (seed + i) if seed is not None else None
+        prob = get_problem("diagonal_saddle", dim, seed=prob_seed,
+                           kappa=kappa, sparsity=sparsity)
+        problem = prob.problem
+
+        rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
+        rows.append(_time_solve(prob, epsilon, "len", n_repeats))
+
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        d = dim * 2
+        eg_stats = count_eg_oracles(eg_result.iterations)
+        rows.append(BenchmarkResult(
+            solver="eg",
+            problem="diagonal_saddle",
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=eg_result.wall_time,
+            wall_time_std=0.0,
+            ci=(eg_result.wall_time, eg_result.wall_time),
+            oracle_stats=eg_stats,
+            converged=eg_result.converged,
+            gap_achieved=eg_result.gap_achieved,
+            final_gap=eg_result.gap,
+            iterations=eg_result.iterations,
+            normalized_cost=eg_stats.normalized_cost(d),
+        ))
+
+    return rows

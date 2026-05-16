@@ -24,7 +24,7 @@ from minimax_aipe.problem import BenchmarkProblem, build_benchmark_meta
 
 # ── Shared constants ─────────────────────────────────────────────────────
 
-TOLERANCE_LEVELS = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3]
+from benchmarks.config import TOLERANCE_LEVELS
 
 MAX_DIM = 6   # keep problems small for test speed
 
@@ -110,12 +110,12 @@ def large_quadratic_10d():
 
 @pytest.fixture
 def ill_conditioned_bilinear():
-    return make_ill_conditioned_bilinear(dim=4, condition_number=1e4, seed=42)
+    return make_ill_conditioned_bilinear(dim=4, kappa=1e4, seed=42)
 
 
 @pytest.fixture
 def ill_conditioned_quadratic():
-    return make_ill_conditioned_quadratic(dim=4, condition_number=1e4, seed=0)
+    return make_ill_conditioned_quadratic(dim=4, kappa=1e4, seed=0)
 
 
 @pytest.fixture(params=[

@@ -12,6 +12,7 @@ import itertools
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark
 from benchmarks.results import BenchmarkResult
 from benchmarks.oracles import count_eg_oracles

@@ -1,8 +1,8 @@
 """Wall-clock benchmarks (JIT-normalized).
 
 Every baseline is JIT-compiled via jax.lax.fori_loop for identical
-compilation treatment.  All timing uses bootstrap 95% CI (default 5
-repeats) and IQR outlier flagging.
+compilation treatment.  All timing uses BCa bootstrap 95% CI, IQR
+outlier removal, and automated repeat-policy when variance is high.
 """
 
 from __future__ import annotations
@@ -15,20 +15,30 @@ import jax
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
 from benchmarks.results import BenchmarkResult
-from benchmarks.stats import summarise
+from benchmarks.stats import summarise, should_repeat
 from minimax_aipe.problem import BenchmarkProblem
 
 
 # ── Timing infrastructure ────────────────────────────────────────────────
 
 
-def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
-    """Time a callable with warmup runs.
+def _time_callable(fn, n_warmup: int | None = None, n_repeats: int | None = None) -> dict:
+    """Time a callable with warmup runs and automated repeat-policy.
+
+    If ``config.AUTO_REPEAT`` is True, extra repetitions are added when
+    the coefficient of variation is too high or too many outliers are
+    detected.
 
     Returns dict with {mean, std, min, max, ci, raw_times, summary}.
     """
+    if n_warmup is None:
+        n_warmup = config.N_WARMUP
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_FULL
+
     last_result = None
     for _ in range(n_warmup):
         last_result = fn()
@@ -40,6 +50,19 @@ def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
         last_result = fn()
         t1 = time.perf_counter()
         times.append(t1 - t0)
+
+    # ── Automated repeat policy ───────────────────────────────────────
+    if config.AUTO_REPEAT:
+        for _ in range(config.AUTO_REPEAT_MAX_EXTRA):
+            decision = should_repeat(times)
+            if not decision.should_repeat:
+                break
+            for _ in range(config.AUTO_REPEAT_N):
+                gc.collect()
+                t0 = time.perf_counter()
+                last_result = fn()
+                t1 = time.perf_counter()
+                times.append(t1 - t0)
 
     s = summarise(times)
 
@@ -61,12 +84,14 @@ def _time_callable(fn, n_warmup: int = 1, n_repeats: int = 5) -> dict:
 
 def benchmark_jit_vs_eager(
     prob: BenchmarkProblem,
-    epsilon: float = 0.01,
-    n_warmup: int = 1,
-    n_repeats: int = 5,
+    epsilon: float | None = None,
+    n_warmup: int | None = None,
+    n_repeats: int | None = None,
     M_saddle: str = "npe",
 ) -> dict:
     """Compare JAX JIT enabled vs disabled on the pure numerical core."""
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
 
@@ -127,13 +152,17 @@ def benchmark_jit_vs_eager(
 
 def benchmark_solver_comparison(
     problems: list[BenchmarkProblem],
-    epsilon: float = 0.01,
-    n_repeats: int = 5,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Time AIPE-NPE, AIPE-LEN, JIT-EG, JIT-GDA on each problem.
 
     All baselines are JIT-compiled.  Returns one BenchmarkResult per solver.
     """
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_FULL
     for prob in problems:
         assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     rows = []

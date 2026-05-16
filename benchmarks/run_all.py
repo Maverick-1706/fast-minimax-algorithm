@@ -31,6 +31,7 @@ from benchmarks.export import (
     write_json,
     write_metadata,
 )
+from benchmarks import config
 from benchmarks.problems import get_all_problems, get_problem
 
 
@@ -51,14 +52,14 @@ def _platform_info() -> str:
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Benchmark suite for Minimax-AIPE solver.")
-    parser.add_argument("--epsilon", type=float, default=0.01, help="Target duality gap (default: 0.01).")
+    parser.add_argument("--epsilon", type=float, default=config.EPSILON_DEFAULT, help=f"Target duality gap (default: {config.EPSILON_DEFAULT}).")
     parser.add_argument("--dims", type=str, default=None, help="Comma-separated dimensions.")
     parser.add_argument("--quick", action="store_true", help="Reduced set: 1 problem, 1 repeat, dim=2.")
     parser.add_argument("--section", type=str, default="all",
                         choices=["all", "speed", "jit", "scaling", "memory", "convergence", "ablation"],
                         help="Which benchmark section to run.")
     parser.add_argument("--names", type=str, default=None, help="Comma-separated problem names.")
-    parser.add_argument("--repeats", type=int, default=None, help="Timed repeats (default: 5, or 1 with --quick).")
+    parser.add_argument("--repeats", type=int, default=None, help=f"Timed repeats (default: {config.N_REPEATS_FULL}, or {config.N_REPEATS_QUICK} with --quick).")
     parser.add_argument("--seed", type=int, default=None, help="Deterministic seed for all problem constructors.")
     parser.add_argument("--output", type=str, default=None, metavar="FMT[:PATH]",
                         help="Export: 'csv', 'json', 'csv:out.csv', 'json:out.json'.")
@@ -95,7 +96,7 @@ def _run_jit(problems, epsilon, n_repeats, export_data):
 
 
 def _run_scaling(epsilon, n_repeats, seed, export_data):
-    from benchmarks.scaling import scale_dimension, scale_rho, scale_condition_number, format_scaling_table
+    from benchmarks.scaling import scale_dimension, scale_rho, scale_condition_number, scale_sparsity, format_scaling_table
     print(_header("Scaling Analysis"))
 
     scale_dims = [2, 5, 10, 20]
@@ -110,7 +111,7 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
 
     # Condition number scaling
     print("  ill_conditioned_quadratic (condition number sweep):")
-    cond_rows = scale_condition_number("ill_quadratic", [1e1, 1e2, 1e3, 1e4], dim=10, epsilon=epsilon,
+    cond_rows = scale_condition_number("ill_quadratic", kappas=[1e1, 1e2, 1e3, 1e4], dim=10, epsilon=epsilon,
                                        n_repeats=max(1, n_repeats // 2), seed=seed)
     print(format_scaling_table(cond_rows))
     export_data.setdefault("scaling_cond", []).extend(flatten_scaling_rows(cond_rows))
@@ -137,6 +138,19 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
     print()
 
+    # Sparsity scaling
+    print("  diagonal_saddle (sparsity sweep):")
+    sparsity_rows = scale_sparsity([0.0, 0.3, 0.6, 0.9], dim=100, kappa=1e4, epsilon=epsilon,
+                                   n_repeats=max(1, n_repeats // 2), seed=seed)
+    npe_rows = [r for r in sparsity_rows if r.solver == "aipe_npe"]
+    header = f"{'sparsity':>8}  {'NPE (s)':>10}  {'NPE calls':>10}"
+    print(header)
+    print("─" * len(header))
+    for r in npe_rows:
+        print(f"{'?':>8}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+    export_data.setdefault("scaling_sparsity", []).extend(flatten_scaling_rows(sparsity_rows))
+    print()
+
 
 def _run_memory(problems, epsilon, export_data):
     from benchmarks.memory import benchmark_memory_scaling, format_memory_table
@@ -151,7 +165,7 @@ def _run_memory(problems, epsilon, export_data):
 def _run_convergence(problems, epsilon, export_data):
     from benchmarks.convergence import sweep_epsilon, format_convergence_table
     print(_header("Convergence: ε-Sweep"))
-    epsilons = [0.1, 0.05, 0.01, 0.005]
+    epsilons = config.EPSILON_GRID
     for prob in problems[:2]:
         name = prob.name or "?"
         dim = prob.dim or prob.problem.dim_x
@@ -212,7 +226,7 @@ def main():
 
     dims = [int(d.strip()) for d in args.dims.split(",")] if args.dims else None
     names = [n.strip() for n in args.names.split(",")] if args.names else None
-    n_repeats = args.repeats or (1 if args.quick else 5)
+    n_repeats = args.repeats or (config.N_REPEATS_QUICK if args.quick else config.N_REPEATS_FULL)
     epsilon = args.epsilon
 
     output_fmt, output_path = None, None

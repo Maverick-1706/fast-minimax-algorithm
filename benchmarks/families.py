@@ -9,11 +9,17 @@ Shared helpers
 - ``_log_spaced_eigenvalues(dim, kappa)`` — deterministic eigenvalue spectrum
 - ``_banded_mask(dim, bandwidth)`` — banded sparsity pattern
 - ``project_box(lo, hi)`` — box constraint projection
+
+Sweep generators
+----------------
+- ``sweep_kappa(constructor, dim, kappas, ...)`` — κ sweep
+- ``sweep_rho(constructor, dim, rho_values, ...)`` — ρ sweep
+- ``sweep_sparsity(constructor, dim, sparsity_values, ...)`` — sparsity sweep
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -1029,8 +1035,250 @@ def make_scalable_diagonal(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity),
         name="scalable_diagonal",
         dim=dim,
         z0=None,
     )
+
+
+# ── Diagonal saddle (κ-parameterized) ─────────────────────────────────
+
+
+def make_diagonal_saddle(
+    dim: int,
+    kappa: float = 1e4,
+    rho: float = 0.0,
+    sparsity: float = 0.0,
+    n_blocks: int = 1,
+    seed: int = 0,
+) -> BenchmarkProblem:
+    """Diagonal quadratic saddle with explicit κ, ρ, and sparsity control.
+
+    .. math::
+
+        f(x,y) = \\sum_i \\tfrac{\\lambda_i}{2} x_i^2
+                + \\sum_i \\sigma_i x_i y_i
+                - \\sum_i \\tfrac{\\mu_i}{2} y_i^2
+                + \\frac{\\rho}{3}(\\|x\\|^3 - \\|y\\|^3)
+
+    The primary parametric diagonal family for scaling-law studies.
+    All matrices are diagonal → O(n) per oracle call.
+
+    Parameters
+    ----------
+    dim : int
+        Dimension of x and y.
+    kappa : float
+        Condition number.  Eigenvalues ``λ_i, μ_i`` are log-spaced in
+        ``[1, kappa]``.  ``kappa=1`` gives uniform spectrum.
+    rho : float
+        Hessian Lipschitz constant.  ``rho=0`` (default) gives a pure
+        quadratic with ``ρ = 0``.  ``rho > 0`` adds an isotropic cubic
+        perturbation ``(ρ/3)(‖x‖³ − ‖y‖³)``.
+    sparsity : float
+        Fraction of coordinates that are coupled (``0 ≤ sparsity ≤ 1``).
+        ``sparsity=0`` couples all coordinates; ``sparsity=1`` gives
+        fully dense coupling.  Values in ``(0, 1)`` create a Bernoulli
+        mask so only that fraction of ``σ_i`` are nonzero.
+    n_blocks : int
+        Number of conditioning blocks for heterogeneous curvature.
+        Each block gets an independent eigenvalue rescaling factor
+        drawn uniformly from ``[0.5, 2.0]``.
+    seed : int
+        Deterministic seed.
+
+    Returns
+    -------
+    BenchmarkProblem
+        Saddle at origin, gap = 0.
+    """
+    from minimax_aipe import MinimaxProblem
+
+    key = jax.random.PRNGKey(seed)
+    k_eig_x, k_eig_y, k_coupling, k_block = jax.random.split(key, 4)
+
+    # ── 1. Log-spaced eigenvalue spectrum controlled by κ ─────────────
+    lam = _log_spaced_eigenvalues(dim, kappa)
+    mu = _log_spaced_eigenvalues(dim, kappa)
+
+    # ── 2. Block rescaling for heterogeneous curvature ───────────────
+    if n_blocks > 1:
+        bs = dim // n_blocks
+        block_ids = jnp.arange(dim) // bs
+        block_ids = jnp.minimum(block_ids, n_blocks - 1)
+        block_scale = jax.random.uniform(k_block, (n_blocks,), minval=0.5, maxval=2.0)
+        lam = lam * block_scale[block_ids]
+        mu = mu * block_scale[block_ids]
+
+    # ── 3. Coupling coefficients with optional sparsity ──────────────
+    if sparsity <= 0.0:
+        sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
+    else:
+        # sparsity ∈ (0, 1]: fraction of coordinates that ARE coupled
+        # User-facing semantics: sparsity=0 → dense, sparsity=1 → fully sparse
+        # Internally: p = 1 - sparsity is the Bernoulli "active" probability
+        p_active = jnp.clip(1.0 - sparsity, 0.0, 1.0)
+        mask = jax.random.bernoulli(k_coupling, p=p_active, shape=(dim,))
+        raw_sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
+        sigma = jnp.where(mask, raw_sigma, 0.0)
+
+    # ── Constants ─────────────────────────────────────────────────────
+    ell_quad = float(jnp.max(jnp.concatenate([lam + jnp.abs(sigma),
+                                               mu + jnp.abs(sigma)])))
+    D = 4.0
+    ell = ell_quad + rho * D if rho > 0 else ell_quad
+
+    # ── Problem definition ────────────────────────────────────────────
+
+    def f(x, y):
+        quad = (
+            0.5 * jnp.dot(lam, x ** 2)
+            + jnp.dot(sigma, x * y)
+            - 0.5 * jnp.dot(mu, y ** 2)
+        )
+        if rho == 0.0:
+            return quad
+        cubic_x = (rho / 3.0) * jnp.linalg.norm(x) ** 3
+        cubic_y = (rho / 3.0) * jnp.linalg.norm(y) ** 3
+        return quad + cubic_x - cubic_y
+
+    def grad_f(x, y):
+        gx = lam * x + sigma * y
+        gy_neg = mu * y - sigma * x
+        if rho > 0.0:
+            norm_x = jnp.linalg.norm(x)
+            norm_y = jnp.linalg.norm(y)
+            gx = gx + rho * norm_x * x
+            gy_neg = gy_neg + rho * norm_y * y
+        return gx, gy_neg
+
+    def hessian_f(x, y):
+        H_xx = jnp.diag(lam)
+        H_xy = jnp.diag(sigma)
+        H_yx = jnp.diag(sigma)
+        H_yy = jnp.diag(-mu)
+        if rho > 0.0:
+            norm_x = jnp.linalg.norm(x)
+            norm_y = jnp.linalg.norm(y)
+            H_xx = H_xx + rho * (
+                norm_x * jnp.eye(dim)
+                + jnp.outer(x, x) / jnp.maximum(norm_x, _PROJ_EPS)
+            )
+            H_yy = H_yy - rho * (
+                norm_y * jnp.eye(dim)
+                + jnp.outer(y, y) / jnp.maximum(norm_y, _PROJ_EPS)
+            )
+        return ((H_xx, H_xy), (H_yx, H_yy))
+
+    problem = MinimaxProblem(
+        f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
+        grad_f=grad_f, hessian_f=hessian_f,
+        rho=rho, ell=ell,
+    )
+    mu_x = float(jnp.min(lam))
+    mu_y = float(jnp.min(mu))
+    return BenchmarkProblem(
+        problem=problem,
+        x_star=jnp.zeros(dim),
+        y_star=jnp.zeros(dim),
+        gap_star=0.0,
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity),
+        name="diagonal_saddle",
+        dim=dim,
+        z0=None,
+    )
+
+
+# ── Sweep generators ─────────────────────────────────────────────────
+
+
+def sweep_kappa(
+    constructor: Callable[..., BenchmarkProblem],
+    dim: int,
+    kappas: list[float],
+    seed: int = 0,
+    **fixed_kwargs: Any,
+) -> list[BenchmarkProblem]:
+    """Generate problems sweeping κ at fixed dimension and other params.
+
+    Parameters
+    ----------
+    constructor : callable
+        A problem constructor (e.g. :func:`make_diagonal_saddle`).
+    dim : int
+        Problem dimension.
+    kappas : list[float]
+        κ values to sweep.
+    seed : int
+        Base seed (incremented per instance for diversity).
+    **fixed_kwargs
+        Additional keyword arguments forwarded to *constructor*
+        (e.g. ``rho=0.0``, ``sparsity=0.1``).
+
+    Returns
+    -------
+    list[BenchmarkProblem]
+    """
+    return [constructor(dim=dim, kappa=k, seed=seed + i, **fixed_kwargs)
+            for i, k in enumerate(kappas)]
+
+
+def sweep_rho(
+    constructor: Callable[..., BenchmarkProblem],
+    dim: int,
+    rho_values: list[float],
+    seed: int = 0,
+    **fixed_kwargs: Any,
+) -> list[BenchmarkProblem]:
+    """Generate problems sweeping ρ at fixed dimension and other params.
+
+    Parameters
+    ----------
+    constructor : callable
+        A problem constructor (e.g. :func:`make_diagonal_saddle`).
+    dim : int
+        Problem dimension.
+    rho_values : list[float]
+        ρ values to sweep.
+    seed : int
+        Base seed.
+    **fixed_kwargs
+        Additional keyword arguments forwarded to *constructor*.
+
+    Returns
+    -------
+    list[BenchmarkProblem]
+    """
+    return [constructor(dim=dim, rho=r, seed=seed + i, **fixed_kwargs)
+            for i, r in enumerate(rho_values)]
+
+
+def sweep_sparsity(
+    constructor: Callable[..., BenchmarkProblem],
+    dim: int,
+    sparsity_values: list[float],
+    seed: int = 0,
+    **fixed_kwargs: Any,
+) -> list[BenchmarkProblem]:
+    """Generate problems sweeping sparsity at fixed dimension and other params.
+
+    Parameters
+    ----------
+    constructor : callable
+        A problem constructor (e.g. :func:`make_diagonal_saddle`).
+    dim : int
+        Problem dimension.
+    sparsity_values : list[float]
+        Sparsity values to sweep (0 = dense, 1 = fully sparse).
+    seed : int
+        Base seed.
+    **fixed_kwargs
+        Additional keyword arguments forwarded to *constructor*.
+
+    Returns
+    -------
+    list[BenchmarkProblem]
+    """
+    return [constructor(dim=dim, sparsity=s, seed=seed + i, **fixed_kwargs)
+            for i, s in enumerate(sparsity_values)]

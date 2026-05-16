@@ -14,15 +14,16 @@ import time
 
 from minimax_aipe import solve
 from minimax_aipe.problem import BenchmarkProblem
+from benchmarks import config
 from benchmarks.results import BenchmarkResult
 from benchmarks.stats import bootstrap_ci
 
 
 def ablation_m_lazy(
     prob,
-    epsilon: float = 0.01,
+    epsilon: float | None = None,
     m_values: list[int] | None = None,
-    n_repeats: int = 3,
+    n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time and oracle calls as m_lazy varies.
 
@@ -32,17 +33,21 @@ def ablation_m_lazy(
     ----------
     prob : BenchmarkProblem
         From the problem zoo.
-    epsilon : float
-        Target gap.
+    epsilon : float or None
+        Target gap.  Defaults to ``config.EPSILON_DEFAULT``.
     m_values : list[int]
         Hessian reuse intervals to test.
-    n_repeats : int
-        Timed runs per configuration.
+    n_repeats : int or None
+        Timed runs per configuration.  Defaults to ``config.N_REPEATS_SCALING``.
 
     Returns
     -------
     list[BenchmarkResult]
     """
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_SCALING
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     m_values = m_values or [1, 3, 5, 10, 20]
     problem = prob.problem
@@ -86,11 +91,15 @@ def ablation_m_lazy(
 
 def ablation_npe_t_factor(
     prob,
-    epsilon: float = 0.01,
+    epsilon: float | None = None,
     t_factors: list[float] | None = None,
-    n_repeats: int = 3,
+    n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time and oracle calls as npe_T_factor varies."""
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_SCALING
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     t_factors = t_factors or [0.5, 1.0, 1.5, 2.0, 3.0]
     problem = prob.problem
@@ -134,10 +143,14 @@ def ablation_npe_t_factor(
 
 def ablation_npe_vs_len(
     prob,
-    epsilon: float = 0.01,
-    n_repeats: int = 3,
+    epsilon: float | None = None,
+    n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Head-to-head NPE vs LEN on a single problem."""
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_SCALING
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
     name = prob.name or "?"
