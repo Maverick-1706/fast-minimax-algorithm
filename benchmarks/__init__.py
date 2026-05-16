@@ -14,12 +14,12 @@ from __future__ import annotations
 import os
 import random
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORMS", "")
 
 import jax
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", False)
 
 _SEED = os.environ.get("BENCHMARK_SEED")
 GLOBAL_SEED = int(_SEED) if _SEED is not None else None

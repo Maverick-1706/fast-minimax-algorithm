@@ -19,6 +19,7 @@ from pathlib import Path
 import jax
 from minimax_aipe.problem import BenchmarkProblem
 from benchmarks.memory import MemoryResult
+from benchmarks.results import BenchmarkResult as _BenchmarkResult
 
 
 # ── Metadata ──────────────────────────────────────────────────────────────
@@ -105,26 +106,9 @@ def write_metadata(meta: dict, path: str = "metadata.json") -> None:
 # ── Flattening ────────────────────────────────────────────────────────────
 
 
-def flatten_speed_rows(rows: list[dict]) -> list[dict]:
-    """Flatten nested timing dicts into flat dicts for CSV/JSON export."""
-    flat = []
-    for r in rows:
-        base = {"name": r["name"], "dim": r["dim"]}
-        for solver in ("aipe_npe", "aipe_len", "eg", "gda"):
-            t = r[solver]
-            lo, hi = t.get("ci", (0.0, 0.0))
-            base[f"{solver}_mean"] = t["mean"]
-            base[f"{solver}_std"] = t.get("std", 0.0)
-            base[f"{solver}_ci_lo"] = lo
-            base[f"{solver}_ci_hi"] = hi
-            gap = t.get("gap", None)
-            base[f"{solver}_gap"] = float(gap) if gap is not None else None
-            base[f"{solver}_iterations"] = t.get("iterations", None)
-            base[f"{solver}_crn_calls"] = t.get("oracles", {}).get("crn_calls", None)
-            base[f"{solver}_grad_calls"] = t.get("oracles", {}).get("grad_calls", None)
-            base[f"{solver}_converged"] = t.get("converged", None)
-        flat.append(base)
-    return flat
+def flatten_speed_rows(rows: list[_BenchmarkResult]) -> list[dict]:
+    """Flatten BenchmarkResult list into flat dicts for CSV/JSON export."""
+    return [r.to_dict() for r in rows]
 
 
 def flatten_jit_rows(rows: list[dict]) -> list[dict]:
@@ -158,21 +142,9 @@ def flatten_memory_rows(rows: list[MemoryResult]) -> list[dict]:
     return flat
 
 
-def flatten_convergence_rows(rows: list[dict]) -> list[dict]:
-    flat = []
-    for r in rows:
-        flat.append({
-            "name": r["name"],
-            "dim": r["dim"],
-            "epsilon": r["epsilon"],
-            "npe_gap": r["npe_gap"],
-            "npe_oracle_calls": r["npe_oracle_calls"],
-            "len_gap": r["len_gap"],
-            "len_oracle_calls": r["len_oracle_calls"],
-            "eg_gap": r["eg_gap"],
-            "eg_grad_calls": r["eg_grad_calls"],
-        })
-    return flat
+def flatten_convergence_rows(rows: list[_BenchmarkResult]) -> list[dict]:
+    """Flatten BenchmarkResult list into flat dicts for CSV/JSON export."""
+    return [r.to_dict() for r in rows]
 
 
 def _flatten_dict(d: dict, parent_key: str = "", sep: str = "_") -> dict:
@@ -186,12 +158,14 @@ def _flatten_dict(d: dict, parent_key: str = "", sep: str = "_") -> dict:
     return dict(items)
 
 
-def flatten_scaling_rows(rows: list[dict]) -> list[dict]:
-    return [_flatten_dict(r) for r in rows]
+def flatten_scaling_rows(rows: list[_BenchmarkResult]) -> list[dict]:
+    """Flatten BenchmarkResult list into flat dicts for CSV/JSON export."""
+    return [r.to_dict() for r in rows]
 
 
-def flatten_ablation_rows(rows: list[dict]) -> list[dict]:
-    return [_flatten_dict(r) for r in rows]
+def flatten_ablation_rows(rows: list[_BenchmarkResult]) -> list[dict]:
+    """Flatten BenchmarkResult list into flat dicts for CSV/JSON export."""
+    return [r.to_dict() for r in rows]
 
 
 # ── Writers ───────────────────────────────────────────────────────────────

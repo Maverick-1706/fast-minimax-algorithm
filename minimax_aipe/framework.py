@@ -40,7 +40,7 @@ from minimax_aipe.gap import estimate_gap
 from minimax_aipe.len import len_loop, len_restart, make_lazy_crn_npe_oracle
 from minimax_aipe.npe import make_crn_npe_oracle, npe, npe_restart, project_z
 from minimax_aipe.oracles import eg_step
-from minimax_aipe.problem import MinimaxProblem, SolverResult
+from minimax_aipe.problem import MinimaxProblem, OracleStats, SolverResult
 from minimax_aipe._precision import (
     ABS_TOL as _ABS_TOL,
     CUBIC_ZERO as _CUBIC_ZERO,
@@ -48,6 +48,7 @@ from minimax_aipe._precision import (
     REG_MIN as _REG_MIN,
     TINY as _TINY,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -1075,12 +1076,42 @@ def solve(
     except (TypeError, Exception):
         pass
 
+    # ── Oracle statistics ─────────────────────────────────────────────
+    secular_n = 50
+    inner_crn = max(0, int(total))
+    d = problem.dim_x + problem.dim_y
+
+    if M_saddle == "npe":
+        inner_hessians = inner_crn
+    else:
+        inner_hessians = inner_crn // max(params.m_lazy, 1)
+
+    inner_grad = inner_crn * 2 + 1
+    inner_linear = inner_crn * secular_n
+    inner_proj = inner_crn * (secular_n + 1) + 2
+
+    outer_grad = params.S_outer * params.T_outer
+    middle_grad = params.S_outer * params.T_outer * params.S_middle * params.T_middle
+    final_eg_grad = 2
+    final_eg_proj = 2
+
+    oracle_stats = OracleStats(
+        grad_calls=inner_grad + outer_grad + middle_grad + final_eg_grad,
+        hessian_calls=inner_hessians,
+        hvp_calls=0,
+        crn_calls=inner_crn,
+        projection_calls=inner_proj + final_eg_proj,
+        linear_solves=inner_linear,
+        oracle_calls=inner_crn,
+    )
+
     return SolverResult(
         x=x_out,
         y=y_out,
         gap=gap,
         iterations=params.S_outer,
         oracle_calls=calls + 1,
+        oracle_stats=oracle_stats,
         converged=gap <= epsilon,
         history=history,
     )

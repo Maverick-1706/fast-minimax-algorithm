@@ -18,6 +18,94 @@ from jax import Array
 from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
 
 
+@dataclass
+class OracleStats:
+    """Standardized oracle call accounting for complexity validation.
+
+    Tracks all second-order oracle operations.  The paper's primary
+    metric is second-order oracle complexity — the number of Hessian
+    evaluations and CRN subproblem solves.
+
+    Attributes
+    ----------
+    grad_calls : int
+        First-order (gradient / operator_F) evaluations.
+    hessian_calls : int
+        Full Hessian evaluations (∇²f).
+    hvp_calls : int
+        Hessian-vector product evaluations.
+    crn_calls : int
+        Cubic-regularised Newton subproblem solves.
+    projection_calls : int
+        Feasible-set projections.
+    linear_solves : int
+        Linear system solves (inside CRN secular equation).
+    """
+
+    grad_calls: int = 0
+    hessian_calls: int = 0
+    hvp_calls: int = 0
+    crn_calls: int = 0
+    projection_calls: int = 0
+    linear_solves: int = 0
+    oracle_calls: int = 0  # Unified metric: CRN for 2nd order, grad for 1st order
+    call_type: str = "crn" # Type of the primary metric (crn, gradient, etc)
+
+    def normalized_cost(self, dim: int) -> float:
+        """FLOP-equivalent work units.
+
+        Costs: grad=d, hessian=d², hvp=d², crn=d³, projection=d,
+        linear_solve=d³.
+        """
+        return (
+            self.grad_calls * dim
+            + self.hessian_calls * dim * dim
+            + self.hvp_calls * dim * dim
+            + self.crn_calls * dim * dim * dim
+            + self.projection_calls * dim
+            + self.linear_solves * dim * dim * dim
+        )
+
+    def __add__(self, other: OracleStats) -> OracleStats:
+        if not isinstance(other, OracleStats):
+            return NotImplemented
+        return OracleStats(
+            grad_calls=self.grad_calls + other.grad_calls,
+            hessian_calls=self.hessian_calls + other.hessian_calls,
+            hvp_calls=self.hvp_calls + other.hvp_calls,
+            crn_calls=self.crn_calls + other.crn_calls,
+            projection_calls=self.projection_calls + other.projection_calls,
+            linear_solves=self.linear_solves + other.linear_solves,
+            oracle_calls=self.oracle_calls + other.oracle_calls,
+            call_type=self.call_type,
+        )
+
+    def __radd__(self, other) -> OracleStats:
+        if other == 0:
+            return self
+        return self.__add__(other)
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {
+            "grad_calls": self.grad_calls,
+            "hessian_calls": self.hessian_calls,
+            "hvp_calls": self.hvp_calls,
+            "crn_calls": self.crn_calls,
+            "projection_calls": self.projection_calls,
+            "linear_solves": self.linear_solves,
+            "oracle_calls": self.oracle_calls,
+            "call_type": self.call_type,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"OracleStats(grad={self.grad_calls}, hessian={self.hessian_calls}, "
+            f"hvp={self.hvp_calls}, crn={self.crn_calls}, "
+            f"proj={self.projection_calls}, linear={self.linear_solves}, "
+            f"oracle_calls={self.oracle_calls})"
+        )
+
+
 class MinimaxProblem:
     """A convex-concave minimax problem min_x max_y f(x, y).
 
@@ -276,6 +364,8 @@ class SolverResult(NamedTuple):
         Total number of outer-loop iterations.
     oracle_calls : int
         Total number of second-order (CRN) oracle calls.
+    oracle_stats : OracleStats
+        Detailed per-type oracle call counts.
     converged : bool
         Whether the solver converged to the requested tolerance.
     history : dict
@@ -288,10 +378,12 @@ class SolverResult(NamedTuple):
     iterations: int
     oracle_calls: int
     converged: bool
+    oracle_stats: OracleStats = field(default_factory=OracleStats)
     history: dict = field(default_factory=dict)
 
 __all__ = [
     "MinimaxProblem",
+    "OracleStats",
     "SolverResult",
     "BenchmarkMeta",
     "BenchmarkProblem",

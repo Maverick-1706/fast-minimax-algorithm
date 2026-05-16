@@ -218,6 +218,7 @@ def lazy_crn_oracle(
     dtype = z_bar.dtype
     eye = jnp.eye(d, dtype=dtype)
     tiny = jnp.asarray(_TINY, dtype=dtype)
+    lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
 
     if tol > 0:
         def cond(state):
@@ -235,7 +236,7 @@ def lazy_crn_oracle(
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
-            (jnp.zeros((), dtype=dtype), z_bar,
+            (lam_init, z_bar,
              jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
     else:
@@ -248,7 +249,7 @@ def lazy_crn_oracle(
             return _stable_lam_update(lam, lam_candidate), z_new
 
         lam, z = jax.lax.fori_loop(
-            0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar)
+            0, n_iters, body, (lam_init, z_bar)
         )
 
     d_eff = z - z_bar

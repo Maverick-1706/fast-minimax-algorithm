@@ -9,6 +9,7 @@ Measures how solver performance scales with:
 from __future__ import annotations
 
 import gc
+import itertools
 import statistics
 import time
 
@@ -16,12 +17,14 @@ import jax
 
 from minimax_aipe import solve
 from benchmarks.baselines import run_eg_jit_benchmark
+from benchmarks.results import BenchmarkResult
+from benchmarks.oracles import count_eg_oracles
 from benchmarks.stats import bootstrap_ci
 from minimax_aipe.problem import BenchmarkProblem
 
 
-def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats: int) -> dict:
-    """Time a single solve configuration and return stats.
+def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats: int) -> BenchmarkResult:
+    """Time a single solve configuration and return a BenchmarkResult.
 
     Parameters
     ----------
@@ -36,8 +39,7 @@ def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats
 
     Returns
     -------
-    dict
-        {time_mean, time_ci, oracle_calls, gap, iterations, converged}
+    BenchmarkResult
     """
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
@@ -56,14 +58,22 @@ def _time_solve(prob: BenchmarkProblem, epsilon: float, M_saddle: str, n_repeats
         times.append(time.perf_counter() - t0)
 
     ci = bootstrap_ci(times)
-    return {
-        "time_mean": statistics.mean(times),
-        "time_ci": ci,
-        "oracle_calls": result.oracle_calls,
-        "gap": float(result.gap),
-        "iterations": result.iterations,
-        "converged": result.converged,
-    }
+    d = problem.dim_x + problem.dim_y
+    return BenchmarkResult(
+        solver=f"aipe_{M_saddle}",
+        problem=prob.name or "?",
+        dim=prob.dim or problem.dim_x,
+        epsilon=epsilon,
+        wall_time_mean=statistics.mean(times),
+        wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
+        ci=ci,
+        oracle_stats=result.oracle_stats,
+        converged=result.converged,
+        gap_achieved=result.gap <= epsilon,
+        final_gap=float(result.gap),
+        iterations=result.iterations,
+        normalized_cost=result.oracle_stats.normalized_cost(d),
+    )
 
 
 def scale_dimension(
@@ -72,7 +82,7 @@ def scale_dimension(
     epsilon: float = 0.05,
     n_repeats: int = 3,
     seed: int | None = None,
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """Measure solve time vs dimension for a given problem type.
 
     Parameters
@@ -90,8 +100,8 @@ def scale_dimension(
 
     Returns
     -------
-    list[dict]
-        One dict per (dim) with timing, oracle calls, gap.
+    list[BenchmarkResult]
+        Three results per dim (npe, len, eg).
     """
     from benchmarks.problems import get_problem
 
@@ -101,27 +111,27 @@ def scale_dimension(
         prob = get_problem(problem_type, dim, seed=prob_seed)
         problem = prob.problem
 
-        npe = _time_solve(prob, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
+        rows.append(_time_solve(prob, epsilon, "len", n_repeats))
 
-        rows.append({
-            "problem": problem_type,
-            "dim": dim,
-            "npe_time": npe["time_mean"],
-            "npe_ci_lo": npe["time_ci"][0],
-            "npe_ci_hi": npe["time_ci"][1],
-            "npe_calls": npe["oracle_calls"],
-            "npe_gap": npe["gap"],
-            "len_time": lnn["time_mean"],
-            "len_ci_lo": lnn["time_ci"][0],
-            "len_ci_hi": lnn["time_ci"][1],
-            "len_calls": lnn["oracle_calls"],
-            "len_gap": lnn["gap"],
-            "eg_time": eg_result.wall_time,
-            "eg_iters": eg_result.iterations,
-            "eg_gap": eg_result.gap,
-        })
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        d = dim * 2
+        eg_stats = count_eg_oracles(eg_result.iterations)
+        rows.append(BenchmarkResult(
+            solver="eg",
+            problem=problem_type,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=eg_result.wall_time,
+            wall_time_std=0.0,
+            ci=(eg_result.wall_time, eg_result.wall_time),
+            oracle_stats=eg_stats,
+            converged=eg_result.converged,
+            gap_achieved=eg_result.gap_achieved,
+            final_gap=eg_result.gap,
+            iterations=eg_result.iterations,
+            normalized_cost=eg_stats.normalized_cost(d),
+        ))
 
     return rows
 
@@ -133,7 +143,7 @@ def scale_condition_number(
     epsilon: float = 0.05,
     n_repeats: int = 3,
     seed: int | None = None,
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """Measure solve time vs condition number at fixed dimension.
 
     Parameters
@@ -153,7 +163,7 @@ def scale_condition_number(
 
     Returns
     -------
-    list[dict]
+    list[BenchmarkResult]
     """
     from benchmarks.problems import get_problem
 
@@ -163,28 +173,28 @@ def scale_condition_number(
         prob = get_problem(problem_type, dim, seed=prob_seed, condition_number=kappa)
         problem = prob.problem
 
-        npe = _time_solve(prob, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
+        rows.append(_time_solve(prob, epsilon, "len", n_repeats))
 
-        rows.append({
-            "problem": problem_type,
-            "dim": dim,
-            "condition_number": kappa,
-            "npe_time": npe["time_mean"],
-            "npe_ci_lo": npe["time_ci"][0],
-            "npe_ci_hi": npe["time_ci"][1],
-            "npe_calls": npe["oracle_calls"],
-            "npe_gap": npe["gap"],
-            "len_time": lnn["time_mean"],
-            "len_ci_lo": lnn["time_ci"][0],
-            "len_ci_hi": lnn["time_ci"][1],
-            "len_calls": lnn["oracle_calls"],
-            "len_gap": lnn["gap"],
-            "eg_time": eg_result.wall_time,
-            "eg_iters": eg_result.iterations,
-            "eg_gap": eg_result.gap,
-        })
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        d = dim * 2
+        eg_stats = count_eg_oracles(eg_result.iterations)
+        rows.append(BenchmarkResult(
+            solver="eg",
+            problem=problem_type,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=eg_result.wall_time,
+            wall_time_std=0.0,
+            ci=(eg_result.wall_time, eg_result.wall_time),
+            oracle_stats=eg_stats,
+            converged=eg_result.converged,
+            gap_achieved=eg_result.gap_achieved,
+            final_gap=eg_result.gap,
+            iterations=eg_result.iterations,
+            normalized_cost=eg_stats.normalized_cost(d),
+            condition_number=kappa,
+        ))
 
     return rows
 
@@ -195,7 +205,7 @@ def scale_rho(
     epsilon: float = 0.05,
     n_repeats: int = 3,
     seed: int | None = None,
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """Measure solve time vs Hessian Lipschitz constant ρ.
 
     Uses the ``nonzero_rho`` problem constructor.
@@ -215,8 +225,8 @@ def scale_rho(
 
     Returns
     -------
-    list[dict]
-        One dict per ρ with timing and oracle call stats.
+    list[BenchmarkResult]
+        One BenchmarkResult per (solver, ρ).
     """
     from benchmarks.problems import get_problem
 
@@ -226,45 +236,73 @@ def scale_rho(
         prob = get_problem("nonzero_rho", dim, seed=prob_seed, rho=rho)
         problem = prob.problem
 
-        npe = _time_solve(prob, epsilon, "npe", n_repeats)
-        lnn = _time_solve(prob, epsilon, "len", n_repeats)
-        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
+        rows.append(_time_solve(prob, epsilon, "len", n_repeats))
 
-        rows.append({
-            "problem": "nonzero_rho",
-            "dim": dim,
-            "rho": rho,
-            "npe_time": npe["time_mean"],
-            "npe_ci_lo": npe["time_ci"][0],
-            "npe_ci_hi": npe["time_ci"][1],
-            "npe_calls": npe["oracle_calls"],
-            "npe_gap": npe["gap"],
-            "len_time": lnn["time_mean"],
-            "len_ci_lo": lnn["time_ci"][0],
-            "len_ci_hi": lnn["time_ci"][1],
-            "len_calls": lnn["oracle_calls"],
-            "len_gap": lnn["gap"],
-            "eg_time": eg_result.wall_time,
-            "eg_iters": eg_result.iterations,
-            "eg_gap": eg_result.gap,
-        })
+        eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        d = dim * 2
+        eg_stats = count_eg_oracles(eg_result.iterations)
+        rows.append(BenchmarkResult(
+            solver="eg",
+            problem="nonzero_rho",
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=eg_result.wall_time,
+            wall_time_std=0.0,
+            ci=(eg_result.wall_time, eg_result.wall_time),
+            oracle_stats=eg_stats,
+            converged=eg_result.converged,
+            gap_achieved=eg_result.gap_achieved,
+            final_gap=eg_result.gap,
+            iterations=eg_result.iterations,
+            normalized_cost=eg_stats.normalized_cost(d),
+            rho=rho,
+        ))
 
     return rows
 
 
-def format_scaling_table(rows: list[dict], key_col: str = "dim") -> str:
-    """Format scaling results as a text table."""
+def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> str:
+    """Format scaling results as a text table.
+
+    Groups results by (problem, key_col_value) and displays wall time
+    and FLOP-normalized cost (``normalized_cost``) per solver for
+    apples-to-apples oracle complexity comparison.
+    """
     lines = []
-    cols = [key_col, "npe_time", "npe_calls", "len_time", "len_calls", "eg_time", "eg_iters"]
-    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE calls':>10}  {'LEN (s)':>10}  {'LEN calls':>10}  {'JIT-EG (s)':>10}  {'EG iters':>10}"
+    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE cost':>10}  {'LEN (s)':>10}  {'LEN cost':>10}  {'JIT-EG (s)':>10}  {'EG cost':>10}"
     lines.append(header)
     lines.append("─" * len(header))
 
-    for r in rows:
+    def _key_val(r: BenchmarkResult) -> float:
+        if key_col == "dim":
+            return float(r.dim)
+        elif key_col == "condition_number":
+            return r.condition_number or 0.0
+        elif key_col == "rho":
+            return r.rho or 0.0
+        return 0.0
+
+    key = lambda r: (r.problem, _key_val(r))
+    for (prob_name, kv), group in itertools.groupby(
+        sorted(rows, key=key), key=key
+    ):
+        group_list = list(group)
+        npe = next((r for r in group_list if r.solver == "aipe_npe"), None)
+        lnn = next((r for r in group_list if r.solver == "aipe_len"), None)
+        eg = next((r for r in group_list if r.solver == "eg"), None)
+
+        npe_time = npe.wall_time_mean if npe else 0.0
+        npe_cost = npe.normalized_cost if npe else 0.0
+        len_time = lnn.wall_time_mean if lnn else 0.0
+        len_cost = lnn.normalized_cost if lnn else 0.0
+        eg_time = eg.wall_time_mean if eg else 0.0
+        eg_cost = eg.normalized_cost if eg else 0.0
+
         lines.append(
-            f"{r[key_col]:>8}  {r['npe_time']:>10.4f}  {r.get('npe_calls', ''):>10}  "
-            f"{r.get('len_time', 0.0):>10.4f}  {r.get('len_calls', ''):>10}  "
-            f"{r.get('eg_time', 0.0):>10.4f}  {r.get('eg_iters', ''):>10}"
+            f"{kv:>8.6g}  {npe_time:>10.4f}  {npe_cost:>10.2e}  "
+            f"{len_time:>10.4f}  {len_cost:>10.2e}  "
+            f"{eg_time:>10.4f}  {eg_cost:>10.2e}"
         )
 
     return "\n".join(lines)

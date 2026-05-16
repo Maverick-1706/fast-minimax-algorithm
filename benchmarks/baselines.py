@@ -14,12 +14,21 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+from minimax_aipe import OracleStats
 from minimax_aipe.problem import MinimaxProblem
 
 
 @dataclass
 class BaselineResult:
-    """Result from a baseline solver run."""
+    """Result from a baseline solver run.
+
+    Attributes
+    ----------
+    converged : bool
+        Whether the loop terminated early (operator residual < tol).
+    gap_achieved : bool
+        Whether the duality gap <= epsilon (the actual success criterion).
+    """
 
     x: Array
     y: Array
@@ -27,7 +36,9 @@ class BaselineResult:
     iterations: int
     wall_time: float
     converged: bool
+    gap_achieved: bool
     final_residual: float
+    oracle_stats: OracleStats | None = None
 
 
 from minimax_aipe.gap import estimate_gap
@@ -63,6 +74,8 @@ def run_eg_jit(
         problem.project_y(z[problem.dim_x :]),
     ])
 
+    F_op = problem.operator_F
+
     @jax.jit
     def eg_loop(z_init):
         tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
@@ -71,15 +84,15 @@ def run_eg_jit(
         def cond(state):
             i, _z, _prev_z = state
             not_done = i < max_i
-            step_sq = jnp.sum((_z - _prev_z) ** 2)
-            step_big = step_sq > tol_sq
-            return not_done & jnp.where(i > 0, step_big, jnp.bool_(True))
+            resid_sq = jnp.sum(F_op(_z) ** 2)
+            resid_big = resid_sq > tol_sq
+            return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
             i, z, _prev_z = state
-            Fz = problem.operator_F(z)
+            Fz = F_op(z)
             z_half = proj(z - eta * Fz)
-            F_half = problem.operator_F(z_half)
+            F_half = F_op(z_half)
             return (i + 1, proj(z - eta * F_half), z)
 
         return jax.lax.while_loop(cond, body, (jnp.int32(0), z_init, z_init))
@@ -111,7 +124,9 @@ def run_eg_jit_benchmark(
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
-        converged=gap <= epsilon, final_residual=residual,
+        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        final_residual=residual,
+        oracle_stats=OracleStats(grad_calls=4 * actual_iters, projection_calls=2 * actual_iters),
     )
 
 
@@ -129,7 +144,7 @@ def run_gda_jit(
     Returns (z, residual, wall_time, actual_iters).
     """
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
-    eta = 1.0 / ell
+    eta = 0.5 / ell
 
     if z0 is None:
         x0 = problem.project_x(jnp.zeros(problem.dim_x))
@@ -141,6 +156,8 @@ def run_gda_jit(
         y0 = problem.project_y(z0_arr[problem.dim_x :])
         z_start = jnp.concatenate([x0, y0])
 
+    F_op = problem.operator_F
+
     @jax.jit
     def gda_loop(z_init):
         tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
@@ -149,9 +166,9 @@ def run_gda_jit(
         def cond(state):
             i, _z, _prev_z = state
             not_done = i < max_i
-            step_sq = jnp.sum((_z - _prev_z) ** 2)
-            step_big = step_sq > tol_sq
-            return not_done & jnp.where(i > 0, step_big, jnp.bool_(True))
+            resid_sq = jnp.sum(F_op(_z) ** 2)
+            resid_big = resid_sq > tol_sq
+            return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
             i, z, _prev_z = state
@@ -190,5 +207,7 @@ def run_gda_jit_benchmark(
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
-        converged=gap <= epsilon, final_residual=residual,
+        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        final_residual=residual,
+        oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters),
     )

@@ -35,7 +35,7 @@ from minimax_aipe._precision import (  # noqa: F401
     TINY,
 )
 
-from minimax_aipe.problem import MinimaxProblem, SolverResult
+from minimax_aipe.problem import MinimaxProblem, OracleStats, SolverResult
 
 from minimax_aipe.framework import (
     RegularizedSubproblem,
@@ -91,6 +91,7 @@ __all__ = [
     "TINY",
     # Core types
     "MinimaxProblem",
+    "OracleStats",
     "SolverResult",
     # Full solver
     "solve",

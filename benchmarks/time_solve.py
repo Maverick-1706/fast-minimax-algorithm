@@ -8,6 +8,7 @@ repeats) and IQR outlier flagging.
 from __future__ import annotations
 
 import gc
+import itertools
 import time
 
 import jax
@@ -15,7 +16,7 @@ import jax.numpy as jnp
 
 from minimax_aipe import solve
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
-from benchmarks.oracles import count_solver_oracles, count_eg_oracles, count_gda_oracles
+from benchmarks.results import BenchmarkResult
 from benchmarks.stats import summarise
 from minimax_aipe.problem import BenchmarkProblem
 
@@ -68,7 +69,7 @@ def benchmark_jit_vs_eager(
     """Compare JAX JIT enabled vs disabled on the pure numerical core."""
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
-    
+
     # Pre-setup the computational core to isolate JIT numerical speedup
     from minimax_aipe.framework import RegularizedSubproblem
     from minimax_aipe.npe import npe
@@ -78,7 +79,7 @@ def benchmark_jit_vs_eager(
     z0 = prob.z0
     if z0 is None:
         z0 = jnp.zeros(problem.dim_x + problem.dim_y)
-        
+
     x_bar = z0[:problem.dim_x]
     y_bar = z0[problem.dim_x:]
     npe_gamma = 2.0 * kernel.rho_h
@@ -128,10 +129,10 @@ def benchmark_solver_comparison(
     problems: list[BenchmarkProblem],
     epsilon: float = 0.01,
     n_repeats: int = 5,
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """Time AIPE-NPE, AIPE-LEN, JIT-EG, JIT-GDA on each problem.
 
-    All baselines are JIT-compiled.  Reports oracle calls alongside timing.
+    All baselines are JIT-compiled.  Returns one BenchmarkResult per solver.
     """
     for prob in problems:
         assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
@@ -141,62 +142,110 @@ def benchmark_solver_comparison(
         problem = prob.problem
         name = prob.name or "?"
         dim = prob.dim or problem.dim_x
+        d = problem.dim_x + problem.dim_y
 
         print(f"  Benchmarking {name} dim={dim} ...")
-        row = {"name": name, "dim": dim}
         z0 = prob.z0
 
         # ── AIPE-NPE ───────────────────────────────────────────────
         def run_npe():
             return solve(problem, epsilon=epsilon, M_saddle="npe", z0=z0)
 
-        row["aipe_npe"] = _time_callable(run_npe, n_warmup=1, n_repeats=n_repeats)
-        result_npe = row["aipe_npe"]["result"]
-        oc_npe = count_solver_oracles(result_npe)
-        row["aipe_npe"]["gap"] = result_npe.gap
-        row["aipe_npe"]["iterations"] = result_npe.iterations
-        row["aipe_npe"]["oracle_calls"] = result_npe.oracle_calls
-        row["aipe_npe"]["converged"] = result_npe.converged
-        row["aipe_npe"]["oracles"] = oc_npe.to_dict()
+        t_npe = _time_callable(run_npe, n_warmup=1, n_repeats=n_repeats)
+        result_npe = t_npe["result"]
+        rows.append(BenchmarkResult(
+            solver="aipe_npe",
+            problem=name,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=t_npe["mean"],
+            wall_time_std=t_npe["std"],
+            ci=t_npe["ci"],
+            oracle_stats=result_npe.oracle_stats,
+            converged=result_npe.converged,
+            gap_achieved=result_npe.gap <= epsilon,
+            final_gap=float(result_npe.gap),
+            iterations=result_npe.iterations,
+            wall_time_min=t_npe["min"],
+            wall_time_max=t_npe["max"],
+            n_outliers=t_npe["n_outliers"],
+            normalized_cost=result_npe.oracle_stats.normalized_cost(d),
+        ))
 
         # ── AIPE-LEN ───────────────────────────────────────────────
         def run_len():
             return solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=5, z0=z0)
 
-        row["aipe_len"] = _time_callable(run_len, n_warmup=1, n_repeats=n_repeats)
-        result_len = row["aipe_len"]["result"]
-        oc_len = count_solver_oracles(result_len)
-        row["aipe_len"]["gap"] = result_len.gap
-        row["aipe_len"]["iterations"] = result_len.iterations
-        row["aipe_len"]["oracle_calls"] = result_len.oracle_calls
-        row["aipe_len"]["converged"] = result_len.converged
-        row["aipe_len"]["oracles"] = oc_len.to_dict()
+        t_len = _time_callable(run_len, n_warmup=1, n_repeats=n_repeats)
+        result_len = t_len["result"]
+        rows.append(BenchmarkResult(
+            solver="aipe_len",
+            problem=name,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=t_len["mean"],
+            wall_time_std=t_len["std"],
+            ci=t_len["ci"],
+            oracle_stats=result_len.oracle_stats,
+            converged=result_len.converged,
+            gap_achieved=result_len.gap <= epsilon,
+            final_gap=float(result_len.gap),
+            iterations=result_len.iterations,
+            wall_time_min=t_len["min"],
+            wall_time_max=t_len["max"],
+            n_outliers=t_len["n_outliers"],
+            normalized_cost=result_len.oracle_stats.normalized_cost(d),
+        ))
 
         # ── JIT-EG ─────────────────────────────────────────────────
         def run_eg():
             return run_eg_jit_benchmark(problem, epsilon=epsilon, z0=z0)
 
-        row["eg"] = _time_callable(run_eg, n_warmup=1, n_repeats=n_repeats)
-        eg_result = row["eg"]["result"]
-        oc_eg = count_eg_oracles(eg_result.iterations)
-        row["eg"]["gap"] = eg_result.gap
-        row["eg"]["iterations"] = eg_result.iterations
-        row["eg"]["converged"] = eg_result.converged
-        row["eg"]["oracles"] = oc_eg.to_dict()
+        t_eg = _time_callable(run_eg, n_warmup=1, n_repeats=n_repeats)
+        eg_result = t_eg["result"]
+        rows.append(BenchmarkResult(
+            solver="eg",
+            problem=name,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=t_eg["mean"],
+            wall_time_std=t_eg["std"],
+            ci=t_eg["ci"],
+            oracle_stats=eg_result.oracle_stats,
+            converged=eg_result.converged,
+            gap_achieved=eg_result.gap_achieved,
+            final_gap=float(eg_result.gap),
+            iterations=eg_result.iterations,
+            wall_time_min=t_eg["min"],
+            wall_time_max=t_eg["max"],
+            n_outliers=t_eg["n_outliers"],
+            normalized_cost=eg_result.oracle_stats.normalized_cost(d) if eg_result.oracle_stats else 0.0,
+        ))
 
         # ── JIT-GDA ────────────────────────────────────────────────
         def run_gda():
             return run_gda_jit_benchmark(problem, epsilon=epsilon, z0=z0)
 
-        row["gda"] = _time_callable(run_gda, n_warmup=1, n_repeats=n_repeats)
-        gda_result = row["gda"]["result"]
-        oc_gda = count_gda_oracles(gda_result.iterations)
-        row["gda"]["gap"] = gda_result.gap
-        row["gda"]["iterations"] = gda_result.iterations
-        row["gda"]["converged"] = gda_result.converged
-        row["gda"]["oracles"] = oc_gda.to_dict()
-
-        rows.append(row)
+        t_gda = _time_callable(run_gda, n_warmup=1, n_repeats=n_repeats)
+        gda_result = t_gda["result"]
+        rows.append(BenchmarkResult(
+            solver="gda",
+            problem=name,
+            dim=dim,
+            epsilon=epsilon,
+            wall_time_mean=t_gda["mean"],
+            wall_time_std=t_gda["std"],
+            ci=t_gda["ci"],
+            oracle_stats=gda_result.oracle_stats,
+            converged=gda_result.converged,
+            gap_achieved=gda_result.gap_achieved,
+            final_gap=float(gda_result.gap),
+            iterations=gda_result.iterations,
+            wall_time_min=t_gda["min"],
+            wall_time_max=t_gda["max"],
+            n_outliers=t_gda["n_outliers"],
+            normalized_cost=gda_result.oracle_stats.normalized_cost(d) if gda_result.oracle_stats else 0.0,
+        ))
 
     return rows
 
@@ -204,37 +253,49 @@ def benchmark_solver_comparison(
 # ── Formatting ───────────────────────────────────────────────────────────
 
 
-def format_timing(t: dict) -> str:
-    """Format a timing dict as 'mean [ci_lo, ci_hi]'."""
-    lo, hi = t["ci"]
-    return f"{t['mean']:.4f} [{lo:.4f},{hi:.4f}]"
-
-
-def format_solver_comparison_table(rows: list[dict]) -> str:
+def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
     """Format solver comparison results as a text table."""
     header = (
         f"{'Problem':<22} {'Dim':>4}  "
-        f"{'AIPE-NPE (Time | CRN)':>32}  {'AIPE-LEN (Time | CRN)':>32}  "
-        f"{'JIT-EG (Time | Grad)':>32}  {'JIT-GDA (Time | Grad)':>32}  "
+        f"{'AIPE-NPE (Time | NrmCost)':>34}  {'AIPE-LEN (Time | NrmCost)':>34}  "
+        f"{'JIT-EG (Time | NrmCost)':>34}  {'JIT-GDA (Time | NrmCost)':>34}  "
         f"{'NPE gap':>8}  {'EG gap':>8}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
 
-    for r in rows:
-        npe = format_timing(r["aipe_npe"])
-        lnn = format_timing(r["aipe_len"])
-        eg = format_timing(r["eg"])
-        gda = format_timing(r["gda"])
-        
-        npe_str = f"{npe} | {r['aipe_npe']['oracles']['crn_calls']}"
-        lnn_str = f"{lnn} | {r['aipe_len']['oracles']['crn_calls']}"
-        eg_str = f"{eg} | {r['eg']['oracles']['grad_calls']}"
-        gda_str = f"{gda} | {r['gda']['oracles']['grad_calls']}"
+    key = lambda r: (r.problem, r.dim)
+    for (prob_name, dim), group in itertools.groupby(
+        sorted(rows, key=key), key=key
+    ):
+        group_list = list(group)
+        npe = next((r for r in group_list if r.solver == "aipe_npe"), None)
+        lnn = next((r for r in group_list if r.solver == "aipe_len"), None)
+        eg = next((r for r in group_list if r.solver == "eg"), None)
+        gda = next((r for r in group_list if r.solver == "gda"), None)
+
+        def _fmt(r: BenchmarkResult | None) -> str:
+            if r is None:
+                return "N/A"
+            ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
+            return f"{r.wall_time_mean:.4f} {ci}"
+
+        def _norm(r: BenchmarkResult | None) -> str:
+            if r is None or r.normalized_cost is None:
+                return "N/A"
+            return f"{r.normalized_cost:.2e}"
+
+        npe_str = f"{_fmt(npe)} | {_norm(npe)}"
+        lnn_str = f"{_fmt(lnn)} | {_norm(lnn)}"
+        eg_str = f"{_fmt(eg)} | {_norm(eg)}"
+        gda_str = f"{_fmt(gda)} | {_norm(gda)}"
+
+        npe_gap = npe.final_gap if npe else 0.0
+        eg_gap = eg.final_gap if eg else 0.0
 
         lines.append(
-            f"{r['name']:<22} {r['dim']:>4}  {npe_str:>32}  {lnn_str:>32}  {eg_str:>32}  {gda_str:>32}  "
-            f"{r['aipe_npe']['gap']:>8.4f}  {r['eg']['gap']:>8.4f}"
+            f"{prob_name:<22} {dim:>4}  {npe_str:>34}  {lnn_str:>34}  {eg_str:>34}  {gda_str:>34}  "
+            f"{npe_gap:>8.4f}  {eg_gap:>8.4f}"
         )
 
     return "\n".join(lines)
@@ -249,9 +310,13 @@ def format_jit_table(rows: list[dict]) -> str:
     for r in rows:
         jit = r["jit"]
         eager = r["eager"]
+        lo_j, hi_j = jit["ci"]
+        lo_e, hi_e = eager["ci"]
+        jit_str = f"{jit['mean']:.4f} [{lo_j:.4f},{hi_j:.4f}]"
+        eager_str = f"{eager['mean']:.4f} [{lo_e:.4f},{hi_e:.4f}]"
         lines.append(
             f"{r['name']:<22} {r['dim']:>4}  "
-            f"{format_timing(jit):>24}  {format_timing(eager):>24}  "
+            f"{jit_str:>24}  {eager_str:>24}  "
             f"{r['speedup']:>7.2f}x"
         )
 

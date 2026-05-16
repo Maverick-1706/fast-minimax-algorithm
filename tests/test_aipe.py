@@ -16,8 +16,8 @@ from minimax_aipe.oracles import crn_oracle_minimization
 
 def _quadratic_2d():
     """h(z) = ½ zᵀQz + bᵀz  with Q ≻ 0."""
-    Q = jnp.array([[3.0, 0.5], [0.5, 2.0]])
-    b = jnp.array([1.0, -2.0])
+    Q = jnp.array([[3.0, 0.5], [0.5, 2.0]], dtype=jnp.float32)
+    b = jnp.array([1.0, -2.0], dtype=jnp.float32)
     f = lambda z: 0.5 * z @ Q @ z + b @ z
     grad_f = lambda z: Q @ z + b
     hess_f = lambda z: Q

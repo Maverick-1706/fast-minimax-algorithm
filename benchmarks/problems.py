@@ -6,8 +6,6 @@ Reuses constructors from tests/conftest.py and adds benchmark-specific variants.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 import warnings
 from typing import Callable
 from dataclasses import replace
@@ -19,11 +17,16 @@ from jax import Array
 from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
 from minimax_aipe.problem import BenchmarkMeta, BenchmarkProblem, build_benchmark_meta
 
-# ── Import existing constructors from tests/conftest.py ──────────────────
+from benchmarks.families import (
+    make_bilinear_polytope,
+    make_logsumexp_saddle,
+    make_sparse_bilinear,
+    make_random_cubic_quadratic,
+    make_adversarial_training_toy,
+    make_scalable_diagonal,
+)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from tests.conftest import ( 
+from benchmarks.problem_constructors import (
     make_bilinear_problem,
     make_ill_conditioned_bilinear,
     make_ill_conditioned_quadratic,
@@ -145,7 +148,7 @@ def make_rosenbrock_bilinear(dim: int = 5, seed: int = 0) -> BenchmarkProblem:
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=None,
-        meta=build_benchmark_meta(problem, mu_x=None, mu_y=0.0, has_analytical_solution=False),
+        meta=build_benchmark_meta(problem, mu_x=None, mu_y=None, has_analytical_solution=False),
         name="rosenbrock_bilin",
         dim=dim,
         z0=None,
@@ -220,7 +223,7 @@ def make_diagonal_saddle(dim: int = 10, seed: int = 0) -> BenchmarkProblem:
 def _make_fixed_dim(constructor: Callable, dim_fixed: int):
     """Wrap a no-dim constructor so it accepts a dim argument (ignored)."""
     def wrapper(dim=None, **kwargs):
-        return constructor(dim=dim_fixed, **kwargs)
+        return constructor(**kwargs)
     return wrapper
 
 
@@ -245,6 +248,13 @@ _PROBLEM_REGISTRY: list[tuple[str, Callable, list[int]]] = [
     ("nonzero_rho",      make_nonzero_rho_quadratic,                                 [5, 10, 20]),
     ("rosenbrock_bilin", make_rosenbrock_bilinear,                                   [5, 10, 20]),
     ("diagonal_saddle",  make_diagonal_saddle,                                        [5, 10, 20, 50, 100]),
+    ("logsumexp_saddle", make_logsumexp_saddle,                                      [5, 10, 20, 50]),
+    ("sparse_bilinear",  make_sparse_bilinear,                                       [10, 50, 100, 200]),
+    ("random_cubic",     make_random_cubic_quadratic,                                [5, 10, 20]),
+    ("adversarial_training", make_adversarial_training_toy,                         [5, 10, 20]),
+    ("bilinear_polytope", make_bilinear_polytope,                                   [5, 10, 20]),
+    ("scalable_diagonal", make_scalable_diagonal,                                    [100, 500, 1000, 2000]),
+
 ]
 
 
@@ -286,7 +296,7 @@ def get_problem(name: str, dim: int, *, seed: int | None = None, **kwargs) -> Be
             kw = dict(kwargs)
             if seed is not None:
                 kw["seed"] = seed
-            prob  = constructor(dim=dim, **kw)
+            prob = constructor(dim=dim, **kw)
             return replace(
                 prob,
                 z0=generate_benchmark_z0(prob.problem),

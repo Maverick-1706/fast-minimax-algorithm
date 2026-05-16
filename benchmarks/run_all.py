@@ -128,12 +128,13 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     print("  nonzero_rho (ρ sweep):")
     rho_rows = scale_rho([0.1, 0.5, 1.0, 5.0, 10.0], dim=10, epsilon=epsilon,
                          n_repeats=max(1, n_repeats // 2), seed=seed)
+    npe_rows = [r for r in rho_rows if r.solver == "aipe_npe"]
     header = f"{'ρ':>8}  {'NPE (s)':>10}  {'NPE calls':>10}"
     print(header)
     print("─" * len(header))
-    for r in rho_rows:
-        print(f"{r['rho']:>8.1f}  {r['npe_time']:>10.4f}  {r['npe_calls']:>10}")
-    export_data.setdefault("scaling_rho", []).extend(rho_rows)
+    for r in npe_rows:
+        print(f"{r.rho or 0.0:>8.1f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+    export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
     print()
 
 
@@ -178,7 +179,7 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     print(f"  m_lazy sweep on {name} dim={dim}:")
     m_rows = ablation_m_lazy(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
     print(format_ablation_m_table(m_rows))
-    export_data.setdefault("ablation_m", []).extend(m_rows)
+    export_data.setdefault("ablation_m", []).extend(flatten_ablation_rows(m_rows))
     print()
 
     # T_factor sweep
@@ -191,13 +192,18 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     # NPE vs LEN head-to-head
     print("  NPE vs LEN head-to-head:")
     for prob in problems[:3]:
-        r = ablation_npe_vs_len(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
-        npe_t = r["npe"]["time_mean"]
-        len_t = r["len"]["time_mean"]
-        print(f"    {r['name']:18s} dim={r['dim']:>4}  "
-              f"NPE: {npe_t:.4f}s ({r['npe']['oracle_calls']} calls)  "
-              f"LEN: {len_t:.4f}s ({r['len']['oracle_calls']} calls)")
-        export_data.setdefault("ablation_compare", []).append(r)
+        results = ablation_npe_vs_len(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
+        npe = next((r for r in results if r.solver == "aipe_npe"), None)
+        lnn = next((r for r in results if r.solver == "aipe_len"), None)
+        if npe and lnn:
+            npe_t = npe.wall_time_mean
+            len_t = lnn.wall_time_mean
+            npe_calls = npe.oracle_stats.crn_calls
+            len_calls = lnn.oracle_stats.crn_calls
+            print(f"    {npe.problem:18s} dim={npe.dim:>4}  "
+                  f"NPE: {npe_t:.4f}s ({npe_calls} calls)  "
+                  f"LEN: {len_t:.4f}s ({len_calls} calls)")
+            export_data.setdefault("ablation_compare", []).extend(results)
     print()
 
 
