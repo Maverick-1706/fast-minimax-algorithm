@@ -193,8 +193,15 @@ def npe(
     # ── output selection ──────────────────────────────────────────────
     if fn is not None:
         # candidates: z0, z_half_1 … z_half_T, z_1 … z_T  (2T + 1 total)
+        weighted_avg = jnp.where(
+            final_state.eta_sum > tiny,
+            final_state.weighted_sum / final_state.eta_sum,
+            final_state.z,
+        )
         candidates = jnp.concatenate(
-            [jnp.expand_dims(z0, 0), all_z_half, all_z], axis=0,
+            [jnp.expand_dims(z0, 0), all_z_half, all_z,
+             jnp.expand_dims(weighted_avg, 0)],
+            axis=0,
         )
         values = jax.vmap(fn)(candidates)
         z_out = candidates[jnp.argmin(values)]

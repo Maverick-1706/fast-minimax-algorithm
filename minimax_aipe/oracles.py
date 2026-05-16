@@ -58,6 +58,85 @@ def _cholesky_solve(A: Array, b: Array) -> Array:
     x = jsp_linalg.solve_triangular(L.T, y, lower=False)
     return x
 
+def _block_chol_solve(g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny):
+    """Solve (J + λI)δ = −g for the minimax Jacobian via Schur complement.
+
+    J = [[H_xx, H_xy], [−H_yx, −H_yy]].
+    Converts to the symmetrised form and uses sign-aware block
+    elimination with Cholesky on each (smaller) block.
+    """
+    d_x = H_xx.shape[0]
+    g_x, g_y = g[:d_x], g[d_x:]
+
+    # (2,2) block of the symmetrised system: K = H_yy − λI
+    K = H_yy - lam * eye_y
+
+    # Heuristic: trace < 0 ⇒ K is "negative" ⇒ factor −K
+    neg = jnp.trace(K) < 0.0
+
+    def _solve(k_mat, sign_val):
+        k_spd = k_mat + tiny * eye_y
+        # Gershgorin safety for any residual indefiniteness
+        dk = jnp.diag(k_spd)
+        ok = jnp.sum(jnp.abs(k_spd), axis=1) - jnp.abs(dk)
+        k_spd = k_spd + jnp.maximum(-jnp.min(dk - ok), 0.0) * eye_y
+
+        Lk = jnp.linalg.cholesky(k_spd)
+
+        def _sv(b):
+            return jsp_linalg.solve_triangular(
+                Lk.T,
+                jsp_linalg.solve_triangular(Lk, b, lower=True),
+                lower=False,
+            )
+
+        Ki_Hyx = sign_val * _sv(H_yx)
+        Ki_gy = sign_val * _sv(g_y)
+
+        # Schur complement: S = (H_xx + λI) − H_xy K⁻¹ H_yx
+        S = (H_xx + lam * eye_x) - H_xy @ Ki_Hyx
+        sd = jnp.diag(S)
+        so = jnp.sum(jnp.abs(S), axis=1) - jnp.abs(sd)
+        S = S + jnp.maximum(-jnp.min(sd - so) + tiny, 0.0) * eye_x
+
+        Ls = jnp.linalg.cholesky(S)
+        dx = jsp_linalg.solve_triangular(
+            Ls.T,
+            jsp_linalg.solve_triangular(Ls, -g_x - H_xy @ Ki_gy, lower=True),
+            lower=False,
+        )
+        dy = Ki_gy - Ki_Hyx @ dx
+        return jnp.concatenate([dx, dy])
+
+    return jax.lax.cond(
+        neg,
+        lambda _: _solve(-K, -1.0),
+        lambda _: _solve(K, 1.0),
+        operand=None,
+    )
+
+
+def _safe_sym_chol_solve(A, b, tiny):
+    """Solve Ax = b for a symmetric (possibly indefinite) A.
+
+    Applies a Gershgorin-based diagonal shift to make A positive
+    definite before using Cholesky.  When A is already SPD the
+    shift is zero (identical to plain _cholesky_solve).
+    """
+    n = A.shape[0]
+    dtype = A.dtype
+    eye = jnp.eye(n, dtype=dtype)
+    d = jnp.diag(A)
+    o = jnp.sum(jnp.abs(A), axis=1) - jnp.abs(d)
+    shift = jnp.maximum(-jnp.min(d - o) + tiny, 0.0)
+    A_spd = A + shift * eye
+    L = jnp.linalg.cholesky(A_spd)
+    return jsp_linalg.solve_triangular(
+        L.T,
+        jsp_linalg.solve_triangular(L, b, lower=True),
+        lower=False,
+    )
+
 
 def _stable_lam_update(lam: Array, lam_candidate: Array) -> Array:
     """Secular-equation safeguard: clip to [0.5 λ, 2 λ] after first iter.
@@ -121,27 +200,21 @@ def crn_oracle(
     n_iters: int = 50,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
-    """Cubic-regularised Newton oracle for a minimax problem.
-
-    Solves the variational inequality via fixed-point iteration on the
-    secular equation ``(H + λI)δ = −g`` with ``λ = (γ/2)‖δ‖``.
-
-    Uses Cholesky-based linear solves for numerical stability and adds
-    a secular-equation safeguard (clipping to [0.5λ, 2λ]) to prevent
-    oscillation.  All arithmetic is performed in the dtype of ``z_bar``
-    (FP32 on GPU, FP64 on CPU when JAX_ENABLE_X64=1).
-    """
     x_bar, y_bar = _split(z_bar, problem.dim_x)
     g = problem.operator_F(z_bar)
     H = _build_jacobian(problem, x_bar, y_bar)
-    d = z_bar.shape[0]
+    (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x_bar, y_bar)
+    d_x = problem.dim_x
     dtype = z_bar.dtype
-    eye = jnp.eye(d, dtype=dtype)
+    eye_x = jnp.eye(d_x, dtype=dtype)
+    eye_y = jnp.eye(problem.dim_y, dtype=dtype)
     tiny = jnp.asarray(_TINY, dtype=dtype)
 
     def body(i, state):
         lam, z = state
-        delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
+        delta = _block_chol_solve(
+            g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
+        )
         z_new = _project_z(problem, z_bar + delta)
         d_eff = z_new - z_bar
         lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -153,7 +226,6 @@ def crn_oracle(
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u
 
-
 def crn_oracle_minimization(
     grad_fn: Callable[[Array], Array],
     hess_fn: Callable[[Array], Array],
@@ -163,11 +235,6 @@ def crn_oracle_minimization(
     project: Optional[Callable[[Array], Array]] = None,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
-    """CRN oracle for a scalar convex objective ``min h(z)``.
-
-    Uses Cholesky-based linear solves and secular-equation safeguards.
-    All arithmetic is performed in the dtype of ``z_bar`` (FP32 on GPU).
-    """
     g = grad_fn(z_bar)
     H = hess_fn(z_bar)
     d = z_bar.shape[0]
@@ -177,7 +244,7 @@ def crn_oracle_minimization(
 
     def body(i, state):
         lam, z = state
-        delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
+        delta = _safe_sym_chol_solve(H + lam * eye, -g, tiny)
         z_new = z_bar + delta
         if project is not None:
             z_new = project(z_new)
@@ -191,7 +258,6 @@ def crn_oracle_minimization(
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u
 
-
 def lazy_crn_oracle(
     problem: MinimaxProblem,
     z_bar: Array,
@@ -200,23 +266,14 @@ def lazy_crn_oracle(
     n_iters: int = 50,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
-    """Lazy CRN oracle — reuses a stale Hessian from *z_snapshot*.
-
-    Uses Cholesky-based linear solves and secular-equation safeguards.
-    All arithmetic is performed in the dtype of ``z_bar`` (FP32 on GPU).
-
-    Parameters
-    ----------
-    tol : float
-        Adaptive secular-equation convergence tolerance.
-        See :func:`crn_oracle` for details.
-    """
     x_ss, y_ss = _split(z_snapshot, problem.dim_x)
     g = problem.operator_F(z_bar)
     H = _build_jacobian(problem, x_ss, y_ss)
-    d = z_bar.shape[0]
+    (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x_ss, y_ss)
+    d_x = problem.dim_x
     dtype = z_bar.dtype
-    eye = jnp.eye(d, dtype=dtype)
+    eye_x = jnp.eye(d_x, dtype=dtype)
+    eye_y = jnp.eye(problem.dim_y, dtype=dtype)
     tiny = jnp.asarray(_TINY, dtype=dtype)
     lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
 
@@ -228,7 +285,9 @@ def lazy_crn_oracle(
 
         def body(state):
             lam, _z, i, _prev = state
-            delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
+            delta = _block_chol_solve(
+                g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
+            )
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -236,21 +295,20 @@ def lazy_crn_oracle(
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
-            (lam_init, z_bar,
-             jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
+            (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
     else:
         def body(i, state):
             lam, z = state
-            delta = _cholesky_solve(H + (lam + tiny) * eye, -g)
+            delta = _block_chol_solve(
+                g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
+            )
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
             return _stable_lam_update(lam, lam_candidate), z_new
 
-        lam, z = jax.lax.fori_loop(
-            0, n_iters, body, (lam_init, z_bar)
-        )
+        lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)

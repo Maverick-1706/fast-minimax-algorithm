@@ -262,7 +262,7 @@ def aipe(
     else:
         z_out = final_state.z
 
-    return z_out, T
+    return z_out, T+1  # oracle calls = T iterations + 1 initial call
 
 
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
