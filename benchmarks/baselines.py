@@ -211,3 +211,102 @@ def run_gda_jit_benchmark(
         final_residual=residual,
         oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters),
     )
+
+
+# ── JIT-compiled NPE-restart ─────────────────────────────────────────────
+
+from minimax_aipe.npe import npe, make_crn_npe_oracle
+
+def run_npe_restart_jit(
+    problem: MinimaxProblem,
+    max_iters: int = 100_000,
+    z0: Array | None = None,
+    tol: float = 0.0,
+) -> tuple[Array, float, float, int]:
+    """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs.
+
+    Returns (z, residual, wall_time, actual_iters).
+    """
+    rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
+    gamma = 2.0 * rho
+    
+    # Heuristic T per epoch (similar to framework.py fallback)
+    ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
+    T = min(max_iters, max(10, int(ell / rho)))
+
+    if z0 is None:
+        x0 = problem.project_x(jnp.zeros(problem.dim_x))
+        y0 = problem.project_y(jnp.zeros(problem.dim_y))
+        z_start = jnp.concatenate([x0, y0])
+    else:
+        z0_arr = jnp.asarray(z0)
+        x0 = problem.project_x(z0_arr[: problem.dim_x])
+        y0 = problem.project_y(z0_arr[problem.dim_x :])
+        z_start = jnp.concatenate([x0, y0])
+
+    proj = lambda z: jnp.concatenate([
+        problem.project_x(z[: problem.dim_x]),
+        problem.project_y(z[problem.dim_x :]),
+    ])
+
+    F_op = problem.operator_F
+    oracle = make_crn_npe_oracle(problem, gamma)
+    merit = lambda z: jnp.sum(F_op(z) ** 2)
+
+    @jax.jit
+    def npe_epoch_loop(z_init):
+        tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
+        max_epochs = jnp.int32(max(1, max_iters // T))
+
+        def cond(state):
+            epoch, _z = state
+            not_done = epoch < max_epochs
+            resid_sq = merit(_z)
+            resid_big = resid_sq > tol_sq
+            return not_done & jnp.where(epoch > 0, resid_big, jnp.bool_(True))
+
+        def body(state):
+            epoch, z = state
+            z_new, _ = npe(oracle, F_op, z, T, gamma, project=proj, fn=merit)
+            return (epoch + 1, z_new)
+
+        return jax.lax.while_loop(cond, body, (jnp.int32(0), z_init))
+
+    z_start.block_until_ready()
+    t0 = time.perf_counter()
+    epochs_out, z_out = npe_epoch_loop(z_start)
+    z_out.block_until_ready()
+    wall_time = time.perf_counter() - t0
+
+    actual_iters = int(epochs_out) * T
+    residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    return z_out, residual, wall_time, actual_iters
+
+
+def run_npe_restart_jit_benchmark(
+    problem: MinimaxProblem,
+    epsilon: float = 0.01,
+    max_iters: int = 100_000,
+    z0: Array | None = None,
+) -> BaselineResult:
+    """JIT-NPE-restart benchmark wrapper returning BaselineResult with gap."""
+    z_out, residual, wall_time, actual_iters = run_npe_restart_jit(
+        problem, max_iters=max_iters, z0=z0, tol=epsilon
+    )
+    x_out = z_out[: problem.dim_x]
+    y_out = z_out[problem.dim_x :]
+    gap = estimate_gap(problem, x_out, y_out)
+
+    return BaselineResult(
+        x=x_out, y=y_out, gap=gap,
+        iterations=actual_iters, wall_time=wall_time,
+        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        final_residual=residual,
+        oracle_stats=OracleStats(
+            crn_calls=actual_iters,
+            grad_calls=2 * actual_iters,
+            hessian_calls=4 * actual_iters,
+            oracle_calls=actual_iters,
+            call_type="crn"
+        ),
+    )

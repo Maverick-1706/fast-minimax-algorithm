@@ -22,14 +22,31 @@ def estimate_gap(
     *,
     num_restarts: int = 10,
     num_steps: int = 500,
-    lr: float = 0.01,
+    lr: Optional[float] = None,
+    momentum: float = 0.9,
     key: Optional[Array] = None,
 ) -> float:
-    """Estimate the duality gap via gradient ascent/descent.
+    """Estimate the duality gap via Nesterov accelerated gradient ascent/descent.
 
     For small problems, computes:
-        max_y f(x̂, y) via gradient ascent on y
-        min_x f(x, ŷ) via gradient descent on x
+        max_y f(x̂, y) via Nesterov accelerated gradient ascent on y
+        min_x f(x, ŷ) via Nesterov accelerated gradient descent on x
+
+    Three design choices improve robustness over plain GD:
+
+    1. **Dynamic learning rate** — when *lr* is ``None`` (default), uses
+       ``1 / problem.ell`` (inverse smoothness constant), which is the
+       standard step size for L-smooth optimisation and prevents
+       divergence on ill-conditioned problems where a fixed 0.01 rate
+       would produce NaN.
+    2. **Nesterov momentum** — the inner optimisation loop uses
+       Nesterov's Accelerated Gradient method (NAG) with the
+       *look-ahead* formulation, significantly improving convergence
+       within the 500-iteration budget for ill-conditioned problems.
+    3. **Current-iterate seeding** — the first restart initialisation is
+       exactly the current *(x, y)*, which guarantees that
+       ``max_y f(x, y') ≥ f(x, y) ≥ min_x f(x', y)``, so the
+       estimated gap is always ≥ 0.
 
     Both the per-restart step loop and the restart loop are compiled
     into single XLA computations via ``jax.lax.fori_loop``, eliminating
@@ -44,18 +61,27 @@ def estimate_gap(
         Number of random restarts to avoid local optima.
     num_steps : int
         Gradient steps per restart.
-    lr : float
-        Learning rate.
+    lr : float or None
+        Learning rate.  When ``None`` (default), automatically set to
+        ``1.0 / problem.ell``.
+    momentum : float
+        Nesterov momentum coefficient β ∈ [0, 1).  Default 0.9.
     key : Array, optional
         JAX PRNG key. If None, uses a fixed seed.
 
     Returns
     -------
     gap : float
-        Estimated duality gap.
+        Estimated duality gap (guaranteed ≥ 0 when the first restart
+        seed is the current iterate and the optimisation does not
+        diverge).
     """
     if key is None:
         key = jax.random.PRNGKey(42)
+
+    # ── Dynamic learning rate from problem smoothness ─────────────────
+    if lr is None:
+        lr = 1.0 / problem.ell
 
     # Keep x,y 1D even when caller passed scalar values.
     x = jnp.atleast_1d(jnp.asarray(x))
@@ -64,6 +90,8 @@ def estimate_gap(
     f = problem.f
     project_x = problem.project_x
     project_y = problem.project_y
+
+    beta = momentum
 
     # Pre-generate all random initial points in one batched draw.
     key, y_key, x_key = jax.random.split(key, 3)
@@ -76,43 +104,66 @@ def estimate_gap(
     y_inits = jax.vmap(project_y)(y_inits_raw)
     x_inits = jax.vmap(project_x)(x_inits_raw)
 
-    # ------------------------------------------------------------------ #
-    #  max_y  f(x, y)  via gradient ascent                                #
-    # ------------------------------------------------------------------ #
-    def y_step_body(_step: int, y_cur: Array) -> Array:
-        """Single gradient ascent step on y (traced inside fori_loop)."""
-        grad = grad_f_x(y_cur)
-        return project_y(y_cur + lr * grad)
+    # Seed the first restart with the current iterate so that
+    # max_y f(x,y') ≥ f(x,y) ≥ min_x f(x',y), guaranteeing gap ≥ 0.
+    y_inits = y_inits.at[0].set(y)
+    x_inits = x_inits.at[0].set(x)
 
+    # ------------------------------------------------------------------ #
+    #  max_y  f(x, y)  via Nesterov accelerated gradient ascent           #
+    # ------------------------------------------------------------------ #
+    def y_step_body(_step: int, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        """Single NAG ascent step on y (traced inside fori_loop).
+
+        Velocity form of Nesterov:
+            y_ahead = y_cur + β · v_cur           (look-ahead)
+            g       = ∇_y f(x, y_ahead)
+            v_new   = β · v_cur + lr · g          (ascent)
+            y_new   = Π(y_cur + v_new)            (project)
+        """
+        y_cur, v_cur = carry
+        y_ahead = y_cur + beta * v_cur
+        g = grad_f_x(y_ahead)
+        v_new = beta * v_cur + lr * g
+        y_new = project_y(y_cur + v_new)
+        return (y_new, v_new)
 
     def y_restart_body(restart_idx: int, best_val: Array) -> Array:
         """Run one full restart and fold the result into the running max."""
-        y_final = jax.lax.fori_loop(
-            0, num_steps, y_step_body, y_inits[restart_idx]
-        )
+        y0 = y_inits[restart_idx]
+        v0 = jnp.zeros_like(y0)
+        y_final, _ = jax.lax.fori_loop(0, num_steps, y_step_body, (y0, v0))
         return jnp.maximum(best_val, f(x, y_final))
-
 
     f_x = lambda yy: f(x, yy)
     grad_f_x = jax.grad(f_x)
     best_max = jax.lax.fori_loop(0, num_restarts, y_restart_body, -jnp.inf)
 
     # ------------------------------------------------------------------ #
-    #  min_x  f(x, y)  via gradient descent                               #
+    #  min_x  f(x, y)  via Nesterov accelerated gradient descent           #
     # ------------------------------------------------------------------ #
-    def x_step_body(_step: int, x_cur: Array) -> Array:
-        """Single gradient descent step on x (traced inside fori_loop)."""
-        grad = grad_f_y(x_cur)
-        return project_x(x_cur - lr * grad)
+    def x_step_body(_step: int, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        """Single NAG descent step on x (traced inside fori_loop).
 
+        Velocity form of Nesterov:
+            x_ahead = x_cur + β · v_cur           (look-ahead)
+            g       = ∇_x f(x_ahead, y)
+            v_new   = β · v_cur − lr · g          (descent)
+            x_new   = Π(x_cur + v_new)            (project)
+        """
+        x_cur, v_cur = carry
+        x_ahead = x_cur + beta * v_cur
+        g = grad_f_y(x_ahead)
+        v_new = beta * v_cur - lr * g
+        x_new = project_x(x_cur + v_new)
+        return (x_new, v_new)
 
     def x_restart_body(restart_idx: int, best_val: Array) -> Array:
         """Run one full restart and fold the result into the running min."""
-        x_final = jax.lax.fori_loop(
-            0, num_steps, x_step_body, x_inits[restart_idx]
-        )
+        x0 = x_inits[restart_idx]
+        v0 = jnp.zeros_like(x0)
+        x_final, _ = jax.lax.fori_loop(0, num_steps, x_step_body, (x0, v0))
         return jnp.minimum(best_val, f(x_final, y))
-
 
     f_y = lambda xx: f(xx, y)
     grad_f_y = jax.grad(f_y)

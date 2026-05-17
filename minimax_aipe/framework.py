@@ -290,26 +290,19 @@ class RegularizedSubproblem:
         x_bar: Array,
         y_bar: Array,
         npe_gamma: float,
-        n_iters: int = 50,
+        n_iters: int = 15,
         tol: float = 0.0,
     ) -> Callable[[Array], tuple[Array, Array]]:
         """Return a CRN NPE oracle bound to fixed ``(x_bar, y_bar)``.
 
-        The returned callable's Python identity is a fresh closure, but the
-        *underlying parametric methods* (``operator_F_h``, ``jacobian_F_h``)
-        remain the same Python objects across all calls.  JAX reuses the same
-        compiled kernel; only the captured ``x_bar``/``y_bar`` constants differ
-        — those are folded in as constants at trace time (they are concrete
-        arrays outside any JAX trace when ``_iProx_Psi`` is called from
-        ``_restart_with_early_stop``, which is an eager Python loop).
-
-        When ``tol > 0`` the secular-equation solver exits as soon as the
-        regularisation parameter λ converges, saving unnecessary iterations on
-        easy subproblems.
+        Uses ``fori_loop`` with a fixed iteration count instead of
+        ``while_loop``.  This is significantly cheaper for XLA to compile
+        because the iteration count is static, letting the compiler fully
+        unroll or optimise the loop body without generating
+        convergence-check control flow.
         """
         dim_x = self.dim_x
         _tiny = _TINY
-        gamma = self._gamma
 
         def _project_z_h(z: Array) -> Array:
             xz, yz = z[:dim_x], z[dim_x:]
@@ -317,63 +310,29 @@ class RegularizedSubproblem:
                 self.project_x(xz), self.project_y(yz),
             ])
 
-        if tol > 0:
-            def oracle(z_bar: Array) -> tuple[Array, Array]:
-                g = self.operator_F_h(z_bar, x_bar, y_bar)
-                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
-                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                d = z_bar.shape[0]
-                dtype = z_bar.dtype
-                eye = jnp.eye(d, dtype=dtype)
-                tiny = jnp.asarray(_tiny, dtype=dtype)
-                tol_jax = jnp.asarray(tol, dtype=dtype)
+        def oracle(z_bar: Array) -> tuple[Array, Array]:
+            g = self.operator_F_h(z_bar, x_bar, y_bar)
+            xb, yb = z_bar[:dim_x], z_bar[dim_x:]
+            H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
+            d = z_bar.shape[0]
+            dtype = z_bar.dtype
+            eye = jnp.eye(d, dtype=dtype)
+            tiny = jnp.asarray(_tiny, dtype=dtype)
 
-                def cond(state):
-                    lam, _z, i, prev_lam = state
-                    change = jnp.abs(lam - prev_lam)
-                    return (i < n_iters) & (change > jnp.maximum(tol_jax * lam, tiny))
+            def body(_i, carry):
+                lam, z = carry
+                delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
+                z_new = _project_z_h(z_bar + delta)
+                d_eff = z_new - z_bar
+                return (npe_gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
 
-                def body(state):
-                    lam, _z, i, _prev = state
-                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-                    z_new = _project_z_h(z_bar + delta)
-                    d_eff = z_new - z_bar
-                    return (
-                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
-                        z_new, i + 1, lam,
-                    )
-
-                lam, z, _i, _p = jax.lax.while_loop(
-                    cond, body,
-                    (jnp.zeros((), dtype=dtype), z_bar,
-                     jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
-                )
-                d_eff = z - z_bar
-                u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
-        else:
-            def oracle(z_bar: Array) -> tuple[Array, Array]:
-                g = self.operator_F_h(z_bar, x_bar, y_bar)
-                xb, yb = z_bar[:dim_x], z_bar[dim_x:]
-                H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                d = z_bar.shape[0]
-                dtype = z_bar.dtype
-                eye = jnp.eye(d, dtype=dtype)
-                tiny = jnp.asarray(_tiny, dtype=dtype)
-
-                def body(i, state):
-                    lam, z = state
-                    delta = jnp.linalg.solve(H + (lam + tiny) * eye, -g)
-                    z_new = _project_z_h(z_bar + delta)
-                    d_eff = z_new - z_bar
-                    return (npe_gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
-
-                lam, z = jax.lax.fori_loop(
-                    0, n_iters, body, (jnp.zeros((), dtype=dtype), z_bar)
-                )
-                d_eff = z - z_bar
-                u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
+            lam, z = jax.lax.fori_loop(
+                0, n_iters, body,
+                (jnp.zeros((), dtype=dtype), z_bar),
+            )
+            d_eff = z - z_bar
+            u = -(g + H @ d_eff + lam * d_eff)
+            return z, u
 
         return oracle
 
@@ -633,7 +592,7 @@ def _iProx_Phi(
     inner_zeta_3 = min(params.zeta_3, zeta_2 * 0.1)
 
     # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ────────────────
-    neg_psi_fn, grad_neg_psi_fn, _hess_neg_psi_fn = _make_psi_oracle(
+    neg_psi_fn, grad_neg_psi_fn = _make_psi_oracle(
         problem, x_bar, gamma, params,
         M_saddle=M_saddle, m_lazy=params.m_lazy,
     )
@@ -673,10 +632,19 @@ def _iProx_Phi(
             project=problem.project_y, fn=neg_psi_fn,
         )
 
-    y_hat, _middle_calls = _restart_jax(
+    # Use a Python for loop instead of _restart_jax (while_loop).
+    # This breaks the compilation depth: the outer aipe's scan body
+    # contains 4 sequential calls to compiled inner aipe, rather than
+    # a while_loop whose body contains the full inner computation.
+    y_hat = y0
+    for _ in range(params.S_middle):
+         y_hat, _ = _run_middle_epoch(y_hat)
+
+    #earlier version with jax-compatible restart (but slower to compile):
+    '''y_hat, _middle_calls = _restart_jax(
         _run_middle_epoch, y0, params.S_middle,
         step_tol=params.zeta_2,
-    )
+    )'''
 
     x_hat: Array
     if x_hat_warm.value is not None:
@@ -781,7 +749,7 @@ def _iProx_Psi(
 
     if M_saddle == "npe":
         crn_oracle_fn = kernel.make_crn_oracle(
-            x_bar, y_bar, npe_gamma, tol=zeta_3
+            x_bar, y_bar, npe_gamma
         )
 
         def _run_inner(z: Array) -> tuple[Array, int]:
@@ -946,11 +914,17 @@ def _iProx_Psi(
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
-    z_hat, epochs = _restart_jax(
+    # Same rationale as _iProx_Phi: avoids nesting while_loop inside
+    # the inner aipe's scan, which sits inside the middle aipe's scan.
+    z_hat = z0
+    for _ in range(params.S_inner):
+        z_hat, _ = _run_inner(z_hat)
+
+    '''z_hat, epochs = _restart_jax(
         _run_inner, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
-    )
-    calls = epochs * inner_T
+    )'''
+    calls = params.S_inner * inner_T
 
     # ── EG refinement ────────────────────────────────────────────────
     ell_h = max(kernel.ell_h, _ABS_TOL)
@@ -1168,7 +1142,7 @@ def _algorithm_3(
     logger.debug("Built kernel: %r", kernel)
 
     # ── Build the Φ oracle ───────────────────────────────────────────
-    phi_fn, grad_phi_fn, _hess_phi_fn = _make_phi_oracle(
+    phi_fn, grad_phi_fn = _make_phi_oracle(
         problem, gamma, params,
         M_saddle=M_saddle, m_lazy=params.m_lazy,
     )
@@ -1198,10 +1172,18 @@ def _algorithm_3(
             project=problem.project_x, fn=phi_fn,
         )
 
-    x_hat, outer_epochs = _restart_jax(
+    x_hat = x0
+    for s in range(params.S_outer):
+        x_hat_new, _ = _run_outer_epoch(x_hat)
+        # Python-level convergence check — costs nothing to compile
+        if float(jnp.linalg.norm(x_hat_new - x_hat)) < params.zeta_1:
+            break
+        x_hat = x_hat_new
+
+    '''x_hat, outer_epochs = _restart_jax(
         _run_outer_epoch, x0, params.S_outer,
         step_tol=params.zeta_1,
-    )
+    )'''
 
     # ── Recover y ≈ argmax_y f(x_hat, y) ────────────────────────────
     y_hat = _maximize_y(
@@ -1217,7 +1199,7 @@ def _algorithm_3(
         "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d  "
         "outer_epochs=%d/%d",
         phi_val, grad_norm, total_calls,
-        int(outer_epochs), params.S_outer,
+        params.S_outer,
     )
 
     z_hat = jnp.concatenate([x_hat, y_hat])
@@ -1237,7 +1219,6 @@ def _make_phi_oracle(
 ) -> tuple[
     Callable[[Array], Array],
     Callable[[Array], Array],
-    Callable[[Array], Array],
 ]:
     """Build approximate value, gradient, and Hessian oracles for Φ.
 
@@ -1247,6 +1228,10 @@ def _make_phi_oracle(
     overwhelms the LEN saddle speedup.  The paper only needs inexact
     zeroth-/first-order oracles here, so use the lightweight first-order
     helper regardless of the saddle solver selected for Algorithm 5.
+
+    The Hessian oracle is no longer computed — it was never used and
+    ``jax.jacfwd(grad_phi)`` through a ``fori_loop`` adds an entire
+    forward-mode AD layer to every compilation.
     """
     def _solve_y(x: Array) -> Array:
         return _maximize_y(
@@ -1263,8 +1248,7 @@ def _make_phi_oracle(
         gx, _gy_neg = problem.grad_f(x, y)
         return gx
 
-    hess_phi = jax.jacfwd(grad_phi)
-    return phi, grad_phi, hess_phi
+    return phi, grad_phi
 
 
 def _make_psi_oracle(
@@ -1277,7 +1261,6 @@ def _make_psi_oracle(
 ) -> tuple[
     Callable[[Array], Array],
     Callable[[Array], Array],
-    Callable[[Array], Array],
 ]:
     """Build approximate oracles for the convex function ``-Ψ(y; x̄)``.
 
@@ -1286,6 +1269,10 @@ def _make_psi_oracle(
     value/gradient oracle evaluations, not the Algorithm 5 saddle solver;
     keep them on the lightweight first-order helper so LEN mode does not
     spend most of its time in scalar ALEN sub-solves.
+
+    The Hessian oracle is no longer computed — it was never used and
+    ``jax.jacfwd(grad_neg_psi)`` through a ``fori_loop`` adds an entire
+    forward-mode AD layer to every compilation.
     """
     g_problem = _make_g_problem(problem, x_bar, gamma)
 
@@ -1304,8 +1291,7 @@ def _make_psi_oracle(
         _gx, gy_neg = g_problem.grad_f(x, y)
         return gy_neg
 
-    hess_neg_psi = jax.jacfwd(grad_neg_psi)
-    return neg_psi, grad_neg_psi, hess_neg_psi
+    return neg_psi, grad_neg_psi
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1623,7 +1609,6 @@ def _ell(problem: MinimaxProblem) -> float:
 __all__ = [
     "solve",
     "RegularizedSubproblem",
-    # Internal building blocks — exported for advanced usage
     "_CallCounter",
     "_LoopParams",
     "_WarmStart",

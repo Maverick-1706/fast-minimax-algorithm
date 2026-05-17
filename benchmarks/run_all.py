@@ -166,7 +166,7 @@ def _run_convergence(problems, epsilon, export_data):
     from benchmarks.convergence import sweep_epsilon, format_convergence_table
     print(_header("Convergence: ε-Sweep"))
     epsilons = config.EPSILON_GRID
-    for prob in problems[:2]:
+    for prob in problems[:6]:
         name = prob.name or "?"
         dim = prob.dim or prob.problem.dim_x
         print(f"  {name} dim={dim}:")

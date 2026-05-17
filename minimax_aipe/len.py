@@ -139,7 +139,7 @@ def _validate_params(*, T: int, m: int, gamma: float, S: int = 1) -> None:
 def make_lazy_crn_npe_oracle(
     problem: MinimaxProblem,
     gamma: float,
-    n_iters: int = 50,
+    n_iters: int = 15,
     *,
     return_F: bool = False,
     tol: float = 0.0,

@@ -13,9 +13,9 @@ import jax.numpy as jnp
 
 from minimax_aipe import solve
 from benchmarks import config
-from benchmarks.baselines import run_eg_jit_benchmark
+from benchmarks.baselines import run_eg_jit_benchmark, run_npe_restart_jit_benchmark
 from benchmarks.results import BenchmarkResult
-from benchmarks.oracles import count_eg_oracles
+from benchmarks.oracles import count_eg_oracles, count_npe_oracles
 from minimax_aipe.problem import BenchmarkProblem
 
 
@@ -71,6 +71,21 @@ def sweep_epsilon(
             normalized_cost=r_len.oracle_stats.normalized_cost(d),
         ))
 
+        # Standalone NPE-restart
+        snpe_max_iters = min(100_000, max(5000, int(2000 * d / max(eps, 1e-6))))
+        snpe_res = run_npe_restart_jit_benchmark(problem, epsilon=eps, max_iters=snpe_max_iters, z0=prob.z0)
+        snpe_stats = count_npe_oracles(snpe_res.iterations)
+        rows.append(BenchmarkResult(
+            solver="npe_restart", problem=name, dim=dim, epsilon=eps,
+            wall_time_mean=0.0, wall_time_std=0.0,
+            ci=(0.0, 0.0),
+            oracle_stats=snpe_stats,
+            converged=snpe_res.converged, gap_achieved=snpe_res.gap_achieved,
+            final_gap=float(snpe_res.gap),
+            iterations=snpe_res.iterations,
+            normalized_cost=snpe_stats.normalized_cost(d),
+        ))
+
         # JIT-EG (early stopping enabled via tol, scaled by dim/epsilon)
         eg_max_iters = min(200_000, max(5000, int(2000 * d / max(eps, 1e-6))))
         eg_res = run_eg_jit_benchmark(problem, epsilon=eps, max_iters=eg_max_iters, z0=prob.z0)
@@ -97,7 +112,8 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     """
     header = (
         f"{'Problem':<18} {'Dim':>4}  {'ε':>8}  "
-        f"{'NPE gap':>10} {'NPE cost':>10} {'ok':>3}  "
+        f"{'A-NPE gap':>10} {'A-NPE cost':>10} {'ok':>3}  "
+        f"{'S-NPE gap':>10} {'S-NPE cost':>10} {'ok':>3}  "
         f"{'LEN gap':>10} {'LEN cost':>10} {'ok':>3}  "
         f"{'EG gap':>10} {'EG cost':>10} {'ok':>3}"
     )
@@ -110,12 +126,16 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     ):
         group_list = list(group)
         npe = next((r for r in group_list if r.solver == "aipe_npe"), None)
+        s_npe = next((r for r in group_list if r.solver == "npe_restart"), None)
         lnn = next((r for r in group_list if r.solver == "aipe_len"), None)
         eg = next((r for r in group_list if r.solver == "eg"), None)
 
         npe_gap = npe.final_gap if npe else 0.0
         npe_cost = npe.normalized_cost if npe else 0.0
         npe_ok = "Y" if (npe and npe.gap_achieved) else "N"
+        snpe_gap = s_npe.final_gap if s_npe else 0.0
+        snpe_cost = s_npe.normalized_cost if s_npe else 0.0
+        snpe_ok = "Y" if (s_npe and s_npe.gap_achieved) else "N"
         len_gap = lnn.final_gap if lnn else 0.0
         len_cost = lnn.normalized_cost if lnn else 0.0
         len_ok = "Y" if (lnn and lnn.gap_achieved) else "N"
@@ -126,6 +146,7 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
         lines.append(
             f"{prob_name:<18} {dim:>4}  {eps:>8.4f}  "
             f"{npe_gap:>10.6f} {npe_cost:>10.2e} {npe_ok:>3}  "
+            f"{snpe_gap:>10.6f} {snpe_cost:>10.2e} {snpe_ok:>3}  "
             f"{len_gap:>10.6f} {len_cost:>10.2e} {len_ok:>3}  "
             f"{eg_gap:>10.6f} {eg_cost:>10.2e} {eg_ok:>3}"
         )

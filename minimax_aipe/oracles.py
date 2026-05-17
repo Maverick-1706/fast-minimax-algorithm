@@ -197,7 +197,7 @@ def crn_oracle(
     problem: MinimaxProblem,
     z_bar: Array,
     gamma: float,
-    n_iters: int = 50,
+    n_iters: int = 15,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
     x_bar, y_bar = _split(z_bar, problem.dim_x)
@@ -231,7 +231,7 @@ def crn_oracle_minimization(
     hess_fn: Callable[[Array], Array],
     z_bar: Array,
     gamma: float,
-    n_iters: int = 50,
+    n_iters: int = 15,
     project: Optional[Callable[[Array], Array]] = None,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
@@ -263,7 +263,7 @@ def lazy_crn_oracle(
     z_bar: Array,
     z_snapshot: Array,
     gamma: float,
-    n_iters: int = 50,
+    n_iters: int = 15,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
     x_ss, y_ss = _split(z_snapshot, problem.dim_x)

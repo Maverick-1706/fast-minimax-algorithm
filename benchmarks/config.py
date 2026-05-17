@@ -45,7 +45,7 @@ N_WARMUP: int = 1
 EPSILON_DEFAULT: float = 0.01
 """Default target duality gap for solver runs."""
 
-EPSILON_GRID: list[float] = [0.1, 0.05, 0.01, 0.005]
+EPSILON_GRID: list[float] = [0.1, 0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001]
 """Default ε sweep for convergence analysis."""
 
 TOLERANCE_LEVELS: list[float] = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3]

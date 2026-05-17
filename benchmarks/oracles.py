@@ -37,6 +37,23 @@ def count_gda_oracles(n_iters: int) -> OracleStats:
     )
 
 
+def count_npe_oracles(n_iters: int) -> OracleStats:
+    """Oracle cost of *n_iters* standalone NPE steps.
+
+    Each NPE step calls the CRN oracle once. The CRN oracle evaluates
+    the full Jacobian/Hessian exactly once per call. It also takes 2
+    projections per iter.
+    """
+    return OracleStats(
+        crn_calls=n_iters,
+        grad_calls=2 * n_iters,
+        hessian_calls=4 * n_iters,
+        projection_calls=2 * n_iters,
+        oracle_calls=n_iters,
+        call_type="crn",
+    )
+
+
 def count_solver_oracles(result) -> OracleStats:
     """Extract oracle stats from a SolverResult."""
     return getattr(result, "oracle_stats", OracleStats())

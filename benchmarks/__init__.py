@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import random
 
-os.environ.setdefault("JAX_PLATFORMS", "")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 import numpy as np
