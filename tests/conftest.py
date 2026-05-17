@@ -7,7 +7,7 @@ if you want to test Metal.
 
 import os
 
-os.environ.setdefault("JAX_PLATFORMS", "")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 """Shared fixtures for the comprehensive test suite.
 
 Problem constructors return a dict with:

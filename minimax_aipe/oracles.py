@@ -197,7 +197,7 @@ def crn_oracle(
     problem: MinimaxProblem,
     z_bar: Array,
     gamma: float,
-    n_iters: int = 15,
+    n_iters: int = 50,
     tol: float = 0.0,
 ) -> tuple[Array, Array]:
     x_bar, y_bar = _split(z_bar, problem.dim_x)

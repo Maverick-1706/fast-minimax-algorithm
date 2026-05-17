@@ -62,8 +62,9 @@ def estimate_gap(
     num_steps : int
         Gradient steps per restart.
     lr : float or None
-        Learning rate.  When ``None`` (default), automatically set to
-        ``1.0 / problem.ell``.
+        Learning rate. When ``None`` (default), use ``1.0 / problem.ell``
+        if a positive smoothness constant is available; otherwise fall
+        back to the legacy default ``0.01``.
     momentum : float
         Nesterov momentum coefficient β ∈ [0, 1).  Default 0.9.
     key : Array, optional
@@ -81,7 +82,8 @@ def estimate_gap(
 
     # ── Dynamic learning rate from problem smoothness ─────────────────
     if lr is None:
-        lr = 1.0 / problem.ell
+        ell = problem.ell
+        lr = 1.0 / ell if ell is not None and ell > 0.0 else 0.01
 
     # Keep x,y 1D even when caller passed scalar values.
     x = jnp.atleast_1d(jnp.asarray(x))

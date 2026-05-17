@@ -158,7 +158,9 @@ def aipe(
     z_out : Array
         Approximate minimiser.
     oracle_calls : int
-        Number of proximal oracle invocations (= T).
+        Number of proximal oracle invocations (= T). The eager call at
+        ``z0`` is reused for the first scan iteration, so it does not add
+        an extra effective oracle evaluation.
     """
     dtype = z0.dtype
     tiny = jnp.asarray(_TINY_AIPE, dtype=dtype)
@@ -262,7 +264,7 @@ def aipe(
     else:
         z_out = final_state.z
 
-    return z_out, T+1  # oracle calls = T iterations + 1 initial call
+    return z_out, T
 
 
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
@@ -298,7 +300,7 @@ def aipe_restart(
     z_out : Array
         Approximate minimiser.
     oracle_calls : int
-        Total proximal oracle calls (≈ S × (T + 1)).
+        Total proximal oracle calls (= S × T).
     """
     z = z0
     total_calls = 0
