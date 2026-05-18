@@ -163,7 +163,7 @@ def _run_memory(problems, epsilon, export_data):
 
 
 def _run_convergence(problems, epsilon, export_data):
-    from benchmarks.convergence import sweep_epsilon, format_convergence_table
+    from benchmarks.convergence import sweep_epsilon, format_convergence_table, sweep_epsilon_with_traces, format_trace_table
     print(_header("Convergence: ε-Sweep"))
     epsilons = config.EPSILON_GRID
     for prob in problems[:6]:
@@ -173,7 +173,12 @@ def _run_convergence(problems, epsilon, export_data):
         rows = sweep_epsilon(prob, epsilons)
         print(format_convergence_table(rows))
         print()
+        if len(problems) > 0 and len(epsilons) > 0:
+            trace_rows = sweep_epsilon_with_traces(problems[0], [epsilons[-1]])
+            print(format_trace_table(trace_rows))
         export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
+        export_data.setdefault("traces", []).extend(flatten_convergence_rows(trace_rows))
+
 
 
 def _run_ablation(problems, epsilon, n_repeats, export_data):
@@ -181,12 +186,20 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
         ablation_m_lazy,
         ablation_npe_vs_len,
         ablation_npe_t_factor,
+        ablation_no_cubic,
+        ablation_no_restart,
+        ablation_no_acceleration,
+        ablation_fixed_inner,
+        ablation_init_comparison,
         format_ablation_m_table,
         format_ablation_t_table,
+        format_ablation_no_cubic_table,
+        format_ablation_init_table,
+        format_ablation_fixed_inner_table,
     )
     print(_header("Ablation"))
 
-    # m_lazy sweep
+    # ── m_lazy sweep ────────────────────────────────────────────────
     prob = problems[0]
     name = prob.name or "?"
     dim = prob.dim or prob.problem.dim_x
@@ -196,14 +209,14 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     export_data.setdefault("ablation_m", []).extend(flatten_ablation_rows(m_rows))
     print()
 
-    # T_factor sweep
+    # ── T_factor sweep ──────────────────────────────────────────────
     print(f"  T_factor sweep on {name} dim={dim}:")
     t_rows = ablation_npe_t_factor(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
     print(format_ablation_t_table(t_rows))
     export_data.setdefault("ablation_t", []).extend(flatten_ablation_rows(t_rows))
     print()
 
-    # NPE vs LEN head-to-head
+    # ── NPE vs LEN head-to-head ─────────────────────────────────────
     print("  NPE vs LEN head-to-head:")
     for prob in problems[:3]:
         results = ablation_npe_vs_len(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
@@ -218,6 +231,97 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
                   f"NPE: {npe_t:.4f}s ({npe_calls} calls)  "
                   f"LEN: {len_t:.4f}s ({len_calls} calls)")
             export_data.setdefault("ablation_compare", []).extend(results)
+    print()
+
+    # ── NEW: No-cubic regularization ────────────────────────────────
+    # No solver changes needed — works whenever problem.rho > 0.
+    rho_problem = next(
+        (p for p in problems if getattr(p.problem, "rho", None) and p.problem.rho > 0),
+        None,
+    )
+    if rho_problem is not None:
+        rname = rho_problem.name or "?"
+        rdim = rho_problem.dim or rho_problem.problem.dim_x
+        print(f"  No-cubic (ρ=0) ablation on {rname} dim={rdim}:")
+        no_cubic_rows = ablation_no_cubic(
+            rho_problem, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
+        )
+        print(format_ablation_no_cubic_table(no_cubic_rows))
+        export_data.setdefault("ablation_no_cubic", []).extend(
+            flatten_ablation_rows(no_cubic_rows),
+        )
+        print()
+    else:
+        print("  [skip] no_cubic — no problems with ρ > 0 found")
+        print()
+
+    # ── NEW: Initialization comparison ──────────────────────────────
+    # No solver changes needed.
+    init_prob = problems[0]
+    iname = init_prob.name or "?"
+    idim = init_prob.dim or init_prob.problem.dim_x
+    print(f"  Init comparison on {iname} dim={idim}:")
+    init_rows = ablation_init_comparison(
+        init_prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
+    )
+    print(format_ablation_init_table(init_rows))
+    export_data.setdefault("ablation_init", []).extend(
+        flatten_ablation_rows(init_rows),
+    )
+    print()
+
+    # ── NEW: No-restart ─────────────────────────────────────────────
+    # Requires: solve(..., no_restart=True)
+    prob0 = problems[0]
+    p0name = prob0.name or "?"
+    p0dim = prob0.dim or prob0.problem.dim_x
+    print(f"  No-restart ablation on {p0name} dim={p0dim}:")
+    try:
+        no_restart_rows = ablation_no_restart(
+            prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
+        )
+        for r in no_restart_rows:
+            print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
+                  f"calls={r.oracle_stats.oracle_calls}  "
+                  f"time={r.wall_time_mean:.4f}s")
+        export_data.setdefault("ablation_no_restart", []).extend(
+            flatten_ablation_rows(no_restart_rows),
+        )
+    except TypeError:
+        print("    [skip] solver does not support no_restart=True yet")
+    print()
+
+    # ── NEW: No-acceleration ────────────────────────────────────────
+    # Requires: solve(..., no_acceleration=True)
+    print(f"  No-acceleration ablation on {p0name} dim={p0dim}:")
+    try:
+        no_accel_rows = ablation_no_acceleration(
+            prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
+        )
+        for r in no_accel_rows:
+            print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
+                  f"calls={r.oracle_stats.oracle_calls}  "
+                  f"time={r.wall_time_mean:.4f}s")
+        export_data.setdefault("ablation_no_accel", []).extend(
+            flatten_ablation_rows(no_accel_rows),
+        )
+    except TypeError:
+        print("    [skip] solver does not support no_acceleration=True yet")
+    print()
+
+    # ── NEW: Fixed inner iterations ─────────────────────────────────
+    # Requires: solve(..., fixed_inner_iters=N)
+    print(f"  Fixed inner-iter sweep on {p0name} dim={p0dim}:")
+    try:
+        fixed_inner_rows = ablation_fixed_inner(
+            prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
+        )
+        print(format_ablation_fixed_inner_table(fixed_inner_rows))
+        export_data.setdefault("ablation_fixed_inner", []).extend(
+            flatten_ablation_rows(fixed_inner_rows),
+        )
+    except TypeError:
+        print("    [skip] solver does not support fixed_inner_iters yet")
     print()
 
 

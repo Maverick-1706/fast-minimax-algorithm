@@ -8,7 +8,7 @@ claim — wall-clock alone is insufficient.
 from __future__ import annotations
 
 import itertools
-
+import time
 import jax.numpy as jnp
 
 from minimax_aipe import solve
@@ -103,6 +103,60 @@ def sweep_epsilon(
 
     return rows
 
+def sweep_epsilon_with_traces(
+    prob,
+    epsilons: list[float],
+) -> list[BenchmarkResult]:
+    """Like sweep_epsilon(), but captures per-outer-iteration gap traces.
+
+    Requires solver support: ``solve(..., trace_gaps=True)`` must return
+    a result with ``.gap_trace`` (list[float]) and ``.oracle_trace``
+    (list[int]) attributes, one entry per outer iteration.
+
+    Parameters
+    ----------
+    prob : BenchmarkProblem
+        Problem instance (wraps problem + solver).
+    epsilons : list[float]
+        Target duality gaps to solve for.
+
+    Returns
+    -------
+    list[BenchmarkResult]
+        One result per ε, with ``gap_trace`` and ``oracle_trace`` populated.
+        Empty traces are stored as empty lists (never None) so downstream
+        code can always iterate safely.
+    """
+    rows: list[BenchmarkResult] = []
+
+    for eps in epsilons:
+        t0 = time.perf_counter()
+        res = prob.solve(epsilon=eps, trace_gaps=True)
+        elapsed = time.perf_counter() - t0
+
+        gap_trace = list(res.gap_trace) if res.gap_trace is not None else []
+        oracle_trace = list(res.oracle_trace) if res.oracle_trace is not None else []
+
+        row = BenchmarkResult(
+            solver=res.solver_name,
+            problem=prob.name,
+            dim=prob.dim or prob.problem.dim_x,
+            epsilon=eps,
+            wall_time_mean=elapsed,
+            wall_time_std=0.0,
+            ci=(elapsed, elapsed),
+            oracle_stats=res.oracle_stats,
+            converged=res.converged,
+            gap_achieved=res.gap_achieved,
+            final_gap=res.final_gap,
+            iterations=res.iterations,
+            gap_trace=gap_trace,
+            oracle_trace=oracle_trace,
+        )
+        rows.append(row)
+
+    return rows
+
 
 def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     """Format convergence sweep results as a text table.
@@ -151,4 +205,21 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
             f"{eg_gap:>10.6f} {eg_cost:>10.2e} {eg_ok:>3}"
         )
 
+    return "\n".join(lines)
+
+def format_trace_table(results: list[BenchmarkResult]) -> str:
+    """Format a single traced run as a convergence trace table.
+    
+    Only formats the first result with a populated gap_trace.
+    """
+    traced = [r for r in results if r.gap_trace]
+    if not traced:
+        return "(no trace data — solver did not return gap_trace)"
+    
+    r = traced[0]
+    header = f"{'Outer':>5}  {'Gap':>12}  {'Oracle calls':>14}"
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for i, (gap, calls) in enumerate(zip(r.gap_trace, r.oracle_trace or [])):
+        lines.append(f"{i+1:>5}  {gap:>12.6e}  {calls:>14}")
     return "\n".join(lines)

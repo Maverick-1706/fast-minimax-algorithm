@@ -290,7 +290,7 @@ class RegularizedSubproblem:
         x_bar: Array,
         y_bar: Array,
         npe_gamma: float,
-        n_iters: int = 50,
+        n_iters: int = 15,
         tol: float = 0.0,
     ) -> Callable[[Array], tuple[Array, Array]]:
         """Return a CRN NPE oracle bound to fixed ``(x_bar, y_bar)``.

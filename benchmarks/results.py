@@ -54,6 +54,13 @@ class BenchmarkResult:
     n_outliers: Optional[int] = None
     final_residual: Optional[float] = None
     normalized_cost: Optional[float] = None
+    # ── Per-iteration traces (Experiment 5) ───────────────────────────
+    gap_trace: Optional[list[float]] = None
+    """Duality gap after each outer iteration.  Length = outer_iters."""
+    oracle_trace: Optional[list[int]] = None
+    """Cumulative oracle calls after each outer iteration."""
+    outer_iterations: Optional[int] = None
+    """Number of outer iterations completed."""
 
     def to_dict(self) -> dict:
         """Return a flat JSON-serializable dict.
@@ -85,6 +92,11 @@ class BenchmarkResult:
         
         # Explicitly label the call type for the unified metric
         d["oracle_call_type"] = stats.get("call_type", "crn")
+
+        # Traces — keep as lists (JSON-serializable)
+        d["gap_trace"] = self.gap_trace
+        d["oracle_trace"] = self.oracle_trace
+        d["outer_iterations"] = self.outer_iterations
         
         return d
 
