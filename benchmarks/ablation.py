@@ -265,10 +265,16 @@ def _time_solve_loop(
     for _ in range(n_repeats):
         t0 = time.perf_counter()
         result = solve(problem, **kwargs)
+        
+        # FORCE SYNC: BLOCK Python until device completes computation
+        if hasattr(result, "x"): result.x.block_until_ready()
+        if hasattr(result, "y"): result.y.block_until_ready()
+        if hasattr(result, "gap") and hasattr(result.gap, "block_until_ready"):
+            result.gap.block_until_ready()
+            
         times.append(time.perf_counter() - t0)
 
     return times, result
-
 
 def _build_result(
     *,

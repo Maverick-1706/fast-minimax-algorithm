@@ -171,7 +171,8 @@ def estimate_gap(
     grad_f_y = jax.grad(f_y)
     best_min = jax.lax.fori_loop(0, num_restarts, x_restart_body, jnp.inf)
 
-    return float(best_max - best_min)
+    return max(0.0, float(best_max - best_min))
+
 
 __all__ = [
     "estimate_gap",

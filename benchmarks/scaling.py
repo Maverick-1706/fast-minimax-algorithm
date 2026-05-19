@@ -66,6 +66,11 @@ def _time_solve(
         gc.collect()
         t0 = time.perf_counter()
         result = solve(problem, **kwargs)
+        if hasattr(result, "x"): result.x.block_until_ready()
+        if hasattr(result, "y"): result.y.block_until_ready()
+        if hasattr(result, "gap") and hasattr(result.gap, "block_until_ready"):
+            result.gap.block_until_ready()
+            
         times.append(time.perf_counter() - t0)
 
     ci = bootstrap_ci(times)

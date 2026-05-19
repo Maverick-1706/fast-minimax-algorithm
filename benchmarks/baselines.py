@@ -52,10 +52,7 @@ def run_eg_jit(
     z0: Array | None = None,
     tol: float = 0.0,
 ) -> tuple[Array, float, float, int]:
-    """JIT-compiled extragradient via jax.lax.while_loop.
-
-    Returns (z, residual, wall_time, actual_iters).
-    """
+    """JIT-compiled extragradient via jax.lax.while_loop."""
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     eta = 1.0 / (2.0 * ell)
 
@@ -80,32 +77,36 @@ def run_eg_jit(
     def eg_loop(z_init):
         tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
         max_i = jnp.int32(max_iters)
+        init_resid_sq = jnp.sum(F_op(z_init) ** 2)
 
         def cond(state):
-            i, _z, _prev_z = state
+            i, _z, _prev_z, resid_sq = state
             not_done = i < max_i
-            resid_sq = jnp.sum(F_op(_z) ** 2)
             resid_big = resid_sq > tol_sq
             return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
-            i, z, _prev_z = state
+            i, z, _prev_z, _ = state
             Fz = F_op(z)
             z_half = proj(z - eta * Fz)
             F_half = F_op(z_half)
-            return (i + 1, proj(z - eta * F_half), z)
+            z_new = proj(z - eta * F_half)
+            new_resid_sq = jnp.sum(F_op(z_new) ** 2)
+            return (i + 1, z_new, z, new_resid_sq)
 
-        return jax.lax.while_loop(cond, body, (jnp.int32(0), z_init, z_init))
+        iters_out, z_out, _, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, z_init, init_resid_sq)
+        )
+        return iters_out, z_out
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
-    iters_out, z_out, _ = eg_loop(z_start)
+    iters_out, z_out = eg_loop(z_start)
     z_out.block_until_ready()
     wall_time = time.perf_counter() - t0
 
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
     return z_out, residual, wall_time, int(iters_out)
-
 
 def run_eg_jit_benchmark(
     problem: MinimaxProblem,
@@ -139,10 +140,7 @@ def run_gda_jit(
     z0: Array | None = None,
     tol: float = 0.0,
 ) -> tuple[Array, float, float, int]:
-    """JIT-compiled gradient descent-ascent via jax.lax.while_loop.
-
-    Returns (z, residual, wall_time, actual_iters).
-    """
+    """JIT-compiled gradient descent-ascent via jax.lax.while_loop."""
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     eta = 0.5 / ell
 
@@ -162,33 +160,37 @@ def run_gda_jit(
     def gda_loop(z_init):
         tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
         max_i = jnp.int32(max_iters)
+        init_resid_sq = jnp.sum(F_op(z_init) ** 2)
 
         def cond(state):
-            i, _z, _prev_z = state
+            i, _z, _prev_z, resid_sq = state
             not_done = i < max_i
-            resid_sq = jnp.sum(F_op(_z) ** 2)
             resid_big = resid_sq > tol_sq
             return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
-            i, z, _prev_z = state
+            i, z, _prev_z, _ = state
             x, y = z[: problem.dim_x], z[problem.dim_x :]
             gx, gy_neg = problem.grad_f(x, y)
             x_new = problem.project_x(x - eta * gx)
             y_new = problem.project_y(y - eta * gy_neg)
-            return (i + 1, jnp.concatenate([x_new, y_new]), z)
+            z_new = jnp.concatenate([x_new, y_new])
+            new_resid_sq = jnp.sum(F_op(z_new) ** 2)
+            return (i + 1, z_new, z, new_resid_sq)
 
-        return jax.lax.while_loop(cond, body, (jnp.int32(0), z_init, z_init))
+        iters_out, z_out, _, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, z_init, init_resid_sq)
+        )
+        return iters_out, z_out
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
-    iters_out, z_out, _ = gda_loop(z_start)
+    iters_out, z_out = gda_loop(z_start)
     z_out.block_until_ready()
     wall_time = time.perf_counter() - t0
 
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
     return z_out, residual, wall_time, int(iters_out)
-
 
 def run_gda_jit_benchmark(
     problem: MinimaxProblem,
@@ -223,14 +225,10 @@ def run_npe_restart_jit(
     z0: Array | None = None,
     tol: float = 0.0,
 ) -> tuple[Array, float, float, int]:
-    """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs.
-
-    Returns (z, residual, wall_time, actual_iters).
-    """
+    """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs."""
     rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
     gamma = 2.0 * rho
     
-    # Heuristic T per epoch (similar to framework.py fallback)
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     T = min(max_iters, max(10, int(ell / rho)))
 
@@ -257,20 +255,24 @@ def run_npe_restart_jit(
     def npe_epoch_loop(z_init):
         tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
         max_epochs = jnp.int32(max(1, max_iters // T))
+        init_resid_sq = merit(z_init)
 
         def cond(state):
-            epoch, _z = state
+            epoch, _z, resid_sq = state
             not_done = epoch < max_epochs
-            resid_sq = merit(_z)
             resid_big = resid_sq > tol_sq
             return not_done & jnp.where(epoch > 0, resid_big, jnp.bool_(True))
 
         def body(state):
-            epoch, z = state
+            epoch, z, _ = state
             z_new, _ = npe(oracle, F_op, z, T, gamma, project=proj, fn=merit)
-            return (epoch + 1, z_new)
+            new_resid_sq = merit(z_new)
+            return (epoch + 1, z_new, new_resid_sq)
 
-        return jax.lax.while_loop(cond, body, (jnp.int32(0), z_init))
+        epochs_out, z_out, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, init_resid_sq)
+        )
+        return epochs_out, z_out
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
@@ -281,7 +283,6 @@ def run_npe_restart_jit(
     actual_iters = int(epochs_out) * T
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
     return z_out, residual, wall_time, actual_iters
-
 
 def run_npe_restart_jit_benchmark(
     problem: MinimaxProblem,

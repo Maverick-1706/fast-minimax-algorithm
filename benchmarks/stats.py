@@ -146,12 +146,13 @@ def _bca_correction(
     data: list[float],
     theta_hat: float,
     jackknife_values: list[float],
-) -> tuple[float, float]:
-    """Compute BCa bias-correction and acceleration factors.
+) -> float:
+    """Compute BCa acceleration factor 'a' from the jackknife values.
 
-    Returns (z0, a) where:
-      z0 = Φ⁻¹(# of bootstrap reps ≤ θ̂)
-      a = (1/6) * (Σ (θ̄ − θ₍₋ᵢ₎)³) / (Σ (θ̄ − θ₍₋ᵢ₎)²)^(3/2)
+    Returns
+    -------
+    a : float
+        The acceleration factor: (1/6) * (Σ (θ̄ − θ₍₋ᵢ₎)³) / (Σ (θ̄ − θ₍₋ᵢ₎)²)^(3/2)
     """
     n = len(jackknife_values)
     theta_bar = sum(jackknife_values) / n
@@ -161,8 +162,7 @@ def _bca_correction(
     den = sum((theta_bar - ji) ** 2 for ji in jackknife_values) ** 1.5
     a = num / (6.0 * den) if den > 1e-15 else 0.0
 
-    return a  # z0 is computed during bootstrap
-
+    return a
 
 def bootstrap_ci(
     data: list[float],
@@ -263,8 +263,13 @@ def _bca_interval(
     z_lo = float(_norm.ppf(alpha / 2.0))
     z_hi = float(_norm.ppf(1.0 - alpha / 2.0))
 
-    adj_lo = z0 + (z_lo + z0) / (1.0 - a * (z_lo + z0))
-    adj_hi = z0 + (z_hi + z0) / (1.0 - a * (z_hi + z0))
+    denom_lo = 1.0 - a * (z_lo + z0)
+    denom_hi = 1.0 - a * (z_hi + z0)
+
+    # If denominator <= 1e-6, the BCa mapping breaks down or becomes unstable.
+    # Fall back safely to the unadjusted percentile interval bounds.
+    adj_lo = z0 + (z_lo + z0) / denom_lo if denom_lo > 1e-6 else z_lo
+    adj_hi = z0 + (z_hi + z0) / denom_hi if denom_hi > 1e-6 else z_hi
 
     p_lo = float(_norm.cdf(adj_lo))
     p_hi = float(_norm.cdf(adj_hi))
@@ -276,7 +281,6 @@ def _bca_interval(
     lo = float(jnp.quantile(means_arr, p_lo))
     hi = float(jnp.quantile(means_arr, p_hi))
     return (lo, hi)
-
 
 # ── Summary ────────────────────────────────────────────────────────────
 

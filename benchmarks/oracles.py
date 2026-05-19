@@ -39,18 +39,14 @@ def count_gda_oracles(n_iters: int) -> OracleStats:
 
 
 def count_npe_oracles(n_iters: int) -> OracleStats:
-    """Oracle cost of *n_iters* standalone NPE steps.
-
-    Each NPE step calls the CRN oracle once. The CRN oracle evaluates
-    operator_F(z) once (= 1 gradient call) and hessian_f(x, y) once
-    (= 1 Hessian call).  It also takes 2 projections per iter.
-    """
+    """Oracle cost of *n_iters* standalone NPE steps."""
     return OracleStats(
         crn_calls=n_iters,
         grad_calls=n_iters,
         hessian_calls=n_iters,
         projection_calls=2 * n_iters,
-        oracle_calls=n_iters,
+        # Default to base calls; the normalized_cost(d) method will handle scaling
+        oracle_calls=n_iters, 
         call_type="crn",
     )
 

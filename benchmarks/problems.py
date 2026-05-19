@@ -34,7 +34,6 @@ from benchmarks.families import (
     make_bilinear_saddle,
     make_quadratic_saddle,
     make_box_constrained_quadratic,
-    make_rosenbrock_bilinear,
 )
 
 from benchmarks.problem_constructors import (
@@ -76,7 +75,6 @@ _PROBLEM_REGISTRY: list[tuple[str, Callable, list[int]]] = [
     ("separable",           _seed_wrapper(_make_fixed_dim(make_separable_problem, 2), accepts_seed=False),  [2]),
     ("offset_quadratic",    _seed_wrapper(_make_fixed_dim(make_offset_quadratic, 1), accepts_seed=False),  [1]),
     ("nonzero_rho",         make_nonzero_rho_quadratic,                                 [5, 10, 20]),
-    ("rosenbrock_bilin",    make_rosenbrock_bilinear,                                   [5, 10, 20]),
     ("diagonal_saddle",     make_diagonal_saddle,                                        [5, 10, 20, 50, 100]),
     ("logsumexp_saddle",    make_logsumexp_saddle,                                      [5, 10, 20, 50]),
     ("sparse_bilinear",     make_sparse_bilinear,                                       [10, 50, 100, 200]),

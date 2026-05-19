@@ -151,30 +151,17 @@ def fit_loglog_slope(
     problem: str = "",
     dim: int = 0,
 ) -> RateFit:
-    """Fit a log-log slope to (1/ε, oracle_calls) data.
-
-    Parameters
-    ----------
-    epsilons
-        Target duality gaps (ε values).
-    oracle_calls
-        Total oracle calls required to reach each ε.
-    solver, problem, dim
-        Identity fields stored in the returned :class:`RateFit`.
-
-    Returns
-    -------
-    RateFit
-
-    Raises
-    ------
-    ValueError
-        If fewer than 3 data points are provided.
-    """
-    if len(epsilons) < 3:
+    """Fit a log-log slope to (1/ε, oracle_calls) data."""
+    # Filter out degenerate cases where the solver took 0 or 1 call
+    valid_indices = [i for i, c in enumerate(oracle_calls) if c > 1]
+    if len(valid_indices) < 3:
         raise ValueError(
-            f"Need ≥ 3 data points for log-log fit, got {len(epsilons)}"
+            f"Need ≥ 3 valid data points with >1 oracle calls, got {len(valid_indices)}"
         )
+
+    # Rebuild clean lists using only valid indices
+    epsilons = [epsilons[i] for i in valid_indices]
+    oracle_calls = [oracle_calls[i] for i in valid_indices]
 
     x = jnp.log(1.0 / jnp.array(epsilons))
     y = jnp.log(jnp.array(oracle_calls, dtype=jnp.float64))
@@ -193,28 +180,11 @@ def fit_loglog_slope(
         n_points=len(epsilons),
     )
 
-
 def fit_from_convergence_rows(
     rows: list[BenchmarkResult],
     require_converged: bool = True,
 ) -> list[RateFit]:
-    """Fit log-log slopes from convergence benchmark rows.
-
-    Groups rows by *(solver, problem, dim)*, optionally filters to
-    converged entries, and fits one :class:`RateFit` per group.
-
-    Parameters
-    ----------
-    rows
-        Convergence sweep results (e.g. from ``sweep_epsilon``).
-    require_converged
-        If True, keep only rows where ``gap_achieved`` is True.
-
-    Returns
-    -------
-    list[RateFit]
-        One fit per group that has ≥ 3 usable data points.
-    """
+    """Fit log-log slopes from convergence benchmark rows."""
     groups = _group_by_solver_problem_dim(rows)
     fits: list[RateFit] = []
 
@@ -226,12 +196,23 @@ def fit_from_convergence_rows(
         if require_converged:
             group_rows = [r for r in group_rows if r.gap_achieved]
 
-        # Need at least 3 points for a meaningful log-log fit
-        if len(group_rows) < 3:
+        # Guard against None stats and degenerate 0 or 1 call iterations
+        valid_rows = [
+            r for r in group_rows 
+            if r.oracle_stats is not None and r.oracle_stats.oracle_calls > 1
+        ]
+
+        # Gracefully skip the group if we don't have enough valid points
+        if len(valid_rows) < 3:
             continue
 
-        epsilons = [r.epsilon for r in group_rows]
-        calls = [r.oracle_stats.oracle_calls for r in group_rows]
+        epsilons = [r.epsilon for r in valid_rows]
+        calls = [
+            int(r.oracle_stats.normalized_cost(dim)) 
+            if hasattr(r.oracle_stats, "normalized_cost") 
+            else int(r.oracle_stats.oracle_calls)
+            for r in valid_rows
+        ]
 
         fit = fit_loglog_slope(
             epsilons=epsilons,
@@ -243,7 +224,6 @@ def fit_from_convergence_rows(
         fits.append(fit)
 
     return fits
-
 
 def format_rates_table(fits: list[RateFit]) -> str:
     """Format a human-readable table of fitted convergence rates.

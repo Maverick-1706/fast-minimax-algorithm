@@ -123,20 +123,23 @@ def benchmark_jit_vs_eager(
         def _core():
             return len_loop(oracle, F_h, z0, 50, npe_gamma, m=5, project=kernel.project, fn=merit)
 
+    # 1. Measure Eager FIRST (completely avoiding JIT cache contamination)
+    def run_eager():
+        z_out, _ = _core()
+        z_out.block_until_ready()
+        return z_out
+
+    eager_times = _time_callable(run_eager, n_warmup=0, n_repeats=n_repeats)
+
+    # 2. Measure JIT SECOND
     core_jit = jax.jit(_core)
 
-    def run_solve():
+    def run_jit():
         z_out, _ = core_jit()
         z_out.block_until_ready()
         return z_out
 
-    jit_times = _time_callable(run_solve, n_warmup=n_warmup, n_repeats=n_repeats)
-
-    jax.config.update("jax_disable_jit", True)
-    try:
-        eager_times = _time_callable(run_solve, n_warmup=0, n_repeats=n_repeats)
-    finally:
-        jax.config.update("jax_disable_jit", False)
+    jit_times = _time_callable(run_jit, n_warmup=n_warmup, n_repeats=n_repeats)
 
     speedup = eager_times["mean"] / max(jit_times["mean"], 1e-12)
 
@@ -178,8 +181,13 @@ def benchmark_solver_comparison(
 
         # ── AIPE-NPE ───────────────────────────────────────────────
         def run_npe():
-            return solve(problem, epsilon=epsilon, M_saddle="npe", z0=z0)
-
+            res = solve(problem, epsilon=epsilon, M_saddle="npe", z0=z0)
+            # FORCE SYNC: Prevent async dispatch illusion
+            if hasattr(res, "x"): res.x.block_until_ready()
+            if hasattr(res, "y"): res.y.block_until_ready()
+            if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
+                res.gap.block_until_ready()
+            return res
         t_npe = _time_callable(run_npe, n_warmup=1, n_repeats=n_repeats)
         result_npe = t_npe["result"]
         rows.append(BenchmarkResult(
@@ -203,8 +211,14 @@ def benchmark_solver_comparison(
 
         # ── AIPE-LEN ───────────────────────────────────────────────
         def run_len():
-            return solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=5, z0=z0)
-
+            res = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=5, z0=z0)
+            # FORCE SYNC: Prevent async dispatch illusion
+            if hasattr(res, "x"): res.x.block_until_ready()
+            if hasattr(res, "y"): res.y.block_until_ready()
+            if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
+                res.gap.block_until_ready()
+            return res
+            
         t_len = _time_callable(run_len, n_warmup=1, n_repeats=n_repeats)
         result_len = t_len["result"]
         rows.append(BenchmarkResult(

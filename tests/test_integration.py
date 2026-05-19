@@ -77,17 +77,16 @@ class TestThreeLoopParameters:
         assert params.m_lazy >= 1
 
     def test_iteration_counts_bounded(self, bilinear_3d):
-        """T values should be capped (max 200), S values capped (max 4)."""
+        """T values should be capped (max 200), S values capped (max 12)."""
         p = bilinear_3d.problem
         for eps in [0.1, 0.01, 0.001]:
             params = _compute_loop_params(p, epsilon=eps, gamma=1.0)
             assert params.T_outer <= 200, f"T_outer={params.T_outer} at ε={eps}"
             assert params.T_middle <= 200
             assert params.T_inner <= 200
-            assert params.S_outer <= 4, f"S_outer={params.S_outer} at ε={eps}"
-            assert params.S_middle <= 4
-            assert params.S_inner <= 4
-
+            assert params.S_outer <= 12, f"S_outer={params.S_outer} at ε={eps}"
+            assert params.S_middle <= 12
+            assert params.S_inner <= 12
     def test_history_contains_all_loop_params(self, bilinear_3d):
         """solve() history dict records every scheduling parameter."""
         result = solve(bilinear_3d.problem, epsilon=0.05)
