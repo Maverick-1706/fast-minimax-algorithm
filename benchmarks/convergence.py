@@ -107,11 +107,13 @@ def sweep_epsilon_with_traces(
     prob,
     epsilons: list[float],
 ) -> list[BenchmarkResult]:
-    """Like sweep_epsilon(), but captures per-outer-iteration gap traces.
+    """Like sweep_epsilon(), but captures gap-vs-oracle-call traces.
 
-    Requires solver support: ``solve(..., trace_gaps=True)`` must return
-    a result with ``.gap_trace`` (list[float]) and ``.oracle_trace``
-    (list[int]) attributes, one entry per outer iteration.
+    Since the solver doesn't expose per-outer-iteration hooks, we build
+    the convergence trace by running ``solve()`` at geometrically-spaced
+    epsilon levels from coarse to target, warm-starting each run from the
+    previous solution.  This produces a real gap-vs-cumulative-oracle-calls
+    curve without modifying the algorithm internals.
 
     Parameters
     ----------
@@ -127,18 +129,41 @@ def sweep_epsilon_with_traces(
         Empty traces are stored as empty lists (never None) so downstream
         code can always iterate safely.
     """
+    import jax.numpy as jnp
+    from minimax_aipe.framework import solve
+
+    N_TRACE_POINTS = 8  # Number of checkpoints in the convergence trace
+
     rows: list[BenchmarkResult] = []
 
     for eps in epsilons:
-        t0 = time.perf_counter()
-        res = prob.solve(epsilon=eps, trace_gaps=True)
-        elapsed = time.perf_counter() - t0
+        # ── Build epsilon schedule: log-spaced from coarse to target ──
+        coarse_eps = min(10.0 * eps, 0.5)
+        eps_schedule = [
+            coarse_eps * (eps / coarse_eps) ** (i / (N_TRACE_POINTS - 1))
+            for i in range(N_TRACE_POINTS)
+        ]
 
-        gap_trace = list(res.gap_trace) if res.gap_trace is not None else []
-        oracle_trace = list(res.oracle_trace) if res.oracle_trace is not None else []
+        gap_trace: list[float] = []
+        oracle_trace: list[int] = []
+        cumulative_calls = 0
+        z_warm = prob.z0  # Start from the problem's initial point
+
+        t_total = time.perf_counter()
+        res = None
+        for trace_eps in eps_schedule:
+            res = solve(prob.problem, epsilon=trace_eps, z0=z_warm)
+            cumulative_calls += int(res.oracle_calls)
+            gap_trace.append(float(res.gap))
+            oracle_trace.append(cumulative_calls)
+            # Warm-start the next (tighter) solve from this solution
+            z_warm = jnp.concatenate([res.x, res.y])
+        elapsed = time.perf_counter() - t_total
+
+        assert res is not None  # eps_schedule is never empty
 
         row = BenchmarkResult(
-            solver=res.solver_name,
+            solver="minimax_aipe",
             problem=prob.name,
             dim=prob.dim or prob.problem.dim_x,
             epsilon=eps,
@@ -147,8 +172,8 @@ def sweep_epsilon_with_traces(
             ci=(elapsed, elapsed),
             oracle_stats=res.oracle_stats,
             converged=res.converged,
-            gap_achieved=res.gap_achieved,
-            final_gap=res.final_gap,
+            gap_achieved=res.gap <= eps,
+            final_gap=float(res.gap),
             iterations=res.iterations,
             gap_trace=gap_trace,
             oracle_trace=oracle_trace,

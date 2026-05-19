@@ -15,9 +15,9 @@ Key functions
 from __future__ import annotations
 
 import math
-import random
 import statistics
 from dataclasses import dataclass, field
+import numpy as np
 
 import jax.numpy as jnp
 
@@ -205,13 +205,12 @@ def bootstrap_ci(
     if method is None:
         method = "bca" if config.BCA_ENABLED and n >= 3 else "percentile"
 
-    rng = random.Random(seed)
+    rng = np.random.default_rng(seed)
 
     # ── Bootstrap resampling ──────────────────────────────────────────
-    means = []
-    for _ in range(n_boot):
-        sample = [data[rng.randint(0, n - 1)] for _ in range(n)]
-        means.append(statistics.mean(sample))
+    data_arr = np.asarray(data)
+    indices = rng.choice(n, size=(n_boot, n))
+    means = data_arr[indices].mean(axis=1).tolist()
 
     theta_hat = statistics.mean(data)
 

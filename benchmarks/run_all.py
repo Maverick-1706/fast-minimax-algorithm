@@ -173,12 +173,14 @@ def _run_convergence(problems, epsilon, export_data):
         rows = sweep_epsilon(prob, epsilons)
         print(format_convergence_table(rows))
         print()
+
+        trace_rows = []               # ← was inside the if-block
         if len(problems) > 0 and len(epsilons) > 0:
             trace_rows = sweep_epsilon_with_traces(problems[0], [epsilons[-1]])
             print(format_trace_table(trace_rows))
+
         export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
         export_data.setdefault("traces", []).extend(flatten_convergence_rows(trace_rows))
-
 
 
 def _run_ablation(problems, epsilon, n_repeats, export_data):
