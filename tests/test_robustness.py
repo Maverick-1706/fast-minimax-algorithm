@@ -175,7 +175,7 @@ class TestJITCompilation:
         T = 5
         z_out, calls = aipe(prox, grad_z, z0, T, gamma)
         assert jnp.all(jnp.isfinite(z_out))
-        assert calls == T + 1
+        assert calls == T
 
     def test_len_compiles_and_runs(self):
         """len_loop() is JIT-compiled by default (via _len_scan_loop)."""

@@ -170,7 +170,7 @@ class RegularizedSubproblem:
         self.D_y = problem.D_y
         diameter = max(problem.D_x, problem.D_y, 1.0)
         self.rho_h = (problem.rho or 0.0) + gamma
-        self.ell_h = (problem.ell or 0.0) + gamma * diameter
+        self.ell_h = (problem.ell or 0.0) + 2 * gamma * diameter
         self.project_x = problem.project_x
         self.project_y = problem.project_y
 
@@ -687,15 +687,22 @@ def _iProx_Phi(
             steps=max(20, params.T_inner * params.S_inner),
         )
 
-    gx, _ = g_problem.grad_f(x_hat, y_hat)
-    u_out = -gx
+    ell_g = max(_ell(g_problem), _ABS_TOL)
+    rho_g = max(float(g_problem.rho or 0.0), gamma, _REG_MIN)
+    D_g = max(_diameter(g_problem), _ABS_TOL)
+    eta_g = 1.0 / (2.0 * max(ell_g + 2.0 * rho_g * D_g, _ABS_TOL))
+
+    z_hat_g = jnp.concatenate([x_hat, y_hat])
+    z_out_g, c_out = eg_step(g_problem, z_hat_g, eta_g)
+    x_out = z_out_g[:problem.dim_x]
+    u_out = c_out[:problem.dim_x]
 
     if outer_warm_y is not None:
         jax.debug.callback(
             lambda v: setattr(outer_warm_y, 'value', v), y_hat
         )
 
-    return x_hat, u_out
+    return x_out, u_out
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Algorithm 5 — Inexact proximal oracle for -Ψ  (inner loop)
@@ -963,9 +970,9 @@ def _iProx_Psi(
     F_half = _F_h(z_half)
     z_out = proj(z_hat - eta * F_half)
 
+    c_out = (z_hat - z_out) / eta - F_half
     _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
-    gy_neg_h = _F_h(z_out)[kernel.dim_x :]
-    v_out = -gy_neg_h
+    v_out = c_out[kernel.dim_x :]
 
     if _z_hat_cell is not None:
         jax.debug.callback(
@@ -1290,10 +1297,20 @@ def _make_psi_oracle(
     g_problem = _make_g_problem(problem, x_bar, gamma)
 
     def _solve_x(y: Array) -> Array:
-        return _minimize_x(
-            g_problem, y,
-            steps=max(20, params.T_inner * params.S_inner),
+        lr = 1.0 / max(_ell(g_problem), _ABS_TOL)
+
+        def _gd_step(x_cur: Array) -> tuple[Array, int]:
+            gx, _ = g_problem.grad_f(x_cur, y)
+            x_new = g_problem.project_x(x_cur - lr * gx)
+            return x_new, 1
+
+        x0 = g_problem.project_x(jnp.zeros(g_problem.dim_x, dtype=y.dtype))
+        x_out, _ = _restart_jax(
+            _gd_step, x0,
+            max(20, params.T_inner * params.S_inner),
+            step_tol=params.zeta_3,
         )
+        return x_out
 
     def neg_psi(y: Array):
         x = _solve_x(y)
@@ -1505,9 +1522,11 @@ def _compute_loop_params(
     mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
     mu_x = epsilon / (2.0 * max(_diam(problem.D_x), _ABS_TOL) ** 3)
     zeta_1_raw = mu_y * epsilon**2 / (147.0 * ell**3 * D**2 + _ABS_TOL)
-    # Keep tolerances numerically meaningful in finite precision while
-    # preserving strict hierarchy: zeta_1 > zeta_2 > zeta_3.
-    zeta_1 = min(epsilon, max(zeta_1_raw, epsilon * 0.1, 1e-6))
+    # Near-zero safety net only: prevents exact zero in downstream arithmetic
+    # without violating the Theorem 5.1 bound ζ₁ ≤ μ_y ε² / (147 ℓ³ D²).
+    # The 1e-30 floor is 20+ orders of magnitude below any physically
+    # meaningful ζ₁, so it never inflates a non-degenerate computation.
+    zeta_1 = min(epsilon, max(zeta_1_raw, 1e-30))
     zeta_2 = min(zeta_1 * 0.2, 1e-3)
     zeta_3 = min(zeta_2 * 0.2, 1e-4)
 

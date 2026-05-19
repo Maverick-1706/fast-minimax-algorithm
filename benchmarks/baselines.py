@@ -126,7 +126,7 @@ def run_eg_jit_benchmark(
         iterations=actual_iters, wall_time=wall_time,
         converged=residual <= epsilon, gap_achieved=gap <= epsilon,
         final_residual=residual,
-        oracle_stats=OracleStats(grad_calls=4 * actual_iters, projection_calls=2 * actual_iters),
+        oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters, oracle_calls=2 * actual_iters),
     )
 
 
@@ -209,7 +209,7 @@ def run_gda_jit_benchmark(
         iterations=actual_iters, wall_time=wall_time,
         converged=residual <= epsilon, gap_achieved=gap <= epsilon,
         final_residual=residual,
-        oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters),
+        oracle_stats=OracleStats(grad_calls=actual_iters, projection_calls=2 * actual_iters, oracle_calls=actual_iters),
     )
 
 
@@ -304,8 +304,8 @@ def run_npe_restart_jit_benchmark(
         final_residual=residual,
         oracle_stats=OracleStats(
             crn_calls=actual_iters,
-            grad_calls=2 * actual_iters,
-            hessian_calls=4 * actual_iters,
+            grad_calls=actual_iters,
+            hessian_calls=actual_iters,
             oracle_calls=actual_iters,
             call_type="crn"
         ),

@@ -82,12 +82,17 @@ def project_box(lo: float, hi: float) -> Callable[[Array], Array]:
 
     return project
 
-def _make_polytope_projector(G: Array, h: Array, n_steps: int = 20) -> Callable[[Array], Array]:
-    """Approximate projection onto the polytope ``{z : Gz ≤ h}``.
+def _make_polytope_projector(
+    G: Array, h: Array, n_steps: int = 200, tol: float = 1e-8,
+) -> Callable[[Array], Array]:
+    """Exact-ish projection onto the polytope ``{z : Gz ≤ h}``.
 
-    Uses *n_steps* iterations of projected gradient descent on the dual
+    Uses accelerated projected gradient descent (FISTA) on the dual
     problem: ``α* = argmin_{α ≥ 0} ½ α^T G G^T α − α^T (Gz₀ − h)``,
     then ``z* = z₀ − G^T α*``.
+
+    Converges in O(√κ · log(1/ε)) iterations instead of O(κ · log(1/ε))
+    for plain PGD, where κ = L/μ is the dual condition number.
     """
     GGT = G @ G.T
     L_dual = float(jnp.linalg.norm(GGT, ord=2))
@@ -96,9 +101,15 @@ def _make_polytope_projector(G: Array, h: Array, n_steps: int = 20) -> Callable[
     def project(z0: Array) -> Array:
         alpha = jnp.zeros(G.shape[0])
         rhs = G @ z0 - h
+        y = alpha
+        t = 1.0
         for _ in range(n_steps):
-            grad = GGT @ alpha - rhs
-            alpha = jnp.maximum(alpha - step * grad, 0.0)
+            grad = GGT @ y - rhs
+            alpha_new = jnp.maximum(y - step * grad, 0.0)
+            t_new = 0.5 * (1.0 + jnp.sqrt(1.0 + 4.0 * t * t))
+            y = alpha_new + ((t - 1.0) / t_new) * (alpha_new - alpha)
+            alpha = alpha_new
+            t = t_new
         return z0 - G.T @ alpha
 
     return project
@@ -1057,12 +1068,27 @@ def make_scalable_diagonal(
 
     # ── 2. Block rescaling for heterogeneous curvature ───────────────
     if n_blocks > 1:
+        # Save original log-range (= log condition number) before scaling.
+        log_range_lam = float(jnp.log(jnp.max(lam)) - jnp.log(jnp.min(lam)))
+        log_range_mu  = float(jnp.log(jnp.max(mu))  - jnp.log(jnp.min(mu)))
+
         bs = dim // n_blocks
         block_ids = jnp.arange(dim) // bs
         block_ids = jnp.minimum(block_ids, n_blocks - 1)
         block_scale = jax.random.uniform(k_block, (n_blocks,), minval=0.5, maxval=2.0)
         lam = lam * block_scale[block_ids]
         mu  = mu  * block_scale[block_ids]
+
+        # Re-normalise in log-space so max/min ratio (condition number)
+        # equals the original power-law dynamic range.
+        def _restore_condition_number(eigenvalues, log_range):
+            log_e = jnp.log(eigenvalues)
+            log_e = log_e - jnp.min(log_e)
+            log_e = log_e / jnp.maximum(jnp.max(log_e), 1e-30) * log_range
+            return jnp.exp(log_e)
+
+        lam = _restore_condition_number(lam, log_range_lam)
+        mu  = _restore_condition_number(mu,  log_range_mu)
 
     # ── 3. Sparse random coupling ────────────────────────────────────
     mask = jax.random.bernoulli(k_coupling, p=sparsity, shape=(dim,))
@@ -1174,6 +1200,8 @@ def make_diagonal_saddle(
 
     # ── 2. Block rescaling for heterogeneous curvature ───────────────
     if n_blocks > 1:
+        log_range = float(jnp.log(kappa)) if kappa > 1.0 else 0.0
+
         bs = dim // n_blocks
         block_ids = jnp.arange(dim) // bs
         block_ids = jnp.minimum(block_ids, n_blocks - 1)
@@ -1181,16 +1209,25 @@ def make_diagonal_saddle(
         lam = lam * block_scale[block_ids]
         mu = mu * block_scale[block_ids]
 
+        # Re-normalise in log-space so max/min ratio equals exactly κ.
+        if log_range > 0:
+            def _restore_kappa(eigenvalues, target_log_range):
+                log_e = jnp.log(eigenvalues)
+                log_e = log_e - jnp.min(log_e)
+                log_e = log_e / jnp.max(log_e) * target_log_range
+                return jnp.exp(log_e)
+
+            lam = _restore_kappa(lam, log_range)
+            mu  = _restore_kappa(mu,  log_range)
+
     # ── 3. Coupling coefficients with optional sparsity ──────────────
     if sparsity <= 0.0:
         sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
     else:
-        # sparsity ∈ (0, 1]: fraction of coordinates that ARE coupled
-        # User-facing semantics: sparsity=0 → dense, sparsity=1 → fully sparse
-        # Internally: p = 1 - sparsity is the Bernoulli "active" probability
         p_active = jnp.clip(1.0 - sparsity, 0.0, 1.0)
-        mask = jax.random.bernoulli(k_coupling, p=p_active, shape=(dim,))
-        raw_sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
+        k_mask, k_val = jax.random.split(k_coupling)
+        mask = jax.random.bernoulli(k_mask, p=p_active, shape=(dim,))
+        raw_sigma = jax.random.uniform(k_val, (dim,), minval=-1.0, maxval=1.0)
         sigma = jnp.where(mask, raw_sigma, 0.0)
 
     # ── Constants ─────────────────────────────────────────────────────

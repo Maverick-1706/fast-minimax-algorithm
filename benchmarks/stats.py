@@ -119,15 +119,16 @@ def remove_outliers(
     if frac > config.OUTLIER_MAX_FRACTION:
         return list(data), []
 
-    outlier_set = set(id(o) for o in outliers)
-    # Use value-based removal to handle duplicate values correctly
-    outlier_vals = sorted(outliers)
-    clean = list(data)
-    for ov in outlier_vals:
-        try:
-            clean.remove(ov)
-        except ValueError:
-            pass
+    # O(N) removal via a multiset — handles duplicate values correctly
+    # without fragile floating-point equality scans.
+    from collections import Counter
+    outlier_counts = Counter(outliers)
+    clean = []
+    for x in data:
+        if outlier_counts.get(x, 0) > 0:
+            outlier_counts[x] -= 1
+        else:
+            clean.append(x)
     return clean, outliers
 
 
@@ -250,7 +251,7 @@ def _bca_interval(
     # ── Bias correction z0 ────────────────────────────────────────────
     frac_le = float(jnp.mean(means_arr <= theta_hat))
     # Clamp to avoid Φ⁻¹(0) = -∞ or Φ⁻¹(1) = +∞
-    frac_le = jnp.clip(frac_le, 1.0 / len(means), 1.0 - 1.0 / len(means))
+    frac_le = float(jnp.clip(frac_le, 1.0 / len(means), 1.0 - 1.0 / len(means)))
     z0 = float(_norm.ppf(frac_le))
 
     # ── Acceleration factor a ─────────────────────────────────────────

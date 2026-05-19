@@ -557,6 +557,9 @@ def len_restart(
 
     z = z0
     total_calls = 0
+    total_rejected = 0
+    total_refreshes = 0
+    all_converged = True
 
     for _ in range(S):
         result = _len_scan_loop(
@@ -566,10 +569,17 @@ def len_restart(
             staleness_threshold=staleness_threshold,
             eta_floor=eta_floor, max_norm=max_norm,
             safety_checks=safety_checks,
-            return_full=False,
+            return_full=return_full,
         )
-        z, calls = result  # type: ignore[misc]
-        total_calls += calls
+        if return_full:
+            z = result.z
+            total_calls += result.oracle_calls
+            total_rejected += result.num_rejected
+            total_refreshes += result.snapshot_refreshes
+            all_converged = all_converged and result.converged
+        else:
+            z, calls = result  # type: ignore[misc]
+            total_calls += calls
 
     if return_full:
         final_grad = F_fn(z)
@@ -577,10 +587,10 @@ def len_restart(
             z=z,
             oracle_calls=total_calls,
             iterations=total_calls,
-            snapshot_refreshes=S * ((T + m - 1) // m),
-            num_rejected=0,
+            snapshot_refreshes=total_refreshes,
+            num_rejected=total_rejected,
             final_gradient_norm=jnp.linalg.norm(final_grad),
-            converged=True,
+            converged=all_converged,
         )
 
     return z, total_calls
@@ -633,13 +643,13 @@ def make_len_saddle_solver(
         oracle = make_lazy_crn_npe_oracle(h_problem, len_gamma)
 
         from minimax_aipe._precision import ABS_TOL as _ABS_TOL
-        # Empirical complexity estimate from the paper's rate analysis.
-        D = max(
-            max(float(h_problem.D_x or 1.0), float(h_problem.D_y or 1.0)),
-            _ABS_TOL,
-        )
-        rho_ratio = sub_rho / max(len_gamma, _ABS_TOL)
-        complexity = (D ** (12.0 / 7.0)) * (rho_ratio ** (4.0 / 7.0))
+        # Theorem E.1: NPE-restart requires T = O((2ρ_sub / μ)^(2/3))
+        # CRN oracle calls per epoch, where len_gamma = 2ρ_sub is the
+        # CRN cubic parameter and gamma (outer) provides μ-strong
+        # monotonicity.  Diameter D affects only the number of restart
+        # epochs S via log(D/ε), not the per-epoch count T.
+        condition_ratio = len_gamma / max(gamma, _ABS_TOL)
+        complexity = condition_ratio ** (2.0 / 3.0)
         inner_T = max(8, min(int(round(complexity)), params.T_inner))
 
         return len_restart(

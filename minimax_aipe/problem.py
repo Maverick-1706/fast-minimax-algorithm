@@ -9,7 +9,7 @@ where X, Y are convex and compact sets.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, NamedTuple, Optional
 
 import jax.numpy as jnp
@@ -382,8 +382,8 @@ class SolverResult(NamedTuple):
     iterations: int
     oracle_calls: int
     converged: bool
-    oracle_stats: OracleStats = field(default_factory=OracleStats)
-    history: dict = field(default_factory=dict)
+    oracle_stats: OracleStats = OracleStats()
+    history: dict = {}
 
 __all__ = [
     "MinimaxProblem",
