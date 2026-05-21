@@ -284,7 +284,7 @@ def benchmark_memory(
         device_limit = after.device_bytes_limit
         device_reserved = after.device_bytes_reserved
         utilization = (device_peak / device_limit) if device_limit > 0 else 0.0
-        primary_peak = device_peak
+        primary_peak = device_delta      # ← per-problem incremental memory
     else:
         device_delta = 0
         device_peak = 0

@@ -1,3 +1,4 @@
+#export.py
 """Export utilities for benchmark results.
 
 Every run produces machine-readable output with full metadata (seed, dims, ε,
@@ -130,6 +131,7 @@ def flatten_jit_rows(rows: list[dict]) -> list[dict]:
 
 
 def flatten_memory_rows(rows: list[MemoryResult]) -> list[dict]:
+    """Flatten MemoryResult list into flat dicts, preserving hardware tracking metrics."""
     flat = []
     for r in rows:
         flat.append({
@@ -138,6 +140,9 @@ def flatten_memory_rows(rows: list[MemoryResult]) -> list[dict]:
             "solver": r.solver,
             "peak_mb": r.peak_bytes / (1024 * 1024),
             "jax_mb": r.jax_bytes / (1024 * 1024),
+            "device_peak_mb": r.device_bytes_peak / (1024 * 1024),
+            "device_delta_mb": r.device_bytes_delta / (1024 * 1024),
+            "utilization": r.device_utilization,
         })
     return flat
 

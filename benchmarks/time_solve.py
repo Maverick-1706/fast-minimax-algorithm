@@ -46,6 +46,8 @@ def _time_callable(fn, n_warmup: int | None = None, n_repeats: int | None = None
     times = []
     for _ in range(n_repeats):
         gc.collect()
+        # Synchronize device queue before starting timer
+        _ = jnp.zeros(1).block_until_ready()
         t0 = time.perf_counter()
         last_result = fn()
         t1 = time.perf_counter()
@@ -59,6 +61,8 @@ def _time_callable(fn, n_warmup: int | None = None, n_repeats: int | None = None
                 break
             for _ in range(config.AUTO_REPEAT_N):
                 gc.collect()
+                # Synchronize device queue before starting timer
+                _ = jnp.zeros(1).block_until_ready()
                 t0 = time.perf_counter()
                 last_result = fn()
                 t1 = time.perf_counter()
@@ -241,11 +245,27 @@ def benchmark_solver_comparison(
         ))
 
         # ── JIT-EG ─────────────────────────────────────────────────
+        from benchmarks.baselines import run_eg_jit
+        from minimax_aipe.problem import OracleStats
+        from minimax_aipe.gap import estimate_gap
+
         def run_eg():
-            return run_eg_jit_benchmark(problem, epsilon=epsilon, z0=z0)
+            # Run the JIT solver without post-hoc gap calculation inside the timed block
+            z_out, residual, wall_time, actual_iters = run_eg_jit(problem, max_iters=100_000, z0=z0, tol=epsilon)
+            z_out.block_until_ready()
+            return z_out, residual, actual_iters
 
         t_eg = _time_callable(run_eg, n_warmup=1, n_repeats=n_repeats)
-        eg_result = t_eg["result"]
+        eg_z_out, eg_residual, eg_actual_iters = t_eg["result"]
+        eg_x = eg_z_out[:problem.dim_x]
+        eg_y = eg_z_out[problem.dim_x:]
+        eg_gap = float(estimate_gap(problem, eg_x, eg_y))
+        eg_stats = OracleStats(
+            grad_calls=2 * eg_actual_iters,
+            projection_calls=2 * eg_actual_iters,
+            oracle_calls=2 * eg_actual_iters,
+        )
+
         rows.append(BenchmarkResult(
             solver="eg",
             problem=name,
@@ -254,23 +274,37 @@ def benchmark_solver_comparison(
             wall_time_mean=t_eg["mean"],
             wall_time_std=t_eg["std"],
             ci=t_eg["ci"],
-            oracle_stats=eg_result.oracle_stats,
-            converged=eg_result.converged,
-            gap_achieved=eg_result.gap_achieved,
-            final_gap=float(eg_result.gap),
-            iterations=eg_result.iterations,
+            oracle_stats=eg_stats,
+            converged=eg_residual <= epsilon,
+            gap_achieved=eg_gap <= epsilon,
+            final_gap=eg_gap,
+            iterations=eg_actual_iters,
             wall_time_min=t_eg["min"],
             wall_time_max=t_eg["max"],
             n_outliers=t_eg["n_outliers"],
-            normalized_cost=eg_result.oracle_stats.normalized_cost(d) if eg_result.oracle_stats else 0.0,
+            normalized_cost=eg_stats.normalized_cost(d),
         ))
 
         # ── JIT-GDA ────────────────────────────────────────────────
+        from benchmarks.baselines import run_gda_jit
+
         def run_gda():
-            return run_gda_jit_benchmark(problem, epsilon=epsilon, z0=z0)
+            # Run the JIT solver without post-hoc gap calculation inside the timed block
+            z_out, residual, wall_time, actual_iters = run_gda_jit(problem, max_iters=200_000, z0=z0, tol=epsilon)
+            z_out.block_until_ready()
+            return z_out, residual, actual_iters
 
         t_gda = _time_callable(run_gda, n_warmup=1, n_repeats=n_repeats)
-        gda_result = t_gda["result"]
+        gda_z_out, gda_residual, gda_actual_iters = t_gda["result"]
+        gda_x = gda_z_out[:problem.dim_x]
+        gda_y = gda_z_out[problem.dim_x:]
+        gda_gap = float(estimate_gap(problem, gda_x, gda_y))
+        gda_stats = OracleStats(
+            grad_calls=gda_actual_iters,
+            projection_calls=2 * gda_actual_iters,
+            oracle_calls=gda_actual_iters,
+        )
+
         rows.append(BenchmarkResult(
             solver="gda",
             problem=name,
@@ -279,15 +313,15 @@ def benchmark_solver_comparison(
             wall_time_mean=t_gda["mean"],
             wall_time_std=t_gda["std"],
             ci=t_gda["ci"],
-            oracle_stats=gda_result.oracle_stats,
-            converged=gda_result.converged,
-            gap_achieved=gda_result.gap_achieved,
-            final_gap=float(gda_result.gap),
-            iterations=gda_result.iterations,
+            oracle_stats=gda_stats,
+            converged=gda_residual <= epsilon,
+            gap_achieved=gda_gap <= epsilon,
+            final_gap=gda_gap,
+            iterations=gda_actual_iters,
             wall_time_min=t_gda["min"],
             wall_time_max=t_gda["max"],
             n_outliers=t_gda["n_outliers"],
-            normalized_cost=gda_result.oracle_stats.normalized_cost(d) if gda_result.oracle_stats else 0.0,
+            normalized_cost=gda_stats.normalized_cost(d),
         ))
 
     return rows

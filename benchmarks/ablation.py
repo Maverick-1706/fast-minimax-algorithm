@@ -26,10 +26,11 @@ from minimax_aipe.problem import BenchmarkProblem
 from benchmarks import config
 from benchmarks.results import BenchmarkResult
 from benchmarks.stats import bootstrap_ci
+from benchmarks.problems import get_problem
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Existing experiments (unchanged)
+# Existing experiments
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -42,21 +43,6 @@ def ablation_m_lazy(
     """Measure solve time and oracle calls as m_lazy varies.
 
     m=1 is equivalent to fresh Hessians (NPE).  Larger m reuses more.
-
-    Parameters
-    ----------
-    prob : BenchmarkProblem
-        From the problem zoo.
-    epsilon : float or None
-        Target gap.  Defaults to ``config.EPSILON_DEFAULT``.
-    m_values : list[int]
-        Hessian reuse intervals to test.
-    n_repeats : int or None
-        Timed runs per configuration.  Defaults to ``config.N_REPEATS_SCALING``.
-
-    Returns
-    -------
-    list[BenchmarkResult]
     """
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
@@ -71,37 +57,20 @@ def ablation_m_lazy(
 
     rows = []
     for m in m_values:
-        # Warmup run to avoid JIT compilation overhead in the first timed run
-        _ = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=prob.z0)
-
-        times = []
-        result = None
-        for _ in range(n_repeats):
-            t0 = time.perf_counter()
-            r = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=m, z0=prob.z0)
-            times.append(time.perf_counter() - t0)
-            result = r
-
-        ci = bootstrap_ci(times)
-        rows.append(BenchmarkResult(
+        kwargs = {"epsilon": epsilon, "M_saddle": "len", "m_lazy": m, "z0": prob.z0}
+        times, result = _time_solve_loop(problem, n_repeats, kwargs)
+        rows.append(_build_result(
             solver="aipe_len",
             problem=name,
             dim=dim,
             epsilon=epsilon,
-            wall_time_mean=statistics.mean(times),
-            wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
-            ci=ci,
-            oracle_stats=result.oracle_stats,
-            converged=result.converged,
-            gap_achieved=result.gap <= epsilon,
-            final_gap=float(result.gap),
-            iterations=result.iterations,
-            m_lazy=m,
-            normalized_cost=result.oracle_stats.normalized_cost(d),
+            times=times,
+            result=result,
+            d=d,
+            extra={"m_lazy": m},
         ))
 
     return rows
-
 
 def ablation_npe_t_factor(
     prob,
@@ -123,33 +92,22 @@ def ablation_npe_t_factor(
 
     rows = []
     for tf in t_factors:
-        times = []
-        result = None
-        for _ in range(n_repeats):
-            t0 = time.perf_counter()
-            r = solve(
-                problem, epsilon=epsilon, M_saddle="npe",
-                npe_T_factor=tf, z0=prob.z0,
-            )
-            times.append(time.perf_counter() - t0)
-            result = r
-
-        ci = bootstrap_ci(times)
-        rows.append(BenchmarkResult(
+        kwargs = {
+            "epsilon": epsilon,
+            "M_saddle": "npe",
+            "npe_T_factor": tf,
+            "z0": prob.z0,
+        }
+        times, result = _time_solve_loop(problem, n_repeats, kwargs)
+        rows.append(_build_result(
             solver="aipe_npe",
             problem=name,
             dim=dim,
             epsilon=epsilon,
-            wall_time_mean=statistics.mean(times),
-            wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
-            ci=ci,
-            oracle_stats=result.oracle_stats,
-            converged=result.converged,
-            gap_achieved=result.gap <= epsilon,
-            final_gap=float(result.gap),
-            iterations=result.iterations,
-            npe_T_factor=tf,
-            normalized_cost=result.oracle_stats.normalized_cost(d),
+            times=times,
+            result=result,
+            d=d,
+            extra={"npe_T_factor": tf},
         ))
 
     return rows
@@ -172,75 +130,39 @@ def ablation_npe_vs_len(
     d = problem.dim_x + problem.dim_y
 
     results = []
-
     for M_saddle in ("npe", "len"):
         kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
         if M_saddle == "len":
             kwargs["m_lazy"] = 5
-        _ = solve(problem, **kwargs)
-        times = []
-        result = None
-        for _ in range(n_repeats):
-            t0 = time.perf_counter()
-            result = solve(problem, **kwargs)
-            times.append(time.perf_counter() - t0)
-        ci = bootstrap_ci(times)
-        results.append(BenchmarkResult(
+        times, result = _time_solve_loop(problem, n_repeats, kwargs)
+        results.append(_build_result(
             solver=f"aipe_{M_saddle}",
             problem=name,
             dim=dim,
             epsilon=epsilon,
-            wall_time_mean=statistics.mean(times),
-            wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
-            ci=ci,
-            oracle_stats=result.oracle_stats,
-            converged=result.converged,
-            gap_achieved=result.gap <= epsilon,
-            final_gap=float(result.gap),
-            iterations=result.iterations,
-            normalized_cost=result.oracle_stats.normalized_cost(d),
+            times=times,
+            result=result,
+            d=d,
         ))
 
     return results
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Existing formatters (unchanged)
+# Private timing helpers
 # ──────────────────────────────────────────────────────────────────────
 
 
-def format_ablation_m_table(rows: list[BenchmarkResult]) -> str:
-    """Format m_lazy ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'m_lazy':>6}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {r.m_lazy:>6}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {r.oracle_stats.crn_calls:>6}  {r.final_gap:>10.6f}"
-        )
-    return "\n".join(lines)
-
-
-def format_ablation_t_table(rows: list[BenchmarkResult]) -> str:
-    """Format npe_T_factor ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'T_factor':>8}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        tf = r.npe_T_factor or 0.0
-        lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {tf:>8.1f}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {r.oracle_stats.crn_calls:>6}  {r.final_gap:>10.6f}"
-        )
-    return "\n".join(lines)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# NEW: Private timing helper (DRY — used by every new experiment)
-# ──────────────────────────────────────────────────────────────────────
+def _sync_result(result) -> None:
+    """Force synchronization on JAX arrays inside result."""
+    if result is None:
+        return
+    if hasattr(result, "x") and hasattr(result.x, "block_until_ready"):
+        result.x.block_until_ready()
+    if hasattr(result, "y") and hasattr(result.y, "block_until_ready"):
+        result.y.block_until_ready()
+    if hasattr(result, "gap") and hasattr(result.gap, "block_until_ready"):
+        result.gap.block_until_ready()
 
 
 def _time_solve_loop(
@@ -248,30 +170,20 @@ def _time_solve_loop(
     n_repeats: int,
     kwargs: dict,
 ) -> tuple[list[float], object]:
-    """Run ``solve(problem, **kwargs)`` with warmup + n_repeats timed calls.
-
-    Returns
-    -------
-    times : list[float]
-        Wall-clock seconds per timed call.
-    result : object
-        The result of the *last* timed call (for stats extraction).
-    """
-    # Warmup — absorb JIT compilation
-    _ = solve(problem, **kwargs)
+    """Run ``solve(problem, **kwargs)`` with warmup + n_repeats timed calls."""
+    import gc
+    w_result = solve(problem, **kwargs)
+    _sync_result(w_result)
 
     times: list[float] = []
     result = None
     for _ in range(n_repeats):
+        gc.collect()
+        # Synchronize device queue before starting timer
+        _ = jnp.zeros(1).block_until_ready()
         t0 = time.perf_counter()
         result = solve(problem, **kwargs)
-        
-        # FORCE SYNC: BLOCK Python until device completes computation
-        if hasattr(result, "x"): result.x.block_until_ready()
-        if hasattr(result, "y"): result.y.block_until_ready()
-        if hasattr(result, "gap") and hasattr(result.gap, "block_until_ready"):
-            result.gap.block_until_ready()
-            
+        _sync_result(result)
         times.append(time.perf_counter() - t0)
 
     return times, result
@@ -310,7 +222,7 @@ def _build_result(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 3a: No-cubic regularization (ρ = 0)
+# New Experiments
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -319,30 +231,23 @@ def ablation_no_cubic(
     epsilon: float | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Ablation: force ρ=0 in solver when problem has ρ > 0.
-
-    Creates a modified problem copy with ``rho=0.0`` and runs both NPE
-    and LEN.  The difference vs the original problem measures the cubic
-    regularization contribution.
-
-    No solver changes required — uses ``dataclasses.replace`` on the
-    underlying :class:`MinimaxProblem`.
-    """
+    """Ablation: force ρ=0 in solver when problem has ρ > 0."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
     if n_repeats is None:
         n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), (
-        f"Expected BenchmarkProblem, got {type(prob)}"
-    )
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
 
     original_problem = prob.problem
     name = prob.name or "?"
     dim = prob.dim or original_problem.dim_x
     d = original_problem.dim_x + original_problem.dim_y
 
-    # Create a rho=0 variant of the problem
-    problem_no_cubic = replace(original_problem, rho=0.0)
+    if prob.name and prob.name in ("nonzero_rho", "random_cubic"):
+        zero_prob = get_problem(prob.name, dim, seed=prob.meta.get("seed", 0) if prob.meta else 0, rho=0.0)
+        problem_no_cubic = zero_prob.problem
+    else:
+        problem_no_cubic = original_problem
 
     results = []
     for M_saddle in ("npe", "len"):
@@ -364,32 +269,17 @@ def ablation_no_cubic(
     return results
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 3b: No-restart (single outer loop)
-#
-#   SOLVER DEPENDENCY:
-#     solve(..., no_restart=True)  — runs exactly one outer iteration
-# ──────────────────────────────────────────────────────────────────────
-
-
 def ablation_no_restart(
     prob,
     epsilon: float | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Ablation: single-shot AIPE with no restarts.
-
-    Requires ``solve(..., no_restart=True)`` support.  When set, the
-    solver runs exactly one outer loop and returns.  Compare against
-    the default (restarts enabled) to measure restart benefit.
-    """
+    """Ablation: single-shot AIPE with no restarts."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
     if n_repeats is None:
         n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), (
-        f"Expected BenchmarkProblem, got {type(prob)}"
-    )
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
 
     problem = prob.problem
     name = prob.name or "?"
@@ -421,32 +311,17 @@ def ablation_no_restart(
     return results
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 3c: No-acceleration (plain gradient instead of Nesterov)
-#
-#   SOLVER DEPENDENCY:
-#     solve(..., no_acceleration=True)
-# ──────────────────────────────────────────────────────────────────────
-
-
 def ablation_no_acceleration(
     prob,
     epsilon: float | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Ablation: disable Nesterov acceleration in the outer loop.
-
-    Requires ``solve(..., no_acceleration=True)`` support.  When set, the
-    solver replaces the acceleration step with a plain gradient step.
-    Middle and inner loops run normally.
-    """
+    """Ablation: disable Nesterov acceleration in the outer loop."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
     if n_repeats is None:
         n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), (
-        f"Expected BenchmarkProblem, got {type(prob)}"
-    )
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
 
     problem = prob.problem
     name = prob.name or "?"
@@ -478,35 +353,20 @@ def ablation_no_acceleration(
     return results
 
 
-# ──────────────────────────────────────────────────────────────────────
-# 3d: Fixed inner-iteration budget sweep
-#
-#   SOLVER DEPENDENCY:
-#     solve(..., fixed_inner_iters=N)
-# ──────────────────────────────────────────────────────────────────────
-
-
 def ablation_fixed_inner(
     prob,
     epsilon: float | None = None,
     inner_iters_list: list[int] | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Ablation: fixed inner-iteration budget sweep.
-
-    Requires ``solve(..., fixed_inner_iters=N)`` support.  Varies the
-    number of inner NPE iterations at a fixed ε to show the tradeoff
-    between inner-loop accuracy and outer-loop progress.
-    """
+    """Ablation: fixed inner-iteration budget sweep."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
     if n_repeats is None:
         n_repeats = config.N_REPEATS_SCALING
     if inner_iters_list is None:
         inner_iters_list = [1, 5, 10, 20, 50, 100]
-    assert isinstance(prob, BenchmarkProblem), (
-        f"Expected BenchmarkProblem, got {type(prob)}"
-    )
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
 
     problem = prob.problem
     name = prob.name or "?"
@@ -531,17 +391,10 @@ def ablation_fixed_inner(
             times=times,
             result=result,
             d=d,
-            extra={"iterations": n_inner},
+            extra={"m_lazy": n_inner},  # Pack inner loop budget into m_lazy slot safely
         ))
 
     return rows
-
-
-# ──────────────────────────────────────────────────────────────────────
-# 3e: Random-vs-zero initialization
-#
-#   NO SOLVER CHANGES NEEDED
-# ──────────────────────────────────────────────────────────────────────
 
 
 def ablation_init_comparison(
@@ -550,22 +403,12 @@ def ablation_init_comparison(
     n_repeats: int | None = None,
     seed: int = 42,
 ) -> list[BenchmarkResult]:
-    """Ablation: compare initialization strategies.
-
-    Tests three initializations:
-      - heuristic: ``prob.z0`` (the default deterministic init)
-      - zero: ``jnp.zeros(total_dim)``
-      - random: scaled normal draw
-
-    No solver changes required.
-    """
+    """Ablation: compare initialization strategies."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
     if n_repeats is None:
         n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), (
-        f"Expected BenchmarkProblem, got {type(prob)}"
-    )
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
 
     problem = prob.problem
     d = problem.dim_x + problem.dim_y
@@ -573,10 +416,16 @@ def ablation_init_comparison(
     dim = prob.dim or problem.dim_x
 
     key = jax.random.PRNGKey(seed)
-    random_z0 = jax.random.normal(key, (d,)) * 0.5
-    zero_z0 = jnp.zeros(d)
-    heuristic_z0 = prob.z0
+    raw_random = jax.random.normal(key, (d,)) * 0.5
+    raw_zero = jnp.zeros(d)
 
+    proj_x = problem.project_x
+    proj_y = problem.project_y
+    dx = problem.dim_x
+
+    random_z0 = jnp.concatenate([proj_x(raw_random[:dx]), proj_y(raw_random[dx:])])
+    zero_z0 = jnp.concatenate([proj_x(raw_zero[:dx]), proj_y(raw_zero[dx:])])
+    heuristic_z0 = prob.z0
     init_configs = [
         ("heuristic", heuristic_z0),
         ("zero", zero_z0),
@@ -605,15 +454,45 @@ def ablation_init_comparison(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# NEW formatters
+# Resilient Formatters
 # ──────────────────────────────────────────────────────────────────────
 
 
-def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
-    """Compare with/without cubic regularization.
+def format_ablation_m_table(rows: list[BenchmarkResult]) -> str:
+    """Format m_lazy ablation as a text table."""
+    header = f"{'Problem':<18} {'Dim':>4}  {'m_lazy':>6}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for r in rows:
+        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
+        # FIX: Cross-query both metric names to ensure accurate counters regardless of solver mode
+        calls = getattr(r.oracle_stats, "crn_calls", 0) or getattr(r.oracle_stats, "oracle_calls", 0)
+        lines.append(
+            f"{r.problem:<18} {r.dim:>4}  {r.m_lazy:>6}  "
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {calls:>6}  {r.final_gap:>10.6f}"
+        )
+    return "\n".join(lines)
 
-    Groups rows by solver and shows ρ=0 performance side by side.
-    """
+
+def format_ablation_t_table(rows: list[BenchmarkResult]) -> str:
+    """Format npe_T_factor ablation as a text table."""
+    header = f"{'Problem':<18} {'Dim':>4}  {'T_factor':>8}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for r in rows:
+        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
+        tf = r.npe_T_factor or 0.0
+        # FIX: Robust fallback for common random number/oracle call name splitting
+        calls = getattr(r.oracle_stats, "crn_calls", 0) or getattr(r.oracle_stats, "oracle_calls", 0)
+        lines.append(
+            f"{r.problem:<18} {r.dim:>4}  {tf:>8.1f}  "
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {calls:>6}  {r.final_gap:>10.6f}"
+        )
+    return "\n".join(lines)
+
+
+def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
+    """Compare with/without cubic regularization."""
     if not rows:
         return "(no data)"
 
@@ -625,21 +504,18 @@ def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
+        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
         lines.append(
             f"{r.solver:<22} {r.problem:<18} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{r.oracle_stats.oracle_calls:>6}  {r.iterations:>6}  "
+            f"{calls:>6}  {r.iterations:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
 
 
 def format_ablation_init_table(rows: list[BenchmarkResult]) -> str:
-    """Compare initialization strategies.
-
-    Rows are grouped by init variant; solver name appears in the problem
-    label as ``<name>_<init>``.
-    """
+    """Compare initialization strategies."""
     if not rows:
         return "(no data)"
 
@@ -651,21 +527,18 @@ def format_ablation_init_table(rows: list[BenchmarkResult]) -> str:
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
+        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
         lines.append(
             f"{r.problem:<30} {r.solver:<22} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{r.oracle_stats.oracle_calls:>6}  {r.iterations:>6}  "
+            f"{calls:>6}  {r.iterations:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
 
 
 def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
-    """Fixed inner-iteration sweep table.
-
-    Shows inner budget, wall time, oracle calls, outer iterations, and
-    final gap to reveal the accuracy/cost tradeoff.
-    """
+    """Fixed inner-iteration sweep table."""
     if not rows:
         return "(no data)"
 
@@ -677,12 +550,18 @@ def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        # For fixed-inner rows, npe_T_factor is unused; the relevant
-        # parameter is stored in iterations (overridden by extra=).
+        
+        # FIX: Correct column logic mapping. 
+        # "Inner" pulls the budget allocated to the 'm_lazy' property via the generator.
+        # "Outer" pulls the actual outer execution loop step counter.
+        inner_val = getattr(r, "m_lazy", 0)
+        outer_val = getattr(r, "iterations", 0)
+        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
+        
         lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {r.iterations:>6}  "
+            f"{r.problem:<18} {r.dim:>4}  {inner_val:>6}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{r.oracle_stats.oracle_calls:>6}  {r.iterations:>6}  "
+            f"{calls:>6}  {outer_val:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)

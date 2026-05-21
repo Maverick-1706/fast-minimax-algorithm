@@ -113,7 +113,8 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     print("  ill_conditioned_quadratic (condition number sweep):")
     cond_rows = scale_condition_number("ill_quadratic", kappas=[1e1, 1e2, 1e3, 1e4], dim=10, epsilon=epsilon,
                                        n_repeats=max(1, n_repeats // 2), seed=seed)
-    print(format_scaling_table(cond_rows))
+    # BUG FIX: Added explicit key_col so groupby doesn't squash the distinct condition numbers
+    print(format_scaling_table(cond_rows, key_col="kappa"))
     export_data.setdefault("scaling_cond", []).extend(flatten_scaling_rows(cond_rows))
     print()
 
@@ -134,7 +135,8 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     print(header)
     print("─" * len(header))
     for r in npe_rows:
-        print(f"{r.rho or 0.0:>8.1f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+        # BUG FIX: Tracking parameter assignment allows r.rho to exist properly now
+        print(f"{getattr(r, 'rho', 0.0):>8.1f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
     export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
     print()
 
@@ -147,11 +149,11 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     print(header)
     print("─" * len(header))
     for r in npe_rows:
-        print(f"{'?':>8}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+        # BUG FIX: Tracking parameter assignment allows r.sparsity to evaluate correctly
+        print(f"{getattr(r, 'sparsity', 0.0):>8.2f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
     export_data.setdefault("scaling_sparsity", []).extend(flatten_scaling_rows(sparsity_rows))
     print()
-
-
+    
 def _run_memory(problems, epsilon, export_data):
     from benchmarks.memory import benchmark_memory_scaling, format_memory_table
     print(_header("Memory Usage"))
@@ -175,8 +177,8 @@ def _run_convergence(problems, epsilon, export_data):
         print()
 
         trace_rows = []               # ← was inside the if-block
-        if len(problems) > 0 and len(epsilons) > 0:
-            trace_rows = sweep_epsilon_with_traces(problems[0], [epsilons[-1]])
+        if len(problems) > 0 :
+            trace_rows = sweep_epsilon_with_traces(prob, [epsilons[-1]])
             print(format_trace_table(trace_rows))
 
         export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))

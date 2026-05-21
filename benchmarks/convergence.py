@@ -149,15 +149,18 @@ def sweep_epsilon_with_traces(
         cumulative_calls = 0
         z_warm = prob.z0  # Start from the problem's initial point
 
+        # Force device synchronization before starting the timer
+        _ = jnp.zeros(1).block_until_ready()
         t_total = time.perf_counter()
         res = None
         for trace_eps in eps_schedule:
             res = solve(prob.problem, epsilon=trace_eps, z0=z_warm)
-            cumulative_calls += int(res.oracle_calls)
+            cumulative_calls += int(res.oracle_stats.oracle_calls)
             gap_trace.append(float(res.gap))
             oracle_trace.append(cumulative_calls)
             # Warm-start the next (tighter) solve from this solution
             z_warm = jnp.concatenate([res.x, res.y])
+        z_warm.block_until_ready()
         elapsed = time.perf_counter() - t_total
 
         assert res is not None  # eps_schedule is never empty

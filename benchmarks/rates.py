@@ -42,10 +42,10 @@ class RateFit:
     theoretical_slope: Optional[float] = None
 
     THEORY: dict = field(default_factory=lambda: {
-        "aipe_npe": -4 / 7,        # ≈ -0.5714
-        "aipe_len": -4 / 7,
-        "eg": -1.0,
-        "gda": -1.0,
+        "aipe_npe": 4 / 7,        
+        "aipe_len": 4 / 7,
+        "eg": 1.0,
+        "gda": 1.0,
     }, init=False, repr=False)
 
     def __post_init__(self):
@@ -208,7 +208,7 @@ def fit_from_convergence_rows(
 
         epsilons = [r.epsilon for r in valid_rows]
         calls = [
-            int(r.oracle_stats.normalized_cost(dim)) 
+            int(r.oracle_stats.normalized_cost(2 * dim)) 
             if hasattr(r.oracle_stats, "normalized_cost") 
             else int(r.oracle_stats.oracle_calls)
             for r in valid_rows

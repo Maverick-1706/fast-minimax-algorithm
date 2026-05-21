@@ -268,8 +268,8 @@ def _bca_interval(
 
     # If denominator <= 1e-6, the BCa mapping breaks down or becomes unstable.
     # Fall back safely to the unadjusted percentile interval bounds.
-    adj_lo = z0 + (z_lo + z0) / denom_lo if denom_lo > 1e-6 else z_lo
-    adj_hi = z0 + (z_hi + z0) / denom_hi if denom_hi > 1e-6 else z_hi
+    adj_lo = z0 + (z_lo + z0) / denom_lo if jnp.abs(denom_lo) > 1e-6 else z_lo
+    adj_hi = z0 + (z_hi + z0) / denom_hi if jnp.abs(denom_hi) > 1e-6 else z_hi
 
     p_lo = float(_norm.cdf(adj_lo))
     p_hi = float(_norm.cdf(adj_hi))

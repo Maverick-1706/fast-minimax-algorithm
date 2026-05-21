@@ -60,6 +60,16 @@ def _block_banded_mask(dim: int, n_blocks: int, bandwidth: int) -> Array:
     each of which is banded with the given ``bandwidth`` (using
     :func:`_banded_mask` within each block).
     """
+    # FIX: Explicit guard rails against division-by-zero, negative sizes, and over-segmentation
+    if n_blocks <= 0:
+        raise ValueError(f"n_blocks must be strictly greater than 0, got {n_blocks}")
+    if dim <= 0:
+        raise ValueError(f"dim must be strictly greater than 0, got {dim}")
+    if n_blocks > dim:
+        raise ValueError(f"n_blocks ({n_blocks}) cannot be greater than dim ({dim})")
+    if bandwidth < 0:
+        raise ValueError(f"bandwidth must be non-negative, got {bandwidth}")
+
     bs = dim // n_blocks
     remainder = dim - bs * n_blocks
     mask = jnp.zeros((dim, dim), dtype=bool)
@@ -72,7 +82,6 @@ def _block_banded_mask(dim: int, n_blocks: int, bandwidth: int) -> Array:
         mask = mask.at[jnp.ix_(idx, idx)].set(local)
         start = end
     return mask
-
 
 def project_box(lo: float, hi: float) -> Callable[[Array], Array]:
     """Project element-wise onto ``[lo, hi]``."""
@@ -156,7 +165,9 @@ def make_bilinear_saddle(
         mask = _banded_mask(dim, bandwidth)
         A = jnp.where(mask, A, 0.0)
 
-    ell = float(jnp.max(sigmas))
+    # FIX: Compute the operator norm AFTER sparsification so that 
+    # step sizes and scaling profiles match the true masked operator.
+    ell = float(jnp.linalg.norm(A, ord=2))
     D = 2.0
 
     def f(x, y):
@@ -167,7 +178,9 @@ def make_bilinear_saddle(
 
     def hessian_f(x, y):
         zeros = jnp.zeros((dim, dim))
-        return ((zeros, A), (A.T, zeros))
+        # FIX: Align with the Jacobian of the saddle operator vector field.
+        # d/dx (-A.T @ x) is -A.T
+        return ((zeros, A), (-A.T, zeros))
 
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
@@ -184,7 +197,6 @@ def make_bilinear_saddle(
         dim=dim,
         z0=None,
     )
-
 
 # ── Quadratic saddle ───────────────────────────────────────────────────
 
@@ -286,7 +298,9 @@ def make_nonzero_rho_quadratic(
     kappa : float
         Condition number controlling eigenvalue spread of Q and R.
     rho : float
-        Cubic regularisation magnitude (Hessian Lipschitz constant).
+        Cubic coefficient for the ‖x‖³ perturbation.
+        The actual Hessian Lipschitz constant is ``2 * rho``, computed
+        and passed to :class:`MinimaxProblem` automatically.
     seed : int
         Deterministic seed.
 
@@ -347,7 +361,7 @@ def make_nonzero_rho_quadratic(
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=rho, ell=ell + rho * D,
+        rho=2 * rho, ell=ell + rho * D,
     )
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
@@ -500,7 +514,8 @@ def make_logsumexp_saddle(
         py = ey / jnp.sum(ey)
         H_xx = jnp.diag(px) - jnp.outer(px, px)
         H_yy = -jnp.diag(py) + jnp.outer(py, py)
-        return ((H_xx, A), (A.T, H_yy))
+        # FIX: Flip the signs of the bottom row blocks to match the Jacobian of grad_f
+        return ((H_xx, A), (-A.T, -H_yy))
 
     KKT = hessian_f(jnp.zeros(dim), jnp.zeros(dim))
     H_full = jnp.block([
@@ -524,7 +539,6 @@ def make_logsumexp_saddle(
         dim=dim,
         z0=None,
     )
-
 # ── Sparse bilinear ────────────────────────────────────────────────────
 
 
@@ -623,7 +637,7 @@ def make_random_cubic_quadratic(
 
         f(x,y) = \\tfrac{1}{2} x^\\top Q x + x^\\top B y
                 - \\tfrac{1}{2} y^\\top R y
-                + \\frac{\\rho}{3} \\sum_i c_i (x_i^3 - y_i^3)
+                + \\frac{\\rho}{3} \\sum_i c_i (|x_i|^3 - |y_i|^3)
 
     Per-coordinate coefficients ``c_i ~ U[0.5, 1.5]`` create heterogeneous
     curvature, directly testing Theorem 5.5's ρ-dependence beyond the
@@ -638,7 +652,9 @@ def make_random_cubic_quadratic(
     kappa : float
         Condition number controlling eigenvalue spread of Q and R.
     rho : float
-        Cubic perturbation magnitude (Hessian Lipschitz constant).
+        Cubic coefficient scaling the per-coordinate |x_i|^3 perturbation.
+        The actual Hessian Lipschitz constant is ``2 * rho * max(c_i)``,
+        computed and passed to :class:`MinimaxProblem` automatically.
         ``rho=0`` recovers a standard quadratic saddle.
     seed : int
         Deterministic seed.
@@ -671,18 +687,22 @@ def make_random_cubic_quadratic(
 
     def f(x, y):
         quad = 0.5 * x @ Q @ x + x @ B @ y - 0.5 * y @ R @ y
-        cubic = (rho / 3.0) * jnp.dot(c, x ** 3 - y ** 3)
+        # FIX: Use absolute values to ensure global convex-concave structure
+        cubic = (rho / 3.0) * jnp.dot(c, jnp.abs(x) ** 3 - jnp.abs(y) ** 3)
         return quad + cubic
 
     def grad_f(x, y):
-        gx = Q @ x + B @ y + rho * c * x ** 2
-        gy_neg = -(B.T @ x) + R @ y + rho * c * y ** 2
+        # FIX: Gradient of |z|^3 / 3 is z * |z|
+        gx = Q @ x + B @ y + rho * c * x * jnp.abs(x)
+        gy_neg = -(B.T @ x) + R @ y + rho * c * y * jnp.abs(y)
         return gx, gy_neg
 
     def hessian_f(x, y):
-        H_xx = Q + rho * jnp.diag(2.0 * c * x)
-        H_yy = -R - rho * jnp.diag(2.0 * c * y)
-        return ((H_xx, B), (B.T, H_yy))
+        # FIX: Hessian of |z|^3 / 3 is 2 * |z|
+        H_xx = Q + rho * jnp.diag(2.0 * c * jnp.abs(x))
+        H_yy = R + rho * jnp.diag(2.0 * c * jnp.abs(y))
+        # FIX: Return the Jacobian of the saddle operator (gx, gy_neg)
+        return ((H_xx, B), (-B.T, H_yy))
 
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,

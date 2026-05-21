@@ -75,27 +75,29 @@ def run_eg_jit(
 
     @jax.jit
     def eg_loop(z_init):
-        tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
+        tol_sq = jnp.asarray(
+            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+        )
         max_i = jnp.int32(max_iters)
-        init_resid_sq = jnp.sum(F_op(z_init) ** 2)
+        init_Fz = F_op(z_init)
 
         def cond(state):
-            i, _z, _prev_z, resid_sq = state
+            i, _z, Fz = state
+            resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
             return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
-            i, z, _prev_z, _ = state
-            Fz = F_op(z)
+            i, z, Fz = state
             z_half = proj(z - eta * Fz)
             F_half = F_op(z_half)
             z_new = proj(z - eta * F_half)
-            new_resid_sq = jnp.sum(F_op(z_new) ** 2)
-            return (i + 1, z_new, z, new_resid_sq)
+            new_Fz = F_op(z_new)
+            return (i + 1, z_new, new_Fz)
 
-        iters_out, z_out, _, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, z_init, init_resid_sq)
+        iters_out, z_out, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, init_Fz)
         )
         return iters_out, z_out
 
@@ -158,28 +160,32 @@ def run_gda_jit(
 
     @jax.jit
     def gda_loop(z_init):
-        tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
+        tol_sq = jnp.asarray(
+            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+        )
         max_i = jnp.int32(max_iters)
-        init_resid_sq = jnp.sum(F_op(z_init) ** 2)
+        init_Fz = F_op(z_init)
 
         def cond(state):
-            i, _z, _prev_z, resid_sq = state
+            i, _z, Fz = state
+            resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
             return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
 
         def body(state):
-            i, z, _prev_z, _ = state
+            i, z, Fz = state
+            gx = Fz[: problem.dim_x]
+            gy_neg = Fz[problem.dim_x :]
             x, y = z[: problem.dim_x], z[problem.dim_x :]
-            gx, gy_neg = problem.grad_f(x, y)
             x_new = problem.project_x(x - eta * gx)
             y_new = problem.project_y(y - eta * gy_neg)
             z_new = jnp.concatenate([x_new, y_new])
-            new_resid_sq = jnp.sum(F_op(z_new) ** 2)
-            return (i + 1, z_new, z, new_resid_sq)
+            new_Fz = F_op(z_new)
+            return (i + 1, z_new, new_Fz)
 
-        iters_out, z_out, _, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, z_init, init_resid_sq)
+        iters_out, z_out, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, init_Fz)
         )
         return iters_out, z_out
 
@@ -253,14 +259,16 @@ def run_npe_restart_jit(
 
     @jax.jit
     def npe_epoch_loop(z_init):
-        tol_sq = jnp.asarray(tol ** 2, dtype=z_init.dtype)
+        tol_sq = jnp.asarray(
+            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+        )
         max_epochs = jnp.int32(max(1, max_iters // T))
         init_resid_sq = merit(z_init)
 
         def cond(state):
             epoch, _z, resid_sq = state
             not_done = epoch < max_epochs
-            resid_big = resid_sq > tol_sq
+            resid_big = resid_sq.astype(jnp.float64) > tol_sq
             return not_done & jnp.where(epoch > 0, resid_big, jnp.bool_(True))
 
         def body(state):
