@@ -156,8 +156,8 @@ def aipe_restart_lazy(
     total_calls = 0
     for _ in range(S):
         prox = prox_oracle_factory(z)
-        z, calls = aipe(prox, grad_fn, z, T, gamma,
-                        project=project, fn=fn)
+        z, calls, _ = aipe(prox, grad_fn, z, T, gamma,
+                           project=project, fn=fn)
         total_calls += calls
     return z, total_calls
 

@@ -21,7 +21,7 @@ from minimax_aipe import (
     npe,
     make_crn_npe_oracle,
 )
-from minimax_aipe.framework import _WarmStart, _CallCounter, _compute_loop_params
+from minimax_aipe.framework import _CallCounter, _compute_loop_params
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Section 1 — Three-Loop Interaction
@@ -148,35 +148,8 @@ class TestThreeLoopOnHarderProblems:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Section 2 — Warm-Start Mechanism
+# Section 2 — Call Counter (used via jax.debug.callback for oracle stats)
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestWarmStartClass:
-    """Direct tests on the _WarmStart dataclass."""
-
-    def test_initially_none(self):
-        ws = _WarmStart()
-        assert ws.value is None
-
-    def test_set_and_read(self):
-        ws = _WarmStart()
-        arr = jnp.array([1.0, 2.0, 3.0])
-        ws.value = arr
-        assert ws.value is not None
-        assert jnp.allclose(ws.value, arr)
-
-    def test_overwrite(self):
-        ws = _WarmStart()
-        ws.value = jnp.array([1.0, 2.0])
-        ws.value = jnp.array([3.0, 4.0])
-        assert jnp.allclose(ws.value, jnp.array([3.0, 4.0]))
-
-    def test_reset_to_none(self):
-        ws = _WarmStart()
-        ws.value = jnp.array([1.0])
-        ws.value = None
-        assert ws.value is None
 
 
 class TestCallCounter:
@@ -194,108 +167,14 @@ class TestCallCounter:
         assert counter.total == 8
 
 
-class TestCallbackFiring:
-    """Verify that jax.debug.callback fires in traced and scanned code."""
-
-    def test_callback_in_eager_context(self):
-        """Callback fires when called outside JIT (eager mode)."""
-        ws = _WarmStart()
-
-        def eager_fn(x):
-            jax.debug.callback(lambda v: setattr(ws, "value", v), x * 2)
-            return x * 3
-
-        result = eager_fn(jnp.array(5.0))
-        assert jnp.allclose(result, 15.0)
-        assert ws.value is not None
-        assert jnp.allclose(ws.value, 10.0)
-
-    def test_callback_in_jit(self):
-        """Callback fires inside jax.jit."""
-        ws = _WarmStart()
-
-        def traced_fn(x):
-            jax.debug.callback(lambda v: setattr(ws, "value", v), x + 1)
-            return x * 2
-
-        jitted = jax.jit(traced_fn)
-        result = jitted(jnp.array(3.0))
-        assert jnp.allclose(result, 6.0)
-        assert ws.value is not None
-        assert jnp.allclose(ws.value, 4.0)
-
-    def test_callback_in_scan(self):
-        """Callback fires inside jax.lax.scan (the AIPE loop pattern)."""
-        ws = _WarmStart()
-
-        def step(carry, x):
-            new_carry = carry + x
-            jax.debug.callback(lambda v: setattr(ws, "value", v), new_carry)
-            return new_carry, new_carry
-
-        _, outputs = jax.lax.scan(step, 0.0, jnp.array([1.0, 2.0, 3.0]))
-        # After scan, ws.value should hold the final carry = 1+2+3 = 6
-        assert ws.value is not None
-        assert float(ws.value) == pytest.approx(6.0)
-
-    def test_callback_overwrite_across_scan_steps(self):
-        """Each scan step overwrites the previous callback value."""
-        ws = _WarmStart()
-        values_seen = []
-
-        def step(carry, x):
-            new_carry = carry * 2 + x
-
-            def record(v):
-                values_seen.append(float(v))
-                ws.value = v
-
-            jax.debug.callback(record, new_carry)
-            return new_carry, new_carry
-
-        jax.lax.scan(step, 0.0, jnp.array([1.0, 2.0, 3.0]))
-
-        # Three scan steps → three callback invocations
-        assert len(values_seen) == 3
-        # Step 0: 0*2+1 = 1
-        # Step 1: 1*2+2 = 4
-        # Step 2: 4*2+3 = 11
-        assert values_seen[0] == pytest.approx(1.0)
-        assert values_seen[1] == pytest.approx(4.0)
-        assert values_seen[2] == pytest.approx(11.0)
-        # Final value persists
-        assert float(ws.value) == pytest.approx(11.0)
-
-
-class TestWarmStartInContext:
-    """Verify warm-start pattern as used by the solver's inner loops."""
-
-    def test_warm_start_survives_across_calls(self):
-        """Simulating the _iProx_Phi pattern: warm_y persists across epochs."""
-        warm_y = _WarmStart()
-
-        # Epoch 1: solver produces y_hat, stores it
-        y_hat_1 = jnp.array([0.1, 0.2, 0.3])
-        jax.debug.callback(lambda v: setattr(warm_y, "value", v), y_hat_1)
-        assert warm_y.value is not None
-        assert jnp.allclose(warm_y.value, y_hat_1)
-
-        # Epoch 2: warm_y.value is used as y_init
-        y_init_for_epoch_2 = warm_y.value
-        assert jnp.allclose(y_init_for_epoch_2, y_hat_1)
-
-        # Epoch 2: solver produces new y_hat, updates warm_y
-        y_hat_2 = jnp.array([0.15, 0.25, 0.35])
-        jax.debug.callback(lambda v: setattr(warm_y, "value", v), y_hat_2)
-        assert jnp.allclose(warm_y.value, y_hat_2)
+class TestCallbackCounter:
+    """Verify call-counter accumulation via jax.debug.callback."""
 
     def test_call_counter_accumulates_across_nested_loops(self):
         """Simulating the _CallCounter pattern across _iProx_Psi calls."""
         counter = _CallCounter()
 
-        # Outer loop: 3 epochs
         for epoch in range(3):
-            # Each epoch: inner solver reports some calls
             inner_calls = (epoch + 1) * 10
             jax.debug.callback(
                 lambda c: setattr(counter, "total", counter.total + c),

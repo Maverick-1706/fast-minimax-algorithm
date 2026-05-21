@@ -251,7 +251,7 @@ def test_iProx_Phi_returns_proximal_point():
     x_bar = jnp.array([0.5, -0.2])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    x_out, u_out = _iProx_Phi(
+    x_out, u_out, _ = _iProx_Phi(
         problem, x_bar, gamma=1.0,
         zeta_2=params.zeta_2, params=params, M_saddle="npe",
     )
@@ -294,7 +294,7 @@ def test_iProx_Phi_without_counter_still_works():
     x_bar = jnp.array([0.5, -0.2])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    x_out, u_out = _iProx_Phi(
+    x_out, u_out, _ = _iProx_Phi(
         problem, x_bar, gamma=1.0, params=params, M_saddle="npe",
     )
 
@@ -309,7 +309,7 @@ def test_iProx_Phi_with_default_params():
     x_bar = jnp.zeros(2)
     params = _test_loop_params(problem)
 
-    x_out, u_out = _iProx_Phi(
+    x_out, u_out, _ = _iProx_Phi(
         problem, x_bar, gamma=1.0,
         params=params, M_saddle="npe",
     )
@@ -325,7 +325,7 @@ def test_iProx_Psi_returns_proximal_point():
     y_bar = jnp.array([-0.1, 0.3])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    y_out, v_out = _iProx_Psi(
+    y_out, v_out, _ = _iProx_Psi(
         problem, x_bar, y_bar, gamma=1.0,
         zeta_3=params.zeta_3, params=params, M_saddle="npe",
     )
@@ -343,7 +343,7 @@ def test_iProx_Psi_with_default_params():
     y_bar = jnp.zeros(2)
     params = _test_loop_params(problem)
 
-    y_out, v_out = _iProx_Psi(
+    y_out, v_out, _ = _iProx_Psi(
         problem, x_bar, y_bar, gamma=1.0,
         params=params, M_saddle="npe",
     )
@@ -362,7 +362,7 @@ def test_algorithm_3_returns_valid_saddle_point():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)  
 
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )
@@ -378,7 +378,7 @@ def test_algorithm_3_improves_on_zero_init():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)
 
-    z_hat, _calls = _algorithm_3(
+    z_hat, _calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )
@@ -405,7 +405,7 @@ def test_algorithm_3_with_default_params():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)
 
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params=params, M_saddle="npe", z0=z0,
     )
@@ -418,7 +418,7 @@ def test_algorithm_3_with_default_z0():
     problem, _x_star, _y_star, _A = _shifted_scsc_problem()
     params = _test_loop_params(problem)
 
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params=params, M_saddle="npe", z0=None,
     )
@@ -432,7 +432,7 @@ def test_algorithm_3_accepts_both_saddle_modes(M_saddle):
     problem, _x_star, _y_star, _A = _shifted_scsc_problem()
     params = _test_loop_params(problem)
 
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle=M_saddle, z0=None,
     )
@@ -449,7 +449,7 @@ def test_algorithm_3_call_counter_is_threaded():
 
     # _algorithm_3 creates its own counter internally; the returned
     # total_calls should equal counter.total
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )

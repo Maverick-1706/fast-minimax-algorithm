@@ -247,7 +247,7 @@ def ablation_no_cubic(
     d = original_problem.dim_x + original_problem.dim_y
 
     if prob.name and prob.name in ("nonzero_rho", "random_cubic"):
-        zero_prob = get_problem(prob.name, dim, seed=prob.meta.get("seed", 0) if prob.meta else 0, rho=0.0)
+        zero_prob = get_problem(prob.name, dim, seed=getattr(prob.meta, "seed", 0) if prob.meta else 0, rho=0.0)
         problem_no_cubic = zero_prob.problem
     else:
         problem_no_cubic = original_problem

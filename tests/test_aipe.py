@@ -39,7 +39,7 @@ class TestAIPE:
     def test_quadratic_2d(self):
         f, grad_f, hess_f, z_star = _quadratic_2d()
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.5, n_iters=20)
-        z_out, _ = aipe(prox, grad_f, jnp.array([10.0, -10.0]), T=30, gamma=0.5, fn=f)
+        z_out, _, _ = aipe(prox, grad_f, jnp.array([10.0, -10.0]), T=30, gamma=0.5, fn=f)
         assert jnp.linalg.norm(z_out - z_star) < 0.5
 
     def test_quadratic_1d(self):
@@ -48,7 +48,7 @@ class TestAIPE:
         hess_f = lambda z: Q
         f = lambda z: z[0] ** 2
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.1)
-        z_out, _ = aipe(prox, grad_f, jnp.array([5.0]), T=20, gamma=0.1, fn=f)
+        z_out, _, _ = aipe(prox, grad_f, jnp.array([5.0]), T=20, gamma=0.1, fn=f)
         assert jnp.abs(z_out[0]) < 0.5
 
     def test_output_selection_with_fn(self):
@@ -56,8 +56,8 @@ class TestAIPE:
         f, grad_f, hess_f, _ = _quadratic_2d()
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.5)
         z0 = jnp.array([5.0, 5.0])
-        z_with, _ = aipe(prox, grad_f, z0, T=15, gamma=0.5, fn=f)
-        z_without, _ = aipe(prox, grad_f, z0, T=15, gamma=0.5, fn=None)
+        z_with, _, _ = aipe(prox, grad_f, z0, T=15, gamma=0.5, fn=f)
+        z_without, _, _ = aipe(prox, grad_f, z0, T=15, gamma=0.5, fn=None)
         assert f(z_with) <= f(z_without) + 1e-6
 
 
@@ -73,7 +73,7 @@ class TestConstrained:
         f = lambda z: (z[0] - 3.0) ** 2
         project = lambda z: jnp.clip(z, -1.0, 1.0)
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.5, project=project)
-        z_out, _ = aipe(
+        z_out, _, _ = aipe(
             prox, grad_f, jnp.array([0.0]), T=20, gamma=0.5,
             project=project, fn=f,
         )
@@ -88,7 +88,7 @@ class TestConstrained:
         prox = make_crn_prox_oracle(
             grad_f, hess_f, gamma=0.5, project=_project_ball,
         )
-        z_out, _ = aipe(
+        z_out, _, _ = aipe(
             prox, grad_f, jnp.array([0.5, 0.5]), T=20, gamma=0.5,
             project=_project_ball, fn=f,
         )
@@ -103,7 +103,7 @@ class TestConstrained:
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.5, project=project)
 
         # Run with fn=None so final_state.z is returned (last iterate)
-        z_out, _ = aipe(
+        z_out, _, _ = aipe(
             prox, grad_f, jnp.array([0.0]), T=10, gamma=0.5, project=project,
         )
         assert jnp.all(z_out >= -1.0 - 1e-6)
@@ -147,7 +147,7 @@ class TestOracleCalls:
     def test_aipe_count(self):
         Q = jnp.array([[2.0]])
         prox = make_crn_prox_oracle(lambda z: Q @ z, lambda z: Q, gamma=0.1)
-        _, calls = aipe(prox, lambda z: Q @ z, jnp.array([1.0]), T=5, gamma=0.1)
+        _, calls, _ = aipe(prox, lambda z: Q @ z, jnp.array([1.0]), T=5, gamma=0.1)
         assert calls == 5  # Algorithm 1 makes T proximal oracle calls.
 
     def test_restart_count(self):
@@ -167,7 +167,7 @@ class TestEdgeCases:
     def test_start_at_solution(self):
         f, grad_f, hess_f, z_star = _quadratic_2d()
         prox = make_crn_prox_oracle(grad_f, hess_f, gamma=0.5)
-        z_out, _ = aipe(prox, grad_f, z_star, T=10, gamma=0.5, fn=f)
+        z_out, _, _ = aipe(prox, grad_f, z_star, T=10, gamma=0.5, fn=f)
         assert jnp.linalg.norm(z_out - z_star) < 0.1
 
 
@@ -203,7 +203,7 @@ class TestAdaptiveCRN:
         prox = make_crn_prox_oracle(
             grad_f, hess_f, gamma=0.1, n_iters=50, tol=1e-4,
         )
-        z_out, _ = aipe(prox, grad_f, jnp.array([5.0]), T=10, gamma=0.1, fn=f)
+        z_out, _, _ = aipe(prox, grad_f, jnp.array([5.0]), T=10, gamma=0.1, fn=f)
         assert jnp.abs(z_out[0]) < 1.0
 
 
@@ -221,7 +221,8 @@ class TestJIT:
         # T must be static under jit
         @functools.partial(jax.jit, static_argnums=(0,1,3))
         def run(prox_, grad_, z0, T_, gamma_):
-            return aipe(prox_, grad_, z0, T=T_, gamma=gamma_)
+            z_out, calls, _ = aipe(prox_, grad_, z0, T=T_, gamma=gamma_)
+            return z_out, calls
 
         z_out, calls = run(prox, grad_f, jnp.array([1.0]), 5, 0.1)
         assert z_out.shape == (1,)
@@ -236,7 +237,8 @@ class TestJIT:
 
         @functools.partial(jax.jit, static_argnums=(0,1,3))
         def run(prox_, grad_, z0, T_, gamma_):
-            return aipe(prox_, grad_, z0, T=T_, gamma=gamma_)
+            z_out, calls, _ = aipe(prox_, grad_, z0, T=T_, gamma=gamma_)
+            return z_out, calls
 
         z1, _ = run(prox, grad_f, jnp.array([3.0]), 5, 0.1)
         z2, _ = run(prox, grad_f, jnp.array([3.0]), 5, 0.1)

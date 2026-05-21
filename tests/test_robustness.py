@@ -173,7 +173,7 @@ class TestJITCompilation:
         prox = make_crn_prox_oracle(grad_z, hess_z, gamma, n_iters=20)
         z0 = jnp.zeros(p.dim_x + p.dim_y)
         T = 5
-        z_out, calls = aipe(prox, grad_z, z0, T, gamma)
+        z_out, calls, _ = aipe(prox, grad_z, z0, T, gamma)
         assert jnp.all(jnp.isfinite(z_out))
         assert calls == T
 

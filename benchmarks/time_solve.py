@@ -134,13 +134,16 @@ def benchmark_jit_vs_eager(
             def bound_F(z): return F_h(z, x_bar, y_bar)
             return len_loop(oracle, bound_F, z_init, 50, npe_gamma, m=5, project=kernel.project, fn=merit)
 
-    # 2. Pure Eager Run Closure (Zero tracing overhead)
+    # 2. Pure Eager Run Closure — disable_jit() forces every jax.lax
+    #    primitive to execute without XLA compilation so we measure
+    #    genuine eager dispatch, not first-call compile time.
     def run_eager():
-        z_out, _ = _core(z0)
-        z_out.block_until_ready()
-        return z_out
+        with jax.disable_jit():
+            z_out, _ = _core(z0)
+            z_out.block_until_ready()
+            return z_out
 
-    eager_times = _time_callable(run_eager, n_warmup=0, n_repeats=n_repeats)
+    eager_times = _time_callable(run_eager, n_warmup=n_warmup or 1, n_repeats=n_repeats)
 
     # 3. Pure JIT Run Closure (Isolating the compiled XLA execution pipeline)
     core_jit = jax.jit(_core)
@@ -150,7 +153,7 @@ def benchmark_jit_vs_eager(
         z_out.block_until_ready()
         return z_out
 
-    jit_times = _time_callable(run_jit, n_warmup=n_warmup, n_repeats=n_repeats)
+    jit_times = _time_callable(run_jit, n_warmup=n_warmup or 1, n_repeats=n_repeats)
 
     speedup = eager_times["mean"] / max(jit_times["mean"], 1e-12)
 

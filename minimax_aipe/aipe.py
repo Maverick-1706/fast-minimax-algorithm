@@ -126,7 +126,8 @@ def aipe(
     gamma: float,
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], float]] = None,
-) -> tuple[Array, int]:
+    warm_init: Optional[Array] = None,
+) -> tuple[Array, int, Array]:
     """Algorithm 1: Accelerated Inexact Proximal Extragradient.
 
     Solves ``min_{z ∈ Z} h(z)`` for a convex function *h* using an
@@ -135,8 +136,9 @@ def aipe(
     Parameters
     ----------
     prox_oracle : ProxOracle
-        ``(z_bar) → (z_tilde, u)`` satisfying Definition 4.1.
-        Use :func:`make_crn_prox_oracle` to create a CRN-based oracle.
+        ``(z_bar) → (z_tilde, u)`` satisfying Definition 4.1, or
+        ``(z_bar, warm) → (z_tilde, u, warm_out)`` when *warm_init*
+        is provided.
     grad_fn : Callable
         Gradient of *h* (used for the v-update, line 22 of Alg 1).
     z0 : Array
@@ -152,6 +154,10 @@ def aipe(
         Optional function-value oracle for output selection (line 25).
         When provided, the iterate with smallest ``fn`` value among
         all ``z_t``, ``z̃_t``, and ``z0`` is returned.
+    warm_init : Array or None
+        Optional warm-start state threaded through the scan.  When
+        provided, ``prox_oracle`` is called as ``(z_bar, warm)`` and
+        must return ``(z_tilde, u, warm_out)``.
 
     Returns
     -------
@@ -161,6 +167,8 @@ def aipe(
         Number of proximal oracle invocations (= T). The eager call at
         ``z0`` is reused for the first scan iteration, so it does not add
         an extra effective oracle evaluation.
+    warm_final : Array
+        Final warm state.  Equal to *warm_init* when warm is not used.
     """
     dtype = z0.dtype
     tiny = jnp.asarray(_TINY_AIPE, dtype=dtype)
@@ -168,110 +176,178 @@ def aipe(
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
     lam_tol = jnp.asarray(_REG_MIN_AIPE, dtype=dtype)
 
+    _has_warm = warm_init is not None
+
     # ── initial proximal oracle call (before loop) ────────────────
-    z_tilde_0, u_0 = prox_oracle(z0)
+    if _has_warm:
+        z_tilde_0, u_0, warm_0 = prox_oracle(z0, warm_init)
+    else:
+        result = prox_oracle(z0)
+        z_tilde_0, u_0 = result[0], result[1]
+        warm_0 = jnp.zeros((), dtype=dtype)
     lam_0 = gamma * jnp.linalg.norm(z_tilde_0 - z0)
-    # Floor at REG_MIN (not TINY) to prevent a' = 1/(2λ') blow-up
-    # when z̃₀ ≈ z₀ (already near fixed point).  With TINY=1e-6 the
-    # quadratic root a' ≈ 500k, which amplifies FP32 residuals in the
-    # v-update; REG_MIN=1e-5 keeps a' ≈ 50k (10× safer).
     lam_prime_init = jnp.maximum(lam_0, lam_tol)
 
-    # ── main loop via jax.lax.scan ────────────────────────────────
     init = AIPEState(
         z=z0, v=z0,
         A=jnp.zeros((), dtype=dtype),
         lam_prime=lam_prime_init,
     )
 
-    def step(carry: AIPEState, t):
-        s = carry
+    if _has_warm:
+        def step(carry, t):
+            s, warm = carry
 
-        # Guard: when lam_prime has collapsed below the floor, the
-        # algorithm has converged to numerical precision.  Skip the
-        # step to prevent a' from growing without bound and amplifying
-        # floating-point noise in the v-update.  Without this guard,
-        # lam_prime halves each accepted step (λ'/2), driving a' up as
-        # 1/(2λ') until the iterate diverges.
-        is_converged = s.lam_prime < lam_tol
+            is_converged = s.lam_prime < lam_tol
 
-        def _do_step(_):
-            # line 5 — solve  2λ'(a')² − a' − A = 0  (positive root)
-            disc = one + 8.0 * s.lam_prime * s.A
-            denom = jnp.maximum(4.0 * s.lam_prime, tiny)
-            a_prime = (one + jnp.sqrt(jnp.maximum(disc, 0.0))) / denom
-            # Clamp a' to prevent overflow in downstream arithmetic
-            a_prime = jnp.minimum(a_prime, max_a)
-            A_prime = s.A + a_prime
+            def _do_step(_):
+                disc = one + 8.0 * s.lam_prime * s.A
+                denom = jnp.maximum(4.0 * s.lam_prime, tiny)
+                a_prime = (one + jnp.sqrt(jnp.maximum(disc, 0.0))) / denom
+                a_prime = jnp.minimum(a_prime, max_a)
+                A_prime = s.A + a_prime
 
-            # line 7 — extrapolation point  z̄_t
-            w_A = s.A / jnp.maximum(A_prime, tiny)
-            w_a = a_prime / jnp.maximum(A_prime, tiny)
-            z_bar = w_A * s.z + w_a * s.v
+                w_A = s.A / jnp.maximum(A_prime, tiny)
+                w_a = a_prime / jnp.maximum(A_prime, tiny)
+                z_bar = w_A * s.z + w_a * s.v
 
-            # Lines 8-10: reuse the initial prox call at t=0.
-            def initial_prox(_):
-                return z_tilde_0, u_0
+                def initial_prox(_):
+                    return z_tilde_0, u_0, warm_0
 
-            def loop_prox(_):
-                return prox_oracle(z_bar)
+                def loop_prox(_):
+                    return prox_oracle(z_bar, warm)
 
-            z_tilde, u = jax.lax.cond(t == 0, initial_prox, loop_prox, operand=None)
-            lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
+                z_tilde, u, warm_new = jax.lax.cond(
+                    t == 0, initial_prox, loop_prox, operand=None,
+                )
+                lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
+                accept = lam <= s.lam_prime
 
-            # lines 12-21 — conditional update (accept / reject)
-            accept = lam <= s.lam_prime
+                def accept_fn(_):
+                    return (
+                        A_prime,
+                        z_tilde,
+                        s.lam_prime / 2.0,
+                        a_prime,
+                    )
 
-            def accept_fn(_):
-                return (
-                    A_prime,                # A_new = A + a'
-                    z_tilde,                # z_new = z̃_{t+1}
-                    s.lam_prime / 2.0,      # λ'_{t+1} = λ'_t / 2
-                    a_prime,                # a_{t+1}
+                def reject_fn(_):
+                    gamma_t = s.lam_prime / jnp.maximum(lam, tiny)
+                    a_r = gamma_t * a_prime
+                    A_r = s.A + a_r
+                    z_r = (
+                        (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
+                        + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
+                    )
+                    return (
+                        A_r,
+                        z_r,
+                        2.0 * s.lam_prime,
+                        a_r,
+                    )
+
+                A_new, z_new, lam_prime_new, a_step = jax.lax.cond(
+                    accept, accept_fn, reject_fn, operand=None,
                 )
 
-            def reject_fn(_):
-                gamma_t = s.lam_prime / jnp.maximum(lam, tiny)
-                a_r = gamma_t * a_prime
-                A_r = s.A + a_r
-                z_r = (
-                    (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
-                    + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
+                g = grad_fn(z_tilde)
+                v_new = s.v - a_step * (g + u)
+                if project is not None:
+                    v_new = project(v_new)
+
+                new_state = AIPEState(
+                    z=z_new, v=v_new, A=A_new, lam_prime=lam_prime_new,
                 )
-                return (
-                    A_r,
-                    z_r,
-                    2.0 * s.lam_prime,      # λ'_{t+1} = 2·λ'_t
-                    a_r,                    # a_{t+1}
+                return (new_state, warm_new), (z_tilde, z_new)
+
+            def _noop(_):
+                return (s, warm), (s.z, s.z)
+
+            return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
+
+        scan_init = (init, warm_0)
+        (final_state, warm_final), (all_z_tilde, all_z) = jax.lax.scan(
+            step, scan_init, jnp.arange(T, dtype=jnp.int32),
+        )
+    else:
+        def step(carry: AIPEState, t):
+            s = carry
+
+            is_converged = s.lam_prime < lam_tol
+
+            def _do_step(_):
+                disc = one + 8.0 * s.lam_prime * s.A
+                denom = jnp.maximum(4.0 * s.lam_prime, tiny)
+                a_prime = (one + jnp.sqrt(jnp.maximum(disc, 0.0))) / denom
+                a_prime = jnp.minimum(a_prime, max_a)
+                A_prime = s.A + a_prime
+
+                w_A = s.A / jnp.maximum(A_prime, tiny)
+                w_a = a_prime / jnp.maximum(A_prime, tiny)
+                z_bar = w_A * s.z + w_a * s.v
+
+                def initial_prox(_):
+                    return z_tilde_0, u_0
+
+                def loop_prox(_):
+                    result = prox_oracle(z_bar)
+                    return result[0], result[1]
+
+                z_tilde, u = jax.lax.cond(
+                    t == 0, initial_prox, loop_prox, operand=None,
+                )
+                lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
+                accept = lam <= s.lam_prime
+
+                def accept_fn(_):
+                    return (
+                        A_prime,
+                        z_tilde,
+                        s.lam_prime / 2.0,
+                        a_prime,
+                    )
+
+                def reject_fn(_):
+                    gamma_t = s.lam_prime / jnp.maximum(lam, tiny)
+                    a_r = gamma_t * a_prime
+                    A_r = s.A + a_r
+                    z_r = (
+                        (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
+                        + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
+                    )
+                    return (
+                        A_r,
+                        z_r,
+                        2.0 * s.lam_prime,
+                        a_r,
+                    )
+
+                A_new, z_new, lam_prime_new, a_step = jax.lax.cond(
+                    accept, accept_fn, reject_fn, operand=None,
                 )
 
-            A_new, z_new, lam_prime_new, a_step = jax.lax.cond(
-                accept, accept_fn, reject_fn, operand=None,
-            )
+                g = grad_fn(z_tilde)
+                v_new = s.v - a_step * (g + u)
+                if project is not None:
+                    v_new = project(v_new)
 
-            # Lines 22-23: v-update with the accepted/scaled a_{t+1}.
-            g = grad_fn(z_tilde)
-            v_new = s.v - a_step * (g + u)
-            if project is not None:
-                v_new = project(v_new)
+                new_state = AIPEState(
+                    z=z_new, v=v_new, A=A_new, lam_prime=lam_prime_new,
+                )
+                return new_state, (z_tilde, z_new)
 
-            new_state = AIPEState(
-                z=z_new, v=v_new, A=A_new, lam_prime=lam_prime_new,
-            )
-            return new_state, (z_tilde, z_new)
+            def _noop(_):
+                return s, (s.z, s.z)
 
-        def _noop(_):
-            return s, (s.z, s.z)
+            return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
 
-        return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
-
-    final_state, (all_z_tilde, all_z) = jax.lax.scan(
-        step, init, jnp.arange(T, dtype=jnp.int32)
-    )
+        final_state, (all_z_tilde, all_z) = jax.lax.scan(
+            step, init, jnp.arange(T, dtype=jnp.int32),
+        )
+        warm_final = warm_0
 
     # ── line 25 — output selection ────────────────────────────────
     if fn is not None:
-        # candidates: z0, z̃₁ … z̃_T, z₁ … z_T   (2T + 1 total)
         candidates = jnp.concatenate(
             [jnp.expand_dims(z0, 0), all_z_tilde, all_z], axis=0,
         )
@@ -280,7 +356,7 @@ def aipe(
     else:
         z_out = final_state.z
 
-    return z_out, T
+    return z_out, T, warm_final
 
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
 
@@ -321,7 +397,7 @@ def aipe_restart(
     total_calls = 0
 
     for _ in range(S):
-        z, calls = aipe(
+        z, calls, _ = aipe(
             prox_oracle, grad_fn, z, T, gamma,
             project=project, fn=fn,
         )

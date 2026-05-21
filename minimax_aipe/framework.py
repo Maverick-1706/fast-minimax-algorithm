@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Block Schur-complement linear solve  [BUG 9]
+# Block Schur-complement linear solve  
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _schur_solve(
@@ -112,17 +112,94 @@ class _CallCounter:
     total: int = 0
 
 
-@dataclass
-class _WarmStart:
-    """Mutable warm-start state updated via ``jax.debug.callback``.
+# ═════════════════════════════════════════════════════════════════════════════
+# JIT-stable pipeline cache
+# ═════════════════════════════════════════════════════════════════════════════
 
-    Holds the last concrete output array from an inner solver so the
-    *next* call can use it as an initial point rather than starting from
-    zeros.  Safe to read/write from Python; the actual update is always
-    issued through ``jax.debug.callback`` so it fires with concrete
-    values even when the surrounding code is being traced.
+class _CachedPipeline:
+    """Provides stable Python identities for closures passed to ``@jax.jit``.
+
+    ``aipe()`` and ``npe()`` mark their callable arguments as
+    ``static_argnums``.  JAX caches JIT compilations by the *identity*
+    of each static arg.  When ``solve()`` is called in a tight loop
+    (e.g. benchmark timing), creating fresh closures every time forces a
+    full re-compilation on every call.
+
+    ``_CachedPipeline`` sidesteps this by building the kernel, Φ-oracles,
+    and the outer proximal-oracle **once** and exposing them as *bound
+    methods* whose identity is fixed for the lifetime of the instance.
+    Mutable bookkeeping (call counter) is swapped out via :meth:`reset`
+    before each ``solve()`` invocation.
+
+    Warm-start state is threaded through loop carries rather than via
+    ``jax.debug.callback`` side-effects, ensuring correct dataflow
+    inside JIT-traced loops.
     """
-    value: Optional[Array] = None
+
+    def __init__(self, problem, gamma, params, M_saddle):
+        self.problem = problem
+        self.gamma = gamma
+        self.params = params
+        self.M_saddle = M_saddle
+        self.kernel = RegularizedSubproblem(problem, gamma)
+        self.phi_fn, self.grad_phi_fn = _make_phi_oracle(
+            problem, gamma, params,
+            M_saddle=M_saddle, m_lazy=params.m_lazy,
+        )
+        self._counter = _CallCounter()
+
+    def reset(self) -> _CallCounter:
+        """Reset mutable state **in-place** so JIT-captured refs stay valid."""
+        self._counter.total = 0
+        return self._counter
+
+    # -- bound methods (stable Python identity) -------------------------
+
+    def prox_phi(self, x_bar: Array, y_init: Optional[Array] = None
+                 ) -> tuple[Array, Array, Array]:
+        """Stable-identity proximal oracle for Φ (Algorithm 4).
+
+        Returns ``(x_out, u_out, y_hat)`` where *y_hat* is the recovered
+        dual variable usable as warm-start for the next call.
+        """
+        x_out, u_out, y_hat = _iProx_Phi(
+            self.problem, x_bar, self.gamma,
+            zeta_2=self.params.zeta_2,
+            params=self.params,
+            M_saddle=self.M_saddle,
+            counter=self._counter,
+            y_init=y_init,
+            kernel=self.kernel,
+        )
+        return x_out, u_out, y_hat
+
+    def run_outer_epoch(self, x_cur: Array, warm_y: Optional[Array] = None
+                        ) -> tuple[Array, int, Array]:
+        """Stable-identity epoch function for the outer AIPE loop.
+
+        Returns ``(x_out, calls, warm_y_new)`` for warm-start threading.
+        """
+        x_out, calls, warm_y_new = aipe(
+            self.prox_phi, self.grad_phi_fn, x_cur,
+            self.params.T_outer, self.gamma,
+            project=self.problem.project_x, fn=self.phi_fn,
+            warm_init=warm_y,
+        )
+        return x_out, calls, warm_y_new
+
+
+# Module-level cache keyed by (problem id, gamma, M_saddle, loop params).
+_pipeline_cache: dict[tuple, _CachedPipeline] = {}
+
+
+def _get_pipeline(problem, gamma, params, M_saddle):
+    """Retrieve or create a cached :class:`_CachedPipeline`."""
+    cache_key = (id(problem), gamma, M_saddle, params)
+    cached = _pipeline_cache.get(cache_key)
+    if cached is None:
+        cached = _CachedPipeline(problem, gamma, params, M_saddle)
+        _pipeline_cache[cache_key] = cached
+    return cached
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -208,7 +285,7 @@ class RegularizedSubproblem:
         self.D_x = problem.D_x
         self.D_y = problem.D_y
         diameter = max(problem.D_x, problem.D_y, 1.0)
-        # [BUG 1] Hessian Lipschitz of (γ/3)||·||³ is 2γ (Lemma 3.3),
+        #  Hessian Lipschitz of (γ/3)||·||³ is 2γ (Lemma 3.3),
         #          so ρ_h = ρ + 2γ.  Theorem 5.3 confirms inner loop uses
         #          T_saddle(ρ+2γ, γ/2).
         self.rho_h = (problem.rho or 0.0) + 2 * gamma
@@ -337,8 +414,8 @@ class RegularizedSubproblem:
     ) -> Callable[[Array], tuple[Array, Array]]:
         """Return a CRN NPE oracle bound to fixed ``(x_bar, y_bar)``.
 
-        Uses block Schur-complement solves [BUG 9] and initialises λ at
-        ``npe_gamma / 2`` [BUG 5] for immediate regularisation on the
+        Uses block Schur-complement solves  and initialises λ at
+        ``npe_gamma / 2``  for immediate regularisation on the
         first iteration, consistent with the standalone ``crn_oracle``
         in ``oracles.py``.
         """
@@ -369,7 +446,7 @@ class RegularizedSubproblem:
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 tol_jax = jnp.asarray(tol, dtype=dtype)
-                # [BUG 5] Start λ at npe_gamma/2 for immediate regularization
+                #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
                 def cond(state):
@@ -380,7 +457,7 @@ class RegularizedSubproblem:
                 def body(state):
                     lam, _z, i, _prev = state
                     alpha = lam + tiny
-                    # [BUG 9] Block Schur-complement solve
+                    #  Block Schur-complement solve
                     delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
@@ -414,13 +491,13 @@ class RegularizedSubproblem:
                 
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
-                # [BUG 5] Start λ at npe_gamma/2 for immediate regularization
+                #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
                 def body(i, state):
                     lam, z = state
                     alpha = lam + tiny
-                    # [BUG 9] Block Schur-complement solve
+                    #  Block Schur-complement solve
                     delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
@@ -468,9 +545,9 @@ def _make_g_problem(
         f=f_g, grad_f=grad_g, hessian_f=hess_g,
         dim_x=problem.dim_x, dim_y=problem.dim_y,
         D_x=problem.D_x, D_y=problem.D_y,
-        # [BUG 1] ρ_g = ρ + 2γ (Hessian Lipschitz of cubic is 2γ)
+        #  ρ_g = ρ + 2γ (Hessian Lipschitz of cubic is 2γ)
         rho=(problem.rho or 0.0) + 2 * gamma,
-        # [BUG 2] ℓ_g = ℓ + 2γ·D_x (gradient Lipschitz of cubic is 2γD)
+        #  ℓ_g = ℓ + 2γ·D_x (gradient Lipschitz of cubic is 2γD)
         ell=(problem.ell or 0.0) + 2 * gamma * max(problem.D_x, 1.0),
         L=problem.L,
         project_x=problem.project_x, project_y=problem.project_y,
@@ -514,9 +591,9 @@ def _make_h_problem(
         f=f_h, grad_f=grad_h, hessian_f=hess_h,
         dim_x=problem.dim_x, dim_y=problem.dim_y,
         D_x=problem.D_x, D_y=problem.D_y,
-        # [BUG 1] ρ_h = ρ + 2γ
+        #  ρ_h = ρ + 2γ
         rho=(problem.rho or 0.0) + 2 * gamma,
-        # [BUG 2] ℓ_h = ℓ + 2γ·D
+        #  ℓ_h = ℓ + 2γ·D
         ell=(problem.ell or 0.0) + 2 * gamma * diameter,
         L=problem.L,
         project_x=problem.project_x, project_y=problem.project_y,
@@ -590,7 +667,8 @@ def _restart_jax(
     S: int,
     *,
     step_tol: float = 0.0,
-) -> tuple[Array, int]:
+    warm: Optional[Array] = None,
+) -> tuple[Array, int, Optional[Array]]:
     """JAX-compatible restart with early stopping via ``jax.lax.while_loop``.
 
     Unlike :func:`_restart_with_early_stop` (which uses Python-level
@@ -601,48 +679,68 @@ def _restart_jax(
     Parameters
     ----------
     epoch_fn : callable
-        ``z → (z_new, calls)`` where *calls* is a Python int (discarded
-        internally; only the iterate is used for convergence checking).
+        ``(z, warm) → (z_new, calls, warm_new)``.  *calls* is discarded
+        internally; only the iterate and warm state are used.
     z0 : Array
     S : int
         Maximum number of epochs.
     step_tol : float
         Stop when ``‖z_new − z_old‖² < step_tol²``.  0 disables early
         stopping (the loop runs all *S* epochs).
+    warm : Array or None
+        Optional warm-start state threaded through the while_loop carry.
 
     Returns
     -------
     z_out : Array
-    total_calls : int or jnp.int32
-        ``actual_epochs * T_per_epoch``.  A Python int when called
-        outside a trace; a JAX int32 scalar when called inside one.
+    epochs : int or jnp.int32
+        Number of epochs actually executed (≤ S).
+    warm_out : Array or None
+        Final warm state (same type as *warm*).
     """
     dtype = z0.dtype
-    # [BUG 7] Use float64 for tol_sq to avoid underflow in FP32.
-    # Typical ζ₁ ≈ 5e-6 gives ζ₁² ≈ 2.5e-11, below FP32 ε_machine.
     tol_sq = jnp.asarray(
-        step_tol ** 2 if step_tol > 0 else -1.0, dtype=jnp.float64
+        step_tol ** 2 if step_tol > 0 else -1.0, dtype=dtype
     )
     S_jax = jnp.int32(S)
+    tol_sq_cast = tol_sq.astype(dtype)
 
-    def cond(carry):
-        _z, prev_z, epoch = carry
-        not_done = epoch < S_jax
-        # [BUG 7] Compute step_sq in float64 to match tol_sq precision
-        diff = (_z - prev_z).astype(jnp.float64)
-        step_sq = jnp.dot(diff, diff)
-        step_big = step_sq > tol_sq
-        return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
+    if warm is not None:
+        def cond(carry):
+            _z, prev_z, _w, epoch = carry
+            not_done = epoch < S_jax
+            diff = (_z - prev_z).astype(dtype)
+            step_sq = jnp.dot(diff, diff)
+            step_big = step_sq > tol_sq_cast
+            return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
 
-    def body(carry):
-        z, _prev_z, epoch = carry
-        z_new, _calls = epoch_fn(z)
-        return (z_new, z, epoch + 1)
+        def body(carry):
+            z, _prev_z, w, epoch = carry
+            z_new, _calls, w_new = epoch_fn(z, w)
+            return (z_new, z, w_new, epoch + 1)
 
-    z_final, _, epochs = jax.lax.while_loop(
-        cond, body, (z0, z0, jnp.int32(0)),
-    )
-    return z_final, epochs
+        z_final, _, warm_out, epochs = jax.lax.while_loop(
+            cond, body, (z0, z0, warm, jnp.int32(0)),
+        )
+        return z_final, epochs, warm_out
+    else:
+        def cond(carry):
+            _z, prev_z, epoch = carry
+            not_done = epoch < S_jax
+            diff = (_z - prev_z).astype(dtype)
+            step_sq = jnp.dot(diff, diff)
+            step_big = step_sq > tol_sq_cast
+            return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
+
+        def body(carry):
+            z, _prev_z, epoch = carry
+            z_new, _calls, _ = epoch_fn(z, None)
+            return (z_new, z, epoch + 1)
+
+        z_final, _, epochs = jax.lax.while_loop(
+            cond, body, (z0, z0, jnp.int32(0)),
+        )
+        return z_final, epochs, None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -659,9 +757,8 @@ def _iProx_Phi(
     M_saddle: str = "npe",
     counter: Optional[_CallCounter] = None,
     y_init: Optional[Array] = None,
-    outer_warm_y: Optional["_WarmStart"] = None,
     kernel: Optional[RegularizedSubproblem] = None,
-) -> tuple[Array, Array]:
+) -> tuple[Array, Array, Array]:
     """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``.
 
     Solves the equivalent regularised saddle subproblem
@@ -677,94 +774,73 @@ def _iProx_Phi(
 
     When *y_init* is provided the middle AIPE loop is seeded from that
     point instead of zeros, warm-starting from the previous outer iterate.
-    When *outer_warm_y* is provided the final ``y_hat`` is written back
-    to it so the caller can warm-start the next invocation.
 
-    When *kernel* is supplied (built once by the caller), the inner h-subproblem
-    reuses the kernel's parametric methods instead of constructing a new
-    ``RegularizedSubproblem`` per call, avoiding JIT recompilation.
+    When *kernel* is supplied (built once by the caller), the inner
+    h-subproblem reuses the kernel's parametric methods instead of
+    constructing a new ``RegularizedSubproblem`` per call, avoiding JIT
+    recompilation.
 
-    Returns ``(x_out, u_out)`` with ``u_out ∈ ∂Φ(x_out)``.
+    Returns ``(x_out, u_out, y_hat)`` with ``u_out ∈ ∂Φ(x_out)`` and
+    *y_hat* usable as warm-start for the next call.
     """
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
 
     g_problem = _make_g_problem(problem, x_bar, gamma)
 
-    # Build the kernel once if not supplied (backward-compatible path).
     if kernel is None:
         kernel = RegularizedSubproblem(problem, gamma)
 
-    # Derive inner tolerance: one order tighter than zeta_2, but at
-    # least as tight as the pre-computed zeta_3.
     inner_zeta_3 = min(params.zeta_3, zeta_2 * 0.1)
 
-    # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ────────────────
     neg_psi_fn, grad_neg_psi_fn = _make_psi_oracle(
         problem, x_bar, gamma, params,
         M_saddle=M_saddle, m_lazy=params.m_lazy,
     )
 
-    # ── Per-call warm-start cell for the inner NPE z0 ────────────────
-    # Updated via jax.debug.callback after each _iProx_Psi so the next
-    # _prox_psi call starts from the previous saddle solution.
-    inner_warm = _WarmStart()
-    # Caches the x_out from the last inner call — avoids re-running
-    # _minimize_x_auto after the middle AIPE completes.
-    x_hat_warm = _WarmStart()
-
-    # ── Proximal oracle for -Ψ (delegates to Algorithm 5) ────────────
-    def _prox_psi(y_bar: Array) -> tuple[Array, Array]:
-        return _iProx_Psi(
+    def _prox_psi(y_bar: Array, warm_z: Optional[Array] = None
+                  ) -> tuple[Array, Array, Array]:
+        y_out, v_out, z_hat = _iProx_Psi(
             problem, x_bar, y_bar, gamma,
             zeta_3=inner_zeta_3,
             params=params,
             M_saddle=M_saddle,
             counter=counter,
             kernel=kernel,
-            z_init=inner_warm.value,
-            _z_hat_cell=inner_warm,
-            _x_hat_cell=x_hat_warm,
+            z_init=warm_z,
         )
+        return y_out, v_out, z_hat
 
-    # ── Middle AIPE with restart + early stopping ────────────────────
     if y_init is not None:
         y0 = problem.project_y(y_init)
     else:
         y0 = problem.project_y(jnp.zeros(problem.dim_y))
 
-    def _run_middle_epoch(y_cur: Array) -> tuple[Array, int]:
+    def _run_middle_epoch(y_cur: Array, warm_z: Optional[Array] = None
+                          ) -> tuple[Array, int, Array]:
         return aipe(
             _prox_psi, grad_neg_psi_fn, y_cur,
             params.T_middle, gamma,
             project=problem.project_y, fn=neg_psi_fn,
+            warm_init=warm_z,
         )
 
-    y_hat, _middle_calls = _restart_jax(
+    y_hat, _, _z_hat_out = _restart_jax(
         _run_middle_epoch, y0, params.S_middle,
         step_tol=params.zeta_2,
     )
 
-    # [BUG 8] Use _minimize_x_auto (M_min) instead of plain GD for
-    # x-recovery, matching Algorithm 4 step 2.
-    x_hat: Array
-    if x_hat_warm.value is not None:
-        x_hat = problem.project_x(x_hat_warm.value)
-    else:
-        x_hat = _minimize_x_auto(
-            g_problem, y_hat,
-            steps=max(20, params.T_inner * params.S_inner),
-            M_saddle=M_saddle,
-            gamma=gamma,
-            m_lazy=params.m_lazy,
-        )
+    x_hat = _minimize_x_auto(
+        g_problem, y_hat,
+        steps=max(20, params.T_inner * params.S_inner),
+        M_saddle=M_saddle,
+        gamma=gamma,
+        m_lazy=params.m_lazy,
+    )
 
     ell_g = max(_ell(g_problem), _ABS_TOL)
-    # [BUG 4] EG on a monotone VI only requires η < 1/ℓ (Lemma 3.1).
-    # The 2ρD term is unnecessary and overly conservative.
     eta_g = 1.0 / (2.0 * max(ell_g, _ABS_TOL))
     
-    # ALGORITHMIC FIX: Perform x-only EG step matching Algorithm 4 step 3
     gx_hat, _ = g_problem.grad_f(x_hat, y_hat)
     x_half = g_problem.project_x(x_hat - eta_g * gx_hat)
     
@@ -772,11 +848,7 @@ def _iProx_Phi(
     x_out = g_problem.project_x(x_hat - eta_g * gx_half)
     u_out = (x_hat - x_out) / eta_g - gx_half
     
-    if outer_warm_y is not None:
-        jax.debug.callback(
-            lambda v: setattr(outer_warm_y, 'value', v), y_hat
-        )
-    return x_out, u_out
+    return x_out, u_out, y_hat
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -795,9 +867,7 @@ def _iProx_Psi(
     counter: Optional[_CallCounter] = None,
     kernel: Optional[RegularizedSubproblem] = None,
     z_init: Optional[Array] = None,
-    _z_hat_cell: Optional["_WarmStart"] = None,
-    _x_hat_cell: Optional["_WarmStart"] = None,
-) -> tuple[Array, Array]:
+) -> tuple[Array, Array, Array]:
     """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``.
 
     Solves the regularised saddle subproblem
@@ -814,11 +884,10 @@ def _iProx_Psi(
     avoiding JIT recompilation on every call.
 
     When *z_init* is provided the NPE restart begins from that point
-    (warm-starting from the previous call's solution).  When *_z_hat_cell*
-    is provided the final ``z_hat`` is written back to it via
-    ``jax.debug.callback`` so the caller can warm-start the next invocation.
+    (warm-starting from the previous call's solution).
 
-    Returns ``(y_out, v_out)`` with ``v_out ∈ ∂(-Ψ)(y_out)``.
+    Returns ``(y_out, v_out, z_hat)`` with ``v_out ∈ ∂(-Ψ)(y_out)``
+    and *z_hat* usable as warm-start for the next call.
     """
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
@@ -831,7 +900,7 @@ def _iProx_Psi(
     npe_gamma = 2.0 * sub_rho
     D = max(_diam(kernel.D_x), _diam(kernel.D_y), _ABS_TOL)
 
-    # [BUG 3] Use pre-computed T_inner from _compute_loop_params which now
+    # Use pre-computed T_inner from _compute_loop_params which now
     # uses the correct NPE exponent 2/3 (Theorem E.1) instead of the
     # AIPE exponent 4/7 (Theorem 4.1).
     inner_T = params.T_inner
@@ -878,7 +947,7 @@ def _iProx_Psi(
             max_eta = jnp.asarray(1e12, dtype=dtype)
             two_gamma = jnp.asarray(2.0 * npe_gamma, dtype=dtype)
             m_jax = jnp.int32(params.m_lazy)
-            # [BUG 11] Pre-compute norm bound for safety guards
+            # Pre-compute norm bound for safety guards
             max_norm_arr = jnp.asarray(100.0 * max(D, 1.0), dtype=dtype)
 
             def jac_at(z_snapshot: Array) -> Array:
@@ -892,7 +961,7 @@ def _iProx_Psi(
                 dtype_local = z_bar.dtype
                 tiny_local = jnp.asarray(_TINY, dtype=dtype_local)
                 tol_jax = jnp.asarray(zeta_3, dtype=dtype_local)
-                # [BUG 5] Start λ at npe_gamma/2 for immediate regularization
+                # Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype_local)
                 dim_x_local = kernel.dim_x
                 
@@ -912,7 +981,7 @@ def _iProx_Psi(
                 def body(state):
                     lam, _z, i, _prev = state
                     alpha = lam + tiny_local
-                    # [BUG 9] Block Schur-complement solve
+                    #  Block Schur-complement solve
                     delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = proj(z_bar + delta)
                     d_eff = z_new - z_bar
@@ -957,7 +1026,7 @@ def _iProx_Psi(
                     eta = jnp.minimum(1.0 / (two_gamma * dist), max_eta)
                     z_new = proj(z_cur - eta * _F_h(z_half))
 
-                    # [BUG 11] Safety guards: reject NaN / norm-explosion steps
+                    #  Safety guards: reject NaN / norm-explosion steps
                     finite = jnp.all(jnp.isfinite(z_new))
                     not_exploded = jnp.linalg.norm(z_new) < max_norm_arr
                     step_ok = jnp.logical_and(finite, not_exploded)
@@ -1023,7 +1092,7 @@ def _iProx_Psi(
                 eta = jnp.minimum(1.0 / (two_gamma * dist), max_eta)
                 z_new = proj(z_cur - eta * _F_h(z_half))
 
-                # [BUG 11] Safety guards: reject NaN / norm-explosion steps
+                #  Safety guards: reject NaN / norm-explosion steps
                 finite = jnp.all(jnp.isfinite(z_new))
                 not_exploded = jnp.linalg.norm(z_new) < max_norm_arr
                 step_ok = jnp.logical_and(finite, not_exploded)
@@ -1055,15 +1124,17 @@ def _iProx_Psi(
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
-    z_hat, epochs = _restart_jax(
-        _run_inner, z0, params.S_inner,
+    def _run_inner_warm(z: Array, _warm) -> tuple[Array, int, None]:
+        z_new, inner_calls = _run_inner(z)
+        return z_new, inner_calls, None
+
+    z_hat, epochs, _ = _restart_jax(
+        _run_inner_warm, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
     )
     calls = epochs * inner_T
 
     # ── EG refinement ────────────────────────────────────────────────
-    # [BUG 4] EG on a monotone VI only requires η < 1/ℓ_h (Lemma 3.1).
-    # The 2ρ_h·D term was unnecessary and slowed convergence 1.5x–3x.
     ell_h = max(kernel.ell_h, _ABS_TOL)
     eta = 1.0 / (2.0 * max(ell_h, _ABS_TOL))
 
@@ -1076,23 +1147,13 @@ def _iProx_Psi(
     _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
     v_out = c_out[kernel.dim_x :]
 
-    if _z_hat_cell is not None:
-        jax.debug.callback(
-            lambda v: setattr(_z_hat_cell, 'value', v), z_hat
-        )
-
-    if _x_hat_cell is not None:
-        jax.debug.callback(
-            lambda v: setattr(_x_hat_cell, 'value', v), z_out[: kernel.dim_x]
-        )
-
     if counter is not None:
         jax.debug.callback(
             lambda c: setattr(counter, 'total', counter.total + int(c)),
             calls + 1
         )
 
-    return y_out, v_out
+    return y_out, v_out, z_hat
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1105,7 +1166,7 @@ def solve(
     *,
     gamma: float | None = None,
     M_saddle: str = "npe",
-    m_lazy: int = -1,  # [BUG 10] -1 = auto-adapt (was 5, silently overriding users)
+    m_lazy: int = -1,  #  -1 = auto-adapt (was 5, silently overriding users)
     npe_T_factor: float = 1.0,
     z0: Optional[Array] = None,
     verbose: bool = False,
@@ -1159,7 +1220,7 @@ def solve(
         x0, y0 = _split(problem, z0_arr)
         z0_start = jnp.concatenate([problem.project_x(x0), problem.project_y(y0)])
 
-    z_hat, calls = _algorithm_3(
+    z_hat, calls, outer_epochs = _algorithm_3(
         problem, gamma, mu_x, mu_y, params.zeta_1,
         params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
     )
@@ -1205,8 +1266,9 @@ def solve(
     inner_linear = inner_crn * secular_n
     inner_proj = inner_crn * (secular_n + 1) + 2
 
-    outer_grad = params.S_outer * params.T_outer
-    middle_grad = params.S_outer * params.T_outer * params.S_middle * params.T_middle
+    actual_outer = max(1, int(outer_epochs))
+    outer_grad = actual_outer * params.T_outer
+    middle_grad = actual_outer * params.T_outer * params.S_middle * params.T_middle
     final_eg_grad = 2
     final_eg_proj = 2
 
@@ -1224,7 +1286,7 @@ def solve(
         x=x_out,
         y=y_out,
         gap=gap,
-        iterations=params.S_outer,
+        iterations=actual_outer,
         oracle_calls=calls + 1,
         oracle_stats=oracle_stats,
         converged=gap <= epsilon,
@@ -1247,7 +1309,7 @@ def _algorithm_3(
     M_saddle: str = "npe",
     z0: Optional[Array] = None,
     verbose: bool = False,
-) -> tuple[Array, int]:
+) -> tuple[Array, int, int]:
     """Algorithm 3: Full three-loop Minimax-AIPE reduction.
 
     **Outer loop** — AIPE with restart and early stopping minimises
@@ -1269,6 +1331,15 @@ def _algorithm_3(
         Strong-convexity regularisers from the theoretical reduction.
     zeta_1 : float
         Target accuracy for the outer AIPE loop.
+
+    Returns
+    -------
+    z_hat : Array
+        Approximate saddle point.
+    total_calls : int
+        Total CRN oracle calls.
+    outer_epochs : int
+        Actual number of outer epochs executed (≤ params.S_outer).
     """
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
@@ -1276,45 +1347,16 @@ def _algorithm_3(
         z0 = _initial_z(problem)
 
     x0, _y0 = _split(problem, z0)
-    counter = _CallCounter()
 
-    # ── Build the kernel once for the entire solve ───────────────────
-    kernel = RegularizedSubproblem(problem, gamma)
-    logger.debug("Built kernel: %r", kernel)
+    # ── Reuse (or build) a JIT-stable pipeline ──────────────────────
+    pipeline = _get_pipeline(problem, gamma, params, M_saddle)
+    counter = pipeline.reset()
 
-    # ── Build the Φ oracle ───────────────────────────────────────────
-    phi_fn, grad_phi_fn = _make_phi_oracle(
-        problem, gamma, params,
-        M_saddle=M_saddle, m_lazy=params.m_lazy,
-    )
-
-    # ── Proximal oracle for Φ (delegates to Algorithm 4) ─────────────
-    # warm_y holds the last y_hat from _iProx_Phi across outer restarts.
-    warm_y = _WarmStart()
-
-    def _prox_phi(x_bar: Array) -> tuple[Array, Array]:
-        x_out, u_out = _iProx_Phi(
-            problem, x_bar, gamma,
-            zeta_2=params.zeta_2,
-            params=params,
-            M_saddle=M_saddle,
-            counter=counter,
-            y_init=warm_y.value,
-            outer_warm_y=warm_y,
-            kernel=kernel,
-        )
-        return x_out, u_out
+    logger.debug("Pipeline kernel: %r", pipeline.kernel)
 
     # ── Outer AIPE with restart + early stopping ─────────────────────
-    def _run_outer_epoch(x_cur: Array) -> tuple[Array, int]:
-        return aipe(
-            _prox_phi, grad_phi_fn, x_cur,
-            params.T_outer, gamma,
-            project=problem.project_x, fn=phi_fn,
-        )
-
-    x_hat, outer_epochs = _restart_jax(
-        _run_outer_epoch, x0, params.S_outer,
+    x_hat, outer_epochs, _warm_y_out = _restart_jax(
+        pipeline.run_outer_epoch, x0, params.S_outer,
         step_tol=params.zeta_1,
     )
 
@@ -1326,8 +1368,8 @@ def _algorithm_3(
 
     total_calls = counter.total
 
-    grad_norm = float(jnp.linalg.norm(grad_phi_fn(x_hat)))
-    phi_val = float(phi_fn(x_hat))
+    grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)))
+    phi_val = float(pipeline.phi_fn(x_hat))
     logger.info(
         "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d  "
         "outer_epochs=%d/%d",
@@ -1336,7 +1378,7 @@ def _algorithm_3(
     )
 
     z_hat = jnp.concatenate([x_hat, y_hat])
-    return z_hat, total_calls
+    return z_hat, total_calls, int(outer_epochs)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1409,9 +1451,13 @@ def _make_psi_oracle(
             x_new = g_problem.project_x(x_cur - lr * gx)
             return x_new, 1
 
+        def _gd_step_warm(x_cur: Array, _warm) -> tuple[Array, int, None]:
+            x_new, calls = _gd_step(x_cur)
+            return x_new, calls, None
+
         x0 = g_problem.project_x(jnp.zeros(g_problem.dim_x, dtype=y.dtype))
-        x_out, _ = _restart_jax(
-            _gd_step, x0,
+        x_out, _, _ = _restart_jax(
+            _gd_step_warm, x0,
             max(20, params.T_inner * params.S_inner),
             step_tol=params.zeta_3,
         )
@@ -1461,7 +1507,7 @@ def _solve_saddle_subproblem(
     sub_rho = max(float(problem.rho or 0.0), _REG_MIN)
     npe_gamma = 2.0 * sub_rho
 
-    # [BUG 3] Correct NPE per-epoch complexity: T = O((γ_NPE/μ)^(2/3))
+    # Correct NPE per-epoch complexity: T = O((γ_NPE/μ)^(2/3))
     # where μ = γ/2 for the cubic-regularised h-subproblem.
     mu_inner = gamma / 2.0
     inner_T = max(1, min(200, int(ceil(
@@ -1493,8 +1539,12 @@ def _solve_saddle_subproblem(
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
-    z_hat, epochs = _restart_jax(
-        _run_inner, z0, params.S_inner,
+    def _run_inner_warm(z: Array, _warm) -> tuple[Array, int, None]:
+        z_new, calls = _run_inner(z)
+        return z_new, calls, None
+
+    z_hat, epochs, _ = _restart_jax(
+        _run_inner_warm, z0, params.S_inner,
         step_tol=max(tolerance * 0.01, _ABS_TOL),
     )
     # epochs is JAX int32 inside a trace, Python int outside.
@@ -1609,7 +1659,7 @@ def _compute_loop_params(
     epsilon: float,
     gamma: float,
     npe_T_factor: float = 0.5,
-    m_lazy: int = -1,  # [BUG 10] -1 = auto-adapt
+    m_lazy: int = -1,  # -1 = auto-adapt
 ) -> _LoopParams:
     """Compute iteration counts and accuracy parameters for all three loops.
 
@@ -1622,7 +1672,7 @@ def _compute_loop_params(
     """
     D = max(_diameter(problem), _ABS_TOL)
     ell = max(_ell(problem), _ABS_TOL)
-    rho = max(float(problem.rho or 0.0), gamma, _REG_MIN)
+    rho = float(problem.rho or 0.0)
 
     # ── Accuracy scheduling ──────────────────────────────────────────
     mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
@@ -1637,7 +1687,7 @@ def _compute_loop_params(
     zeta_3 = min(zeta_2 * 0.2, 1e-4)
 
     # ── Restart counts: epsilon-based with practical cap ──────────────
-    # [BUG 13] Increased cap from 4 to 12.  For D=1, ε=1e-6 the
+    # Increased cap from 4 to 12.  For D=1, ε=1e-6 the
     # theoretical requirement is log2(1e6) ≈ 20 epochs; with the
     # effective early stopping (Bug 7 fix) the solver will typically
     # converge well before the cap.
@@ -1667,8 +1717,8 @@ def _compute_loop_params(
     # The h-subproblem's strong-monotonicity constant μ_inner = γ/2 does NOT
     # depend on ε, so T_inner is an ε-independent constant determined by the
     # cubic regularisation ratio.
-    # [BUG 1] ρ_h = ρ + 2γ (was ρ + γ)
-    # [BUG 3] Exponent 2/3 for NPE (Theorem E.1), denominator μ = γ/2
+    #  ρ_h = ρ + 2γ (was ρ + γ)
+    #  Exponent 2/3 for NPE (Theorem E.1), denominator μ = γ/2
     rho_h = rho + 2 * gamma
     npe_gamma = 2.0 * rho_h
     mu_inner = gamma / 2.0
@@ -1677,7 +1727,7 @@ def _compute_loop_params(
     ))))
 
     # ── Adaptive m_lazy heuristic ─────────────────────────────────────
-    # [BUG 10] Only trigger adaptation for m_lazy <= 0 (auto mode).
+    # Only trigger adaptation for m_lazy <= 0 (auto mode).
     # The old condition `m_lazy == 5` silently overrode explicit user values.
     if m_lazy <= 0:
         dim_total = problem.dim_x + problem.dim_y
@@ -1759,7 +1809,6 @@ __all__ = [
     # Internal building blocks — exported for advanced usage
     "_CallCounter",
     "_LoopParams",
-    "_WarmStart",
     "_algorithm_3",
     "_compute_loop_params",
     "_cubic_grad",
