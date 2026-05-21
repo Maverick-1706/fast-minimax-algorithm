@@ -408,6 +408,13 @@ def main():
     # ── Export ──────────────────────────────────────────────────────
     if output_fmt:
         print()
+        # FIX: Ensure destination directory exists before exporting to prevent open() crashes
+        if output_path:
+            import os
+            output_dir = os.path.dirname(output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                
         export_results(export_data, output_fmt, output_path)
 
     print(_header("Done"))

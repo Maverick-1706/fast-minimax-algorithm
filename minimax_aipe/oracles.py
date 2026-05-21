@@ -8,7 +8,6 @@ Provides the building blocks called by the outer / middle / inner loops:
 """
 
 from __future__ import annotations
-from minimax_aipe import REG_MIN
 from typing import Callable, Optional
 
 import jax
@@ -16,7 +15,7 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsp_linalg
 from jax import Array
 
-from minimax_aipe._precision import TINY as _TINY
+from minimax_aipe._precision import REG_MIN, TINY as _TINY
 from minimax_aipe.problem import MinimaxProblem
 
 
@@ -210,18 +209,41 @@ def crn_oracle(
     eye_y = jnp.eye(problem.dim_y, dtype=dtype)
     tiny = jnp.asarray(_TINY, dtype=dtype)
 
-    def body(i, state):
-        lam, z = state
-        delta = _block_chol_solve(
-            g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
-        )
-        z_new = _project_z(problem, z_bar + delta)
-        d_eff = z_new - z_bar
-        lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-        return _stable_lam_update(lam, lam_candidate), z_new
-
     lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+
+    if tol > 0:
+        def cond(state):
+            lam, _z, i, prev_lam = state
+            change = jnp.abs(lam - prev_lam)
+            return (i < n_iters) & (change > jnp.maximum(tol * lam, tiny))
+
+        def body(state):
+            lam, _z, i, _prev = state
+            delta = _block_chol_solve(
+                g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
+            )
+            z_new = _project_z(problem, z_bar + delta)
+            d_eff = z_new - z_bar
+            lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
+            return (_stable_lam_update(lam, lam_candidate), z_new, i + 1, lam)
+
+        lam, z, _i, _p = jax.lax.while_loop(
+            cond, body,
+            (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
+        )
+    else:
+        def body(i, state):
+            lam, z = state
+            delta = _block_chol_solve(
+                g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny,
+            )
+            z_new = _project_z(problem, z_bar + delta)
+            d_eff = z_new - z_bar
+            lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
+            return _stable_lam_update(lam, lam_candidate), z_new
+
+        lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u
@@ -242,18 +264,41 @@ def crn_oracle_minimization(
     eye = jnp.eye(d, dtype=dtype)
     tiny = jnp.asarray(_TINY, dtype=dtype)
 
-    def body(i, state):
-        lam, z = state
-        delta = _safe_sym_chol_solve(H + lam * eye, -g, tiny)
-        z_new = z_bar + delta
-        if project is not None:
-            z_new = project(z_new)
-        d_eff = z_new - z_bar
-        lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-        return _stable_lam_update(lam, lam_candidate), z_new
-
     lam_init = jnp.maximum(gamma / 2.0, jnp.asarray(REG_MIN, dtype=dtype))
-    lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+
+    if tol > 0:
+        def cond(state):
+            lam, _z, i, prev_lam = state
+            change = jnp.abs(lam - prev_lam)
+            return (i < n_iters) & (change > jnp.maximum(tol * lam, tiny))
+
+        def body(state):
+            lam, _z, i, _prev = state
+            delta = _safe_sym_chol_solve(H + lam * eye, -g, tiny)
+            z_new = z_bar + delta
+            if project is not None:
+                z_new = project(z_new)
+            d_eff = z_new - z_bar
+            lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
+            return (_stable_lam_update(lam, lam_candidate), z_new, i + 1, lam)
+
+        lam, z, _i, _p = jax.lax.while_loop(
+            cond, body,
+            (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
+        )
+    else:
+        def body(i, state):
+            lam, z = state
+            delta = _safe_sym_chol_solve(H + lam * eye, -g, tiny)
+            z_new = z_bar + delta
+            if project is not None:
+                z_new = project(z_new)
+            d_eff = z_new - z_bar
+            lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
+            return _stable_lam_update(lam, lam_candidate), z_new
+
+        lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
     return z, u

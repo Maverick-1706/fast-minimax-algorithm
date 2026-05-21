@@ -1,4 +1,3 @@
-#export.py
 """Export utilities for benchmark results.
 
 Every run produces machine-readable output with full metadata (seed, dims, ε,
@@ -100,8 +99,10 @@ def collect_metadata(
 
 def write_metadata(meta: dict, path: str = "metadata.json") -> None:
     """Write metadata JSON to *path*."""
+    meta = _clean_jax_types(meta)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        json.dump(meta, f, indent=2, default=str)
+        json.dump(meta, f, indent=2, default=_default_json)
 
 
 # ── Flattening ────────────────────────────────────────────────────────────
@@ -176,6 +177,20 @@ def flatten_ablation_rows(rows: list[_BenchmarkResult]) -> list[dict]:
 # ── Writers ───────────────────────────────────────────────────────────────
 
 
+def _clean_jax_types(obj):
+    """Recursively convert JAX/NumPy arrays or device scalars into standard Python types."""
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _clean_jax_types(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean_jax_types(x) for x in obj]
+    return obj
+
+
 def _default_json(obj):
     if hasattr(obj, "item"):
         try:
@@ -187,6 +202,7 @@ def _default_json(obj):
 
 def write_json(data: dict, path: str | None) -> None:
     """Write JSON to file or stdout."""
+    data = _clean_jax_types(data)
     payload = json.dumps(data, indent=2, default=_default_json)
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -199,10 +215,15 @@ def write_json(data: dict, path: str | None) -> None:
 
 def write_csv(data: dict[str, list[dict]], path: str | None) -> None:
     """Write CSV to file or stdout.  Each section becomes a '# section_name' header."""
+    data = _clean_jax_types(data)
+    
     if path:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    buf = io.StringIO() if path is None else open(path, "w", newline="")
-    try:
+        ctx = open(path, "w", newline="")
+    else:
+        ctx = io.StringIO()
+
+    with ctx as buf:
         for section_name, rows in data.items():
             if not rows or section_name == "metadata":
                 continue
@@ -219,8 +240,6 @@ def write_csv(data: dict[str, list[dict]], path: str | None) -> None:
             print(f"  CSV written to {path}")
         else:
             print(buf.getvalue())
-    finally:
-        buf.close()
 
 
 def export_results(data: dict, fmt: str, path: str | None) -> None:

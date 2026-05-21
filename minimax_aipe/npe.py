@@ -139,7 +139,8 @@ def npe(
     fn : Callable or None
         Optional function-value oracle for output selection.
         When provided, the iterate with smallest ``fn`` value among
-        all ``z0``, ``z_half_1 … z_half_T``, ``z_1 … z_T`` is returned.
+        all ``z0``, ``z_half_1 … z_half_T``, ``z_1 … z_T``, and the
+        ``weighted_avg`` is returned.
 
     Returns
     -------
@@ -192,7 +193,7 @@ def npe(
 
     # ── output selection ──────────────────────────────────────────────
     if fn is not None:
-        # candidates: z0, z_half_1 … z_half_T, z_1 … z_T  (2T + 1 total)
+        # candidates: z0, z_half_1 … z_half_T, z_1 … z_T, weighted_avg  (2T + 2 total)
         weighted_avg = jnp.where(
             final_state.eta_sum > tiny,
             final_state.weighted_sum / final_state.eta_sum,

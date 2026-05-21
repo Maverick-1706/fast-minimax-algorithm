@@ -15,7 +15,7 @@ from minimax_aipe import solve
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_npe_restart_jit_benchmark
 from benchmarks.results import BenchmarkResult
-from benchmarks.oracles import count_eg_oracles, count_npe_oracles
+from benchmarks.oracles import count_npe_oracles, count_eg_oracles
 from minimax_aipe.problem import BenchmarkProblem
 
 
@@ -87,6 +87,7 @@ def sweep_epsilon(
         ))
 
         # JIT-EG (early stopping enabled via tol, scaled by dim/epsilon)
+        # Note: eg_res.gap populates the operator residual norm ||F(z)||, not a duality gap.
         eg_max_iters = min(200_000, max(5000, int(2000 * d / max(eps, 1e-6))))
         eg_res = run_eg_jit_benchmark(problem, epsilon=eps, max_iters=eg_max_iters, z0=prob.z0)
         eg_stats = count_eg_oracles(eg_res.iterations)
@@ -189,15 +190,16 @@ def sweep_epsilon_with_traces(
 def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     """Format convergence sweep results as a text table.
 
-    Columns show duality gap and FLOP-normalized cost (normalized_cost)
-    per solver.  ``gap_ok`` indicates whether gap <= ε (the success criterion).
+    Columns show duality gap for NPE/LEN variants, and the operator residual 
+    norm ||F(z)|| for EG along with FLOP-normalized cost (normalized_cost).  
+    ``ok`` indicates whether the termination threshold was met.
     """
     header = (
         f"{'Problem':<18} {'Dim':>4}  {'ε':>8}  "
         f"{'A-NPE gap':>10} {'A-NPE cost':>10} {'ok':>3}  "
         f"{'S-NPE gap':>10} {'S-NPE cost':>10} {'ok':>3}  "
         f"{'LEN gap':>10} {'LEN cost':>10} {'ok':>3}  "
-        f"{'EG gap':>10} {'EG cost':>10} {'ok':>3}"
+        f"{'EG ||F||':>10} {'EG cost':>10} {'ok':>3}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
@@ -221,7 +223,9 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
         len_gap = lnn.final_gap if lnn else 0.0
         len_cost = lnn.normalized_cost if lnn else 0.0
         len_ok = "Y" if (lnn and lnn.gap_achieved) else "N"
-        eg_gap = eg.final_gap if eg else 0.0
+        
+        # Explicitly tracking EG as an operator residual norm to avoid false equivalence
+        eg_residual = eg.final_gap if eg else 0.0
         eg_cost = eg.normalized_cost if eg else 0.0
         eg_ok = "Y" if (eg and eg.gap_achieved) else "N"
 
@@ -230,10 +234,11 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
             f"{npe_gap:>10.6f} {npe_cost:>10.2e} {npe_ok:>3}  "
             f"{snpe_gap:>10.6f} {snpe_cost:>10.2e} {snpe_ok:>3}  "
             f"{len_gap:>10.6f} {len_cost:>10.2e} {len_ok:>3}  "
-            f"{eg_gap:>10.6f} {eg_cost:>10.2e} {eg_ok:>3}"
+            f"{eg_residual:>10.6f} {eg_cost:>10.2e} {eg_ok:>3}"
         )
 
     return "\n".join(lines)
+
 
 def format_trace_table(results: list[BenchmarkResult]) -> str:
     """Format a single traced run as a convergence trace table.

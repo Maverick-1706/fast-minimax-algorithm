@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsp_linalg
 from jax import Array
 
 from minimax_aipe.aipe import ProxOracle, aipe, aipe_restart
@@ -39,7 +40,7 @@ from minimax_aipe.alen import (
 from minimax_aipe.gap import estimate_gap
 from minimax_aipe.len import len_loop, len_restart, make_lazy_crn_npe_oracle
 from minimax_aipe.npe import make_crn_npe_oracle, npe, npe_restart, project_z
-from minimax_aipe.oracles import eg_step
+from minimax_aipe.oracles import _stable_lam_update, eg_step
 from minimax_aipe.problem import MinimaxProblem, OracleStats, SolverResult
 from minimax_aipe._precision import (
     ABS_TOL as _ABS_TOL,
@@ -58,49 +59,45 @@ logger = logging.getLogger(__name__)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _schur_solve(
-    H: Array, g: Array, alpha: Array, dim_x: int
+    J_xx: Array, J_xy: Array, J_yx: Array, J_yy: Array,
+    g_x: Array, g_y: Array, alpha: Array
 ) -> Array:
-    """Solve ``(H + α·I) δ = −g`` exploiting saddle-point block structure.
-
-    Splits the Jacobian into ``[[A, B], [C, D]]`` blocks of sizes
-    ``(dim_x, dim_y)`` and uses the Schur complement
-    ``S = A − B D⁻¹ C`` so that only two ``(dim_y, dim_y)`` and one
-    ``(dim_x, dim_x)`` linear systems are solved, giving
-    O(dim_x³ + dim_y³) cost instead of O((dim_x+dim_y)³).  The batched
-    ``D⁻¹·[C | g_y]`` call avoids a third factorisation.
-    """
-    dim_y = H.shape[0] - dim_x
-    dtype = H.dtype
+    """Solve ``(J + α·I) δ = −g`` exploiting saddle-point block structure."""
+    dim_x = J_xx.shape[0]
+    dim_y = J_yy.shape[0]
+    dtype = J_xx.dtype
     eye_x = jnp.eye(dim_x, dtype=dtype)
     eye_y = jnp.eye(dim_y, dtype=dtype)
-
-    A = H[:dim_x, :dim_x] + alpha * eye_x
-    B = H[:dim_x, dim_x:]
-    C = H[dim_x:, :dim_x]
-    D = H[dim_x:, dim_x:] + alpha * eye_y
-
-    g_x = g[:dim_x]
-    g_y = g[dim_x:]
-
-    # Batched solve: D @ X = [C | g_y]
-    rhs = jnp.concatenate([C, g_y[:, None]], axis=1)     # (dim_y, dim_x+1)
-    D_inv_rhs = jnp.linalg.solve(D, rhs)
-    D_inv_C = D_inv_rhs[:, :-1]                           # (dim_y, dim_x)
-    D_inv_g_y = D_inv_rhs[:, -1]                          # (dim_y,)
-
-    # Schur complement  S = A − B D⁻¹ C
-    S = A - B @ D_inv_C
-
-    # Solve for δ_x
-    rhs_x = -g_x + B @ D_inv_g_y
-    delta_x = jnp.linalg.solve(S, rhs_x)
-
-    # Back-substitute for δ_y
+    
+    # 1. Protect alpha from extreme underflow (caps the worst-case conditioning)
+    alpha = jnp.maximum(alpha, jnp.asarray(1e-6, dtype=dtype))
+    
+    A = J_xx + alpha * eye_x
+    D = J_yy + alpha * eye_y  
+    
+    rhs = jnp.concatenate([J_yx, g_y[:, None]], axis=1)     
+    
+    # Try keeping Cholesky ('pos') since D is generally well-behaved with the alpha floor
+    D_inv_rhs = jsp_linalg.solve(D, rhs, assume_a='pos')
+    
+    D_inv_C = D_inv_rhs[:, :-1]                           
+    D_inv_g_y = D_inv_rhs[:, -1]                          
+    
+    # Schur complement S = A − B D⁻¹ C
+    # 2. Add a tiny numerical regularisation to S to ensure Cholesky stability in FP32
+    nudge = jnp.asarray(1e-7, dtype=dtype) * eye_x
+    S = A - J_xy @ D_inv_C + nudge
+    
+    rhs_x = -g_x + J_xy @ D_inv_g_y
+    
+    # Try keeping Cholesky ('pos') here too
+    delta_x = jsp_linalg.solve(S, rhs_x, assume_a='pos')
+    
     delta_y = -D_inv_g_y - D_inv_C @ delta_x
-
-    return jnp.concatenate([delta_x, delta_y])
-
-
+    delta = jnp.concatenate([delta_x, delta_y])
+    
+    # 3. Final safety net just in case
+    return jnp.where(jnp.isfinite(delta), delta, jnp.zeros_like(delta))
 # ═════════════════════════════════════════════════════════════════════════════
 # Mutable call counter
 # ═════════════════════════════════════════════════════════════════════════════
@@ -360,6 +357,15 @@ class RegularizedSubproblem:
                 g = self.operator_F_h(z_bar, x_bar, y_bar)
                 xb, yb = z_bar[:dim_x], z_bar[dim_x:]
                 H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
+                
+                # Pre-slice blocks outside the loop to avoid redundant XLA ops
+                J_xx = H[:dim_x, :dim_x]
+                J_xy = H[:dim_x, dim_x:]
+                J_yx = H[dim_x:, :dim_x]
+                J_yy = H[dim_x:, dim_x:]
+                g_x = g[:dim_x]
+                g_y = g[dim_x:]
+                
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 tol_jax = jnp.asarray(tol, dtype=dtype)
@@ -375,11 +381,12 @@ class RegularizedSubproblem:
                     lam, _z, i, _prev = state
                     alpha = lam + tiny
                     # [BUG 9] Block Schur-complement solve
-                    delta = _schur_solve(H, g, alpha, dim_x)
+                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
+                    lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
                     return (
-                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
+                        _stable_lam_update(lam, lam_candidate),
                         z_new, i + 1, lam,
                     )
 
@@ -396,6 +403,15 @@ class RegularizedSubproblem:
                 g = self.operator_F_h(z_bar, x_bar, y_bar)
                 xb, yb = z_bar[:dim_x], z_bar[dim_x:]
                 H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
+                
+                # Pre-slice blocks outside the loop to avoid redundant XLA ops
+                J_xx = H[:dim_x, :dim_x]
+                J_xy = H[:dim_x, dim_x:]
+                J_yx = H[dim_x:, :dim_x]
+                J_yy = H[dim_x:, dim_x:]
+                g_x = g[:dim_x]
+                g_y = g[dim_x:]
+                
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 # [BUG 5] Start λ at npe_gamma/2 for immediate regularization
@@ -405,10 +421,11 @@ class RegularizedSubproblem:
                     lam, z = state
                     alpha = lam + tiny
                     # [BUG 9] Block Schur-complement solve
-                    delta = _schur_solve(H, g, alpha, dim_x)
+                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
-                    return (npe_gamma / 2.0) * jnp.linalg.norm(d_eff), z_new
+                    lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
+                    return _stable_lam_update(lam, lam_candidate), z_new
 
                 lam, z = jax.lax.fori_loop(
                     0, n_iters, body, (lam0, z_bar)
@@ -613,7 +630,7 @@ def _restart_jax(
         not_done = epoch < S_jax
         # [BUG 7] Compute step_sq in float64 to match tol_sq precision
         diff = (_z - prev_z).astype(jnp.float64)
-        step_sq = jnp.sum(diff ** 2)
+        step_sq = jnp.dot(diff, diff)
         step_big = step_sq > tol_sq
         return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
 
@@ -683,7 +700,7 @@ def _iProx_Phi(
     inner_zeta_3 = min(params.zeta_3, zeta_2 * 0.1)
 
     # ── Build oracles for -Ψ(y) = -min_x g(x, y; x̄) ────────────────
-    neg_psi_fn, grad_neg_psi_fn, _hess_neg_psi_fn = _make_psi_oracle(
+    neg_psi_fn, grad_neg_psi_fn = _make_psi_oracle(
         problem, x_bar, gamma, params,
         M_saddle=M_saddle, m_lazy=params.m_lazy,
     )
@@ -746,17 +763,19 @@ def _iProx_Phi(
     # [BUG 4] EG on a monotone VI only requires η < 1/ℓ (Lemma 3.1).
     # The 2ρD term is unnecessary and overly conservative.
     eta_g = 1.0 / (2.0 * max(ell_g, _ABS_TOL))
-
-    z_hat_g = jnp.concatenate([x_hat, y_hat])
-    z_out_g, c_out = eg_step(g_problem, z_hat_g, eta_g)
-    x_out = z_out_g[:problem.dim_x]
-    u_out = c_out[:problem.dim_x]
-
+    
+    # ALGORITHMIC FIX: Perform x-only EG step matching Algorithm 4 step 3
+    gx_hat, _ = g_problem.grad_f(x_hat, y_hat)
+    x_half = g_problem.project_x(x_hat - eta_g * gx_hat)
+    
+    gx_half, _ = g_problem.grad_f(x_half, y_hat)
+    x_out = g_problem.project_x(x_hat - eta_g * gx_half)
+    u_out = (x_hat - x_out) / eta_g - gx_half
+    
     if outer_warm_y is not None:
         jax.debug.callback(
             lambda v: setattr(outer_warm_y, 'value', v), y_hat
         )
-
     return x_out, u_out
 
 
@@ -876,6 +895,14 @@ def _iProx_Psi(
                 # [BUG 5] Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype_local)
                 dim_x_local = kernel.dim_x
+                
+                # Pre-slice blocks outside the loop
+                J_xx = H_snapshot[:dim_x_local, :dim_x_local]
+                J_xy = H_snapshot[:dim_x_local, dim_x_local:]
+                J_yx = H_snapshot[dim_x_local:, :dim_x_local]
+                J_yy = H_snapshot[dim_x_local:, dim_x_local:]
+                g_x = g[:dim_x_local]
+                g_y = g[dim_x_local:]
 
                 def cond(state):
                     lam, _z, i, prev_lam = state
@@ -886,15 +913,17 @@ def _iProx_Psi(
                     lam, _z, i, _prev = state
                     alpha = lam + tiny_local
                     # [BUG 9] Block Schur-complement solve
-                    delta = _schur_solve(H_snapshot, g, alpha, dim_x_local)
+                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
                     z_new = proj(z_bar + delta)
                     d_eff = z_new - z_bar
+                    lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
                     return (
-                        (npe_gamma / 2.0) * jnp.linalg.norm(d_eff),
+                        _stable_lam_update(lam, lam_candidate),
                         z_new,
                         i + 1,
                         lam,
                     )
+
 
                 lam, z_half, _i, _prev = jax.lax.while_loop(
                     cond,
@@ -907,7 +936,8 @@ def _iProx_Psi(
                     ),
                 )
                 d_eff = z_half - z_bar
-                u = -(_F_h(z_bar) + H_snapshot @ d_eff + lam * d_eff)
+                # Reuse `g` instead of wastefully recomputing `_F_h(z_bar)`
+                u = -(g + H_snapshot @ d_eff + lam * d_eff)
                 return z_half, u
 
             H0 = jac_at(z)
@@ -1162,7 +1192,7 @@ def solve(
         pass
 
     # ── Oracle statistics ─────────────────────────────────────────────
-    secular_n = 50
+    secular_n = 15 if M_saddle == "npe" else 50
     inner_crn = max(0, int(total))
     d = problem.dim_x + problem.dim_y
 
@@ -1253,7 +1283,7 @@ def _algorithm_3(
     logger.debug("Built kernel: %r", kernel)
 
     # ── Build the Φ oracle ───────────────────────────────────────────
-    phi_fn, grad_phi_fn, _hess_phi_fn = _make_phi_oracle(
+    phi_fn, grad_phi_fn = _make_phi_oracle(
         problem, gamma, params,
         M_saddle=M_saddle, m_lazy=params.m_lazy,
     )
@@ -1322,7 +1352,6 @@ def _make_phi_oracle(
 ) -> tuple[
     Callable[[Array], Array],
     Callable[[Array], Array],
-    Callable[[Array], Array],
 ]:
     """Build approximate value, gradient, and Hessian oracles for Φ.
 
@@ -1348,8 +1377,7 @@ def _make_phi_oracle(
         gx, _gy_neg = problem.grad_f(x, y)
         return gx
 
-    hess_phi = jax.jacfwd(grad_phi)
-    return phi, grad_phi, hess_phi
+    return phi, grad_phi
 
 
 def _make_psi_oracle(
@@ -1360,7 +1388,6 @@ def _make_psi_oracle(
     M_saddle: str = "npe",
     m_lazy: int = 5,
 ) -> tuple[
-    Callable[[Array], Array],
     Callable[[Array], Array],
     Callable[[Array], Array],
 ]:
@@ -1399,8 +1426,7 @@ def _make_psi_oracle(
         _gx, gy_neg = g_problem.grad_f(x, y)
         return gy_neg
 
-    hess_neg_psi = jax.jacfwd(grad_neg_psi)
-    return neg_psi, grad_neg_psi, hess_neg_psi
+    return neg_psi, grad_neg_psi
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -99,7 +99,7 @@ def benchmark_jit_vs_eager(
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
 
-    # Pre-setup the computational core to isolate JIT numerical speedup
+    # 1. Pre-setup the entire computational core OUTSIDE the timed execution functions
     from minimax_aipe.framework import RegularizedSubproblem
     from minimax_aipe.npe import npe
 
@@ -113,33 +113,40 @@ def benchmark_jit_vs_eager(
     y_bar = z0[problem.dim_x:]
     npe_gamma = 2.0 * kernel.rho_h
 
-    def F_h(z): return kernel.operator_F_h(z, x_bar, y_bar)
-    def merit(z): return jnp.dot(F_h(z), F_h(z))
+    # Pre-bind the functions and values needed by the engine to cut dictionary/lookup overhead
+    F_h = kernel.operator_F_h
+    
+    @jax.jit
+    def merit(z): 
+        f_val = F_h(z, x_bar, y_bar)
+        return jnp.dot(f_val, f_val)
 
     if M_saddle == "npe":
         oracle = kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=1e-4)
-        def _core():
-            return npe(oracle, F_h, z0, 50, npe_gamma, project=kernel.project, fn=merit)
+        def _core(z_init):
+            def bound_F(z): return F_h(z, x_bar, y_bar)
+            return npe(oracle, bound_F, z_init, 50, npe_gamma, project=kernel.project, fn=merit)
     else:
         from minimax_aipe.len import len_loop, make_lazy_crn_npe_oracle
         h_prob = kernel.make_h_problem(x_bar, y_bar)
         oracle = make_lazy_crn_npe_oracle(h_prob, npe_gamma, tol=1e-4)
-        def _core():
-            return len_loop(oracle, F_h, z0, 50, npe_gamma, m=5, project=kernel.project, fn=merit)
+        def _core(z_init):
+            def bound_F(z): return F_h(z, x_bar, y_bar)
+            return len_loop(oracle, bound_F, z_init, 50, npe_gamma, m=5, project=kernel.project, fn=merit)
 
-    # 1. Measure Eager FIRST (completely avoiding JIT cache contamination)
+    # 2. Pure Eager Run Closure (Zero tracing overhead)
     def run_eager():
-        z_out, _ = _core()
+        z_out, _ = _core(z0)
         z_out.block_until_ready()
         return z_out
 
     eager_times = _time_callable(run_eager, n_warmup=0, n_repeats=n_repeats)
 
-    # 2. Measure JIT SECOND
+    # 3. Pure JIT Run Closure (Isolating the compiled XLA execution pipeline)
     core_jit = jax.jit(_core)
 
     def run_jit():
-        z_out, _ = core_jit()
+        z_out, _ = core_jit(z0)
         z_out.block_until_ready()
         return z_out
 
@@ -186,7 +193,6 @@ def benchmark_solver_comparison(
         # ── AIPE-NPE ───────────────────────────────────────────────
         def run_npe():
             res = solve(problem, epsilon=epsilon, M_saddle="npe", z0=z0)
-            # FORCE SYNC: Prevent async dispatch illusion
             if hasattr(res, "x"): res.x.block_until_ready()
             if hasattr(res, "y"): res.y.block_until_ready()
             if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
@@ -216,7 +222,6 @@ def benchmark_solver_comparison(
         # ── AIPE-LEN ───────────────────────────────────────────────
         def run_len():
             res = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=5, z0=z0)
-            # FORCE SYNC: Prevent async dispatch illusion
             if hasattr(res, "x"): res.x.block_until_ready()
             if hasattr(res, "y"): res.y.block_until_ready()
             if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
@@ -250,7 +255,6 @@ def benchmark_solver_comparison(
         from minimax_aipe.gap import estimate_gap
 
         def run_eg():
-            # Run the JIT solver without post-hoc gap calculation inside the timed block
             z_out, residual, wall_time, actual_iters = run_eg_jit(problem, max_iters=100_000, z0=z0, tol=epsilon)
             z_out.block_until_ready()
             return z_out, residual, actual_iters
@@ -289,7 +293,6 @@ def benchmark_solver_comparison(
         from benchmarks.baselines import run_gda_jit
 
         def run_gda():
-            # Run the JIT solver without post-hoc gap calculation inside the timed block
             z_out, residual, wall_time, actual_iters = run_gda_jit(problem, max_iters=200_000, z0=z0, tol=epsilon)
             z_out.block_until_ready()
             return z_out, residual, actual_iters

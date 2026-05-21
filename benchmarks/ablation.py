@@ -176,7 +176,7 @@ def _time_solve_loop(
     _sync_result(w_result)
 
     times: list[float] = []
-    result = None
+    result = w_result  # Fix: Initialize with warmup as the fallback baseline
     for _ in range(n_repeats):
         gc.collect()
         # Synchronize device queue before starting timer
@@ -185,6 +185,9 @@ def _time_solve_loop(
         result = solve(problem, **kwargs)
         _sync_result(result)
         times.append(time.perf_counter() - t0)
+
+    if not times:
+        times = [0.0]
 
     return times, result
 
@@ -206,7 +209,7 @@ def _build_result(
         problem=problem,
         dim=dim,
         epsilon=epsilon,
-        wall_time_mean=statistics.mean(times),
+        wall_time_mean=statistics.mean(times) if times != [0.0] else 0.0,
         wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
         ci=ci,
         oracle_stats=result.oracle_stats,
@@ -325,7 +328,7 @@ def ablation_no_acceleration(
 
     problem = prob.problem
     name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
+    dim = problem.dim_x
     d = problem.dim_x + problem.dim_y
 
     results = []

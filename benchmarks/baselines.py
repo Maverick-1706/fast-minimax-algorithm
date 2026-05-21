@@ -86,7 +86,8 @@ def run_eg_jit(
             resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
-            return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
+            # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
+            return not_done & resid_big
 
         def body(state):
             i, z, Fz = state
@@ -127,7 +128,9 @@ def run_eg_jit_benchmark(
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
-        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        # FIX: Explicitly check if the solver completed early before hitting the budget cap
+        converged=actual_iters < max_iters, 
+        gap_achieved=gap <= epsilon,
         final_residual=residual,
         oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters, oracle_calls=2 * actual_iters),
     )
@@ -171,7 +174,8 @@ def run_gda_jit(
             resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
-            return not_done & jnp.where(i > 0, resid_big, jnp.bool_(True))
+            # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
+            return not_done & resid_big
 
         def body(state):
             i, z, Fz = state
@@ -215,11 +219,12 @@ def run_gda_jit_benchmark(
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
-        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        # FIX: Explicitly check if the solver completed early before hitting the budget cap
+        converged=actual_iters < max_iters, 
+        gap_achieved=gap <= epsilon,
         final_residual=residual,
         oracle_stats=OracleStats(grad_calls=actual_iters, projection_calls=2 * actual_iters, oracle_calls=actual_iters),
     )
-
 
 # ── JIT-compiled NPE-restart ─────────────────────────────────────────────
 
@@ -269,7 +274,8 @@ def run_npe_restart_jit(
             epoch, _z, resid_sq = state
             not_done = epoch < max_epochs
             resid_big = resid_sq.astype(jnp.float64) > tol_sq
-            return not_done & jnp.where(epoch > 0, resid_big, jnp.bool_(True))
+            # FIX: Remove the jnp.where guard to allow exit at epoch=0 if already within tolerance
+            return not_done & resid_big
 
         def body(state):
             epoch, z, _ = state
@@ -306,10 +312,18 @@ def run_npe_restart_jit_benchmark(
     y_out = z_out[problem.dim_x :]
     gap = estimate_gap(problem, x_out, y_out)
 
+    # Compute maximum allowed iterations based on internal epoch floor allocation
+    rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
+    ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
+    T = min(max_iters, max(10, int(ell / rho)))
+    max_expected_iters = (max_iters // T) * T
+
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
-        converged=residual <= epsilon, gap_achieved=gap <= epsilon,
+        # FIX: Match the baseline early-termination check using the expected maximum epoch ceiling
+        converged=actual_iters < max_expected_iters, 
+        gap_achieved=gap <= epsilon,
         final_residual=residual,
         oracle_stats=OracleStats(
             crn_calls=actual_iters,

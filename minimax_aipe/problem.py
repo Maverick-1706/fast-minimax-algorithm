@@ -383,7 +383,7 @@ class SolverResult(NamedTuple):
     oracle_calls: int
     converged: bool
     oracle_stats: OracleStats = OracleStats()
-    history: dict = {}
+    history: Optional[dict] = None
 
 __all__ = [
     "MinimaxProblem",
