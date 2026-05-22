@@ -127,23 +127,35 @@ def aipe(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], float]] = None,
     warm_init: Optional[Array] = None,
-) -> tuple[Array, int, Optional[Array]]:
-    """Algorithm 1: Accelerated Inexact Proximal Extragradient."""
+) -> tuple[Array, int, Optional[Array], Array]:
+    """Algorithm 1: Accelerated Inexact Proximal Extragradient.
+
+    Returns ``(z_out, T, warm_final, total_inner_calls)`` where
+    *total_inner_calls* is the accumulated inner oracle call count
+    from prox_oracle invocations (0 when the prox_oracle does not
+    report inner calls).
+    """
     dtype = z0.dtype
     tiny = jnp.asarray(_TINY_AIPE, dtype=dtype)
     one = jnp.asarray(1.0, dtype=dtype)
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
     lam_tol = jnp.asarray(_REG_MIN_AIPE, dtype=dtype)
+    int_zero = jnp.zeros((), dtype=jnp.int32)
 
     _has_warm = warm_init is not None
 
     # ── initial proximal oracle call (before loop) ────────────────
     if _has_warm:
-        z_tilde_0, u_0, warm_0 = prox_oracle(z0, warm_init)
+        prox_result_0 = prox_oracle(z0, warm_init)
+        z_tilde_0, u_0, warm_0 = prox_result_0[0], prox_result_0[1], prox_result_0[2]
+        _has_inner_calls = len(prox_result_0) > 3
+        init_inner_calls = prox_result_0[3] if _has_inner_calls else int_zero
     else:
         result = prox_oracle(z0)
         z_tilde_0, u_0 = result[0], result[1]
         warm_0 = jnp.zeros((), dtype=dtype)
+        _has_inner_calls = len(result) > 3
+        init_inner_calls = result[3] if _has_inner_calls else int_zero
     lam_0 = gamma * jnp.linalg.norm(z_tilde_0 - z0)
     lam_prime_init = jnp.maximum(lam_0, lam_tol)
 
@@ -155,7 +167,7 @@ def aipe(
 
     if _has_warm:
         def step(carry, t):
-            s, warm = carry
+            s, warm, total_inner_calls = carry
 
             is_converged = s.lam_prime < lam_tol
 
@@ -171,14 +183,23 @@ def aipe(
                 z_bar = w_A * s.z + w_a * s.v
 
                 def initial_prox(_):
+                    if _has_inner_calls:
+                        return z_tilde_0, u_0, warm_0, int_zero
                     return z_tilde_0, u_0, warm_0
 
                 def loop_prox(_):
                     return prox_oracle(z_bar, warm)
 
-                z_tilde, u, warm_new = jax.lax.cond(
+                prox_result = jax.lax.cond(
                     t == 0, initial_prox, loop_prox, operand=None,
                 )
+                z_tilde, u, warm_new = prox_result[0], prox_result[1], prox_result[2]
+
+                if _has_inner_calls:
+                    step_inner_calls = prox_result[3]
+                else:
+                    step_inner_calls = int_zero
+
                 lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
                 accept = lam <= s.lam_prime
 
@@ -217,20 +238,21 @@ def aipe(
                 new_state = AIPEState(
                     z=z_new, v=v_new, A=A_new, lam_prime=lam_prime_new,
                 )
-                return (new_state, warm_new), (z_tilde, z_new)
+                return (new_state, warm_new,
+                        total_inner_calls + step_inner_calls), (z_tilde, z_new)
 
             def _noop(_):
-                return (s, warm), (s.z, s.z)
+                return (s, warm, total_inner_calls), (s.z, s.z)
 
             return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
 
-        scan_init = (init, warm_0)
-        (final_state, warm_final), (all_z_tilde, all_z) = jax.lax.scan(
+        scan_init = (init, warm_0, init_inner_calls)
+        (final_state, warm_final, total_inner_calls), (all_z_tilde, all_z) = jax.lax.scan(
             step, scan_init, jnp.arange(T, dtype=jnp.int32),
         )
     else:
-        def step(carry: AIPEState, t):
-            s = carry
+        def step(carry, t):
+            s, total_inner_calls = carry
 
             is_converged = s.lam_prime < lam_tol
 
@@ -246,15 +268,19 @@ def aipe(
                 z_bar = w_A * s.z + w_a * s.v
 
                 def initial_prox(_):
-                    return z_tilde_0, u_0
+                    return z_tilde_0, u_0, int_zero
 
                 def loop_prox(_):
                     result = prox_oracle(z_bar)
-                    return result[0], result[1]
+                    ic = result[3] if len(result) > 3 else int_zero
+                    return result[0], result[1], ic
 
-                z_tilde, u = jax.lax.cond(
+                prox_result = jax.lax.cond(
                     t == 0, initial_prox, loop_prox, operand=None,
                 )
+                z_tilde, u = prox_result[0], prox_result[1]
+                step_inner_calls = prox_result[2]
+
                 lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
                 accept = lam <= s.lam_prime
 
@@ -293,15 +319,16 @@ def aipe(
                 new_state = AIPEState(
                     z=z_new, v=v_new, A=A_new, lam_prime=lam_prime_new,
                 )
-                return new_state, (z_tilde, z_new)
+                return (new_state,
+                        total_inner_calls + step_inner_calls), (z_tilde, z_new)
 
             def _noop(_):
-                return s, (s.z, s.z)
+                return (s, total_inner_calls), (s.z, s.z)
 
             return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
 
-        final_state, (all_z_tilde, all_z) = jax.lax.scan(
-            step, init, jnp.arange(T, dtype=jnp.int32),
+        (final_state, total_inner_calls), (all_z_tilde, all_z) = jax.lax.scan(
+            step, (init, init_inner_calls), jnp.arange(T, dtype=jnp.int32),
         )
         # Bug A Fix: Return Python None when warm-start isn't being used
         warm_final = None
@@ -323,7 +350,7 @@ def aipe(
     else:
         z_out = final_state.z
 
-    return z_out, T, warm_final
+    return z_out, T, warm_final, total_inner_calls
     
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
 
@@ -364,10 +391,12 @@ def aipe_restart(
     total_calls = 0
 
     for _ in range(S):
-        z, calls, _ = aipe(
+        result = aipe(
             prox_oracle, grad_fn, z, T, gamma,
             project=project, fn=fn,
         )
+        z = result[0]
+        calls = result[1]
         total_calls += calls
 
     return z, total_calls

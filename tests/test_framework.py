@@ -1,8 +1,8 @@
 # tests_framework.py
 """Tests for the high-level Minimax-AIPE framework (triple-loop version).
 
-Adapted for Code 3: uses _CallCounter for oracle-call tracking instead of
-the function-attribute pattern used in Code 2.
+Oracle-call tracking is now done via pure JAX return-value threading
+instead of side-effect callbacks.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import jax.numpy as jnp
 import pytest
 
 from minimax_aipe.framework import (
-    _CallCounter,
     _algorithm_3,
     _compute_loop_params,
     _cubic_grad,
@@ -287,7 +286,7 @@ def test_iProx_Phi_returns_proximal_point():
     x_bar = jnp.array([0.5, -0.2])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    x_out, u_out, _ = _iProx_Phi(
+    x_out, u_out, *_ = _iProx_Phi(
         problem, x_bar, gamma=1.0,
         zeta_2=params.zeta_2, params=params, M_saddle="npe",
     )
@@ -301,39 +300,37 @@ def test_iProx_Phi_returns_proximal_point():
     assert u_out.shape == x_bar.shape
 
 
-def test_iProx_Phi_tracks_calls_via_counter():
-    """After _iProx_Phi runs with a _CallCounter, the counter should show
-    a positive number of oracle calls.
+def test_iProx_Phi_tracks_calls_via_return():
+    """After _iProx_Phi runs, the returned total_inner_calls should be
+    a positive integer reflecting actual oracle invocations.
 
-    NOTE: This replaces the old test_iProx_Phi_sets_last_oracle_calls
-    which tested the function-attribute pattern from Code 2.
-    Code 3 uses _CallCounter instead.
+    NOTE: Replaces the old _CallCounter-based test. Call counts are now
+    threaded through JAX return values instead of side-effects.
     """
     problem, _A = _quadratic_problem(mu=1.0)
     x_bar = jnp.array([0.5, -0.2])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    counter = _CallCounter()
-    _iProx_Phi(
+    x_out, u_out, y_hat, total_inner_calls = _iProx_Phi(
         problem, x_bar, gamma=1.0,
         params=params, M_saddle="npe",
-        counter=counter,
     )
 
-    assert counter.total > 0, f"counter.total should be positive, got {counter.total}"
-    assert isinstance(counter.total, int)
+    assert total_inner_calls > 0, f"total_inner_calls should be positive, got {total_inner_calls}"
 
 
-def test_iProx_Phi_without_counter_still_works():
-    """_iProx_Phi should work when no counter is provided (default None)."""
+def test_iProx_Phi_returns_four_elements():
+    """_iProx_Phi should return (x_out, u_out, y_hat, total_inner_calls)."""
     problem, _A = _quadratic_problem(mu=1.0)
     x_bar = jnp.array([0.5, -0.2])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    x_out, u_out, _ = _iProx_Phi(
+    result = _iProx_Phi(
         problem, x_bar, gamma=1.0, params=params, M_saddle="npe",
     )
 
+    assert len(result) == 4
+    x_out, u_out, y_hat, total_inner_calls = result
     assert x_out.shape == x_bar.shape
     assert u_out.shape == x_bar.shape
     assert jnp.all(jnp.isfinite(u_out))
@@ -345,7 +342,7 @@ def test_iProx_Phi_with_default_params():
     x_bar = jnp.zeros(2)
     params = _test_loop_params(problem)
 
-    x_out, u_out, _ = _iProx_Phi(
+    x_out, u_out, *_ = _iProx_Phi(
         problem, x_bar, gamma=1.0,
         params=params, M_saddle="npe",
     )
@@ -361,7 +358,7 @@ def test_iProx_Psi_returns_proximal_point():
     y_bar = jnp.array([-0.1, 0.3])
     params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0, npe_T_factor=0.15)
 
-    y_out, v_out, _ = _iProx_Psi(
+    y_out, v_out, *_ = _iProx_Psi(
         problem, x_bar, y_bar, gamma=1.0,
         zeta_3=params.zeta_3, params=params, M_saddle="npe",
     )
@@ -379,7 +376,7 @@ def test_iProx_Psi_with_default_params():
     y_bar = jnp.zeros(2)
     params = _test_loop_params(problem)
 
-    y_out, v_out, _ = _iProx_Psi(
+    y_out, v_out, *_ = _iProx_Psi(
         problem, x_bar, y_bar, gamma=1.0,
         params=params, M_saddle="npe",
     )

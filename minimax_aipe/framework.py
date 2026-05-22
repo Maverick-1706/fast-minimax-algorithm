@@ -128,12 +128,10 @@ class _CachedPipeline:
     ``_CachedPipeline`` sidesteps this by building the kernel, Φ-oracles,
     and the outer proximal-oracle **once** and exposing them as *bound
     methods* whose identity is fixed for the lifetime of the instance.
-    Mutable bookkeeping (call counter) is swapped out via :meth:`reset`
-    before each ``solve()`` invocation.
 
-    Warm-start state is threaded through loop carries rather than via
-    ``jax.debug.callback`` side-effects, ensuring correct dataflow
-    inside JIT-traced loops.
+    Call counts are threaded through JAX return values (pure dataflow)
+    rather than via ``jax.debug.callback`` side-effects, ensuring
+    correct oracle-call tracking inside JIT-traced loops.
     """
 
     def __init__(self, problem, gamma, params, M_saddle):
@@ -146,46 +144,44 @@ class _CachedPipeline:
             problem, gamma, params,
             M_saddle=M_saddle, m_lazy=params.m_lazy,
         )
-        self._counter = _CallCounter()
-
-    def reset(self) -> _CallCounter:
-        """Reset mutable state **in-place** so JIT-captured refs stay valid."""
-        self._counter.total = 0
-        return self._counter
 
     # -- bound methods (stable Python identity) -------------------------
 
     def prox_phi(self, x_bar: Array, y_init: Optional[Array] = None
-                 ) -> tuple[Array, Array, Array]:
+                 ) -> tuple[Array, Array, Array, Array]:
         """Stable-identity proximal oracle for Φ (Algorithm 4).
 
-        Returns ``(x_out, u_out, y_hat)`` where *y_hat* is the recovered
-        dual variable usable as warm-start for the next call.
+        Returns ``(x_out, u_out, y_hat, inner_calls)`` where *y_hat* is
+        the recovered dual variable usable as warm-start for the next
+        call and *inner_calls* is the accumulated inner oracle count.
         """
-        x_out, u_out, y_hat = _iProx_Phi(
+        x_out, u_out, y_hat, inner_calls = _iProx_Phi(
             self.problem, x_bar, self.gamma,
             zeta_2=self.params.zeta_2,
             params=self.params,
             M_saddle=self.M_saddle,
-            counter=self._counter,
             y_init=y_init,
             kernel=self.kernel,
         )
-        return x_out, u_out, y_hat
+        return x_out, u_out, y_hat, inner_calls
 
     def run_outer_epoch(self, x_cur: Array, warm_y: Optional[Array] = None
-                        ) -> tuple[Array, int, Array]:
+                        ) -> tuple[Array, int, Array, Array]:
         """Stable-identity epoch function for the outer AIPE loop.
 
-        Returns ``(x_out, calls, warm_y_new)`` for warm-start threading.
+        Returns ``(x_out, calls, warm_y_new, inner_calls)`` for
+        warm-start threading and oracle-call accumulation.
         """
-        x_out, calls, warm_y_new = aipe(
+        result = aipe(
             self.prox_phi, self.grad_phi_fn, x_cur,
             self.params.T_outer, self.gamma,
             project=self.problem.project_x, fn=self.phi_fn,
             warm_init=warm_y,
         )
-        return x_out, calls, warm_y_new
+        x_out, calls, warm_y_new, inner_calls = (
+            result[0], result[1], result[2], result[3],
+        )
+        return x_out, calls, warm_y_new, inner_calls
 
 
 # Module-level cache keyed by (problem id, gamma, M_saddle, loop params).
@@ -654,18 +650,25 @@ def _restart_jax(
     *,
     step_tol: float = 0.0,
     warm: Optional[Array] = None,
-) -> tuple[Array, int, Optional[Array]]:
-    """JAX-compatible restart with early stopping via ``jax.lax.while_loop``."""
+) -> tuple[Array, int, Optional[Array], Array]:
+    """JAX-compatible restart with early stopping via ``jax.lax.while_loop``.
+
+    Returns ``(z_final, epochs, warm_out, total_inner_calls)`` where
+    *total_inner_calls* is the sum of the 4th element from each
+    ``epoch_fn`` invocation (defaults to 0 when ``epoch_fn`` returns
+    only 3 elements).
+    """
     dtype = z0.dtype
     tol_sq = jnp.asarray(
         step_tol ** 2 if step_tol > 0 else -1.0, dtype=dtype
     )
     S_jax = jnp.int32(S)
     tol_sq_cast = tol_sq.astype(dtype)
+    int_zero = jnp.int32(0)
 
     if warm is not None:
         def cond(carry):
-            _z, prev_z, _w, epoch = carry
+            _z, prev_z, _w, epoch, _tic = carry
             not_done = epoch < S_jax
             diff = (_z - prev_z).astype(dtype)
             step_sq = jnp.dot(diff, diff)
@@ -673,17 +676,20 @@ def _restart_jax(
             return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
 
         def body(carry):
-            z, _prev_z, w, epoch = carry
-            z_new, _calls, w_new = epoch_fn(z, w)
-            return (z_new, z, w_new, epoch + 1)
+            z, _prev_z, w, epoch, total_inner_calls = carry
+            result = epoch_fn(z, w)
+            z_new, _calls, w_new = result[0], result[1], result[2]
+            epoch_inner = result[3] if len(result) > 3 else int_zero
+            return (z_new, z, w_new, epoch + 1,
+                    total_inner_calls + epoch_inner)
 
-        z_final, _, warm_out, epochs = jax.lax.while_loop(
-            cond, body, (z0, z0, warm, jnp.int32(0)),
+        z_final, _, warm_out, epochs, total_inner_calls = jax.lax.while_loop(
+            cond, body, (z0, z0, warm, jnp.int32(0), int_zero),
         )
-        return z_final, epochs, warm_out
+        return z_final, epochs, warm_out, total_inner_calls
     else:
         def cond(carry):
-            _z, prev_z, epoch = carry
+            _z, prev_z, epoch, _tic = carry
             not_done = epoch < S_jax
             diff = (_z - prev_z).astype(dtype)
             step_sq = jnp.dot(diff, diff)
@@ -691,14 +697,17 @@ def _restart_jax(
             return not_done & jnp.where(epoch > 0, step_big, jnp.bool_(True))
 
         def body(carry):
-            z, _prev_z, epoch = carry
-            z_new, _calls, _ = epoch_fn(z, None)
-            return (z_new, z, epoch + 1)
+            z, _prev_z, epoch, total_inner_calls = carry
+            result = epoch_fn(z, None)
+            z_new = result[0]
+            epoch_inner = result[3] if len(result) > 3 else int_zero
+            return (z_new, z, epoch + 1,
+                    total_inner_calls + epoch_inner)
 
-        z_final, _, epochs = jax.lax.while_loop(
-            cond, body, (z0, z0, jnp.int32(0)),
+        z_final, _, epochs, total_inner_calls = jax.lax.while_loop(
+            cond, body, (z0, z0, jnp.int32(0), int_zero),
         )
-        return z_final, epochs, None
+        return z_final, epochs, None, total_inner_calls
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -713,11 +722,14 @@ def _iProx_Phi(
     *,
     params: Optional[_LoopParams] = None,
     M_saddle: str = "npe",
-    counter: Optional[_CallCounter] = None,
     y_init: Optional[Array] = None,
     kernel: Optional[RegularizedSubproblem] = None,
-) -> tuple[Array, Array, Array]:
-    """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``."""
+) -> tuple[Array, Array, Array, Array]:
+    """Algorithm 4: Inexact proximal oracle for ``Φ(x) = max_y f(x, y)``.
+
+    Returns ``(x_out, u_out, y_hat, total_inner_calls)`` where
+    *total_inner_calls* is the accumulated inner oracle count.
+    """
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
 
@@ -734,17 +746,16 @@ def _iProx_Phi(
     )
 
     def _prox_psi(y_bar: Array, warm_z: Optional[Array] = None
-                  ) -> tuple[Array, Array, Array]:
-        y_out, v_out, z_hat = _iProx_Psi(
+                  ) -> tuple[Array, Array, Array, Array]:
+        y_out, v_out, z_hat, inner_calls = _iProx_Psi(
             problem, x_bar, y_bar, gamma,
             zeta_3=inner_zeta_3,
             params=params,
             M_saddle=M_saddle,
-            counter=counter,
             kernel=kernel,
             z_init=warm_z,
         )
-        return y_out, v_out, z_hat
+        return y_out, v_out, z_hat, inner_calls
 
     if y_init is not None:
         y0 = problem.project_y(y_init)
@@ -761,7 +772,7 @@ def _iProx_Phi(
         )
 
     z0_init = jnp.concatenate([problem.project_x(x_bar), y0])
-    y_hat, _, _z_hat_out = _restart_jax(
+    y_hat, _, _z_hat_out, total_inner_calls = _restart_jax(
         _run_middle_epoch, y0, params.S_middle,
         step_tol=params.zeta_2,
         warm=z0_init,  # <-- Threads joint state down to the inner loop
@@ -785,7 +796,7 @@ def _iProx_Phi(
     x_out = g_problem.project_x(x_hat - eta_g * gx_half)
     u_out = (x_hat - x_out) / eta_g - gx_half
     
-    return x_out, u_out, y_hat
+    return x_out, u_out, y_hat, total_inner_calls
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -801,11 +812,14 @@ def _iProx_Psi(
     *,
     params: Optional[_LoopParams] = None,
     M_saddle: str = "npe",
-    counter: Optional[_CallCounter] = None,
     kernel: Optional[RegularizedSubproblem] = None,
     z_init: Optional[Array] = None,
-) -> tuple[Array, Array, Array]:
-    """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``."""
+) -> tuple[Array, Array, Array, Array]:
+    """Algorithm 5: Inexact proximal oracle for ``-Ψ(y; x̄)``.
+
+    Returns ``(y_out, v_out, z_hat, inner_calls)`` where *inner_calls*
+    is a JAX scalar counting the total inner oracle invocations.
+    """
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)
 
@@ -919,7 +933,7 @@ def _iProx_Psi(
         z_new, inner_calls = _run_inner(z)
         return z_new, inner_calls, None
 
-    z_hat, epochs, _ = _restart_jax(
+    z_hat, epochs, _, _inner_restart_calls = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
     )
@@ -938,13 +952,9 @@ def _iProx_Psi(
     _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
     v_out = c_out[kernel.dim_x :]
 
-    if counter is not None:
-        jax.debug.callback(
-            lambda c: setattr(counter, 'total', counter.total + int(c)),
-            calls + 1
-        )
+    inner_calls = calls + 1
 
-    return y_out, v_out, z_hat
+    return y_out, v_out, z_hat, inner_calls
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1106,12 +1116,11 @@ def _algorithm_3(
 
     # ── Reuse (or build) a JIT-stable pipeline ──────────────────────
     pipeline = _get_pipeline(problem, gamma, params, M_saddle)
-    counter = pipeline.reset()
 
     logger.debug("Pipeline kernel: %r", pipeline.kernel)
 
     # ── Outer AIPE with restart + early stopping ─────────────────────
-    x_hat, outer_epochs, _warm_y_out = _restart_jax(
+    x_hat, outer_epochs, _warm_y_out, total_inner_calls = _restart_jax(
         pipeline.run_outer_epoch, x0, params.S_outer,
         step_tol=params.zeta_1,
     )
@@ -1122,7 +1131,7 @@ def _algorithm_3(
         steps=max(20, params.T_middle * params.S_middle),
     )
 
-    total_calls = counter.total
+    total_calls = int(total_inner_calls)
 
     grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)))
     phi_val = float(pipeline.phi_fn(x_hat))
@@ -1201,7 +1210,7 @@ def _make_psi_oracle(
             return x_new, calls, None
 
         x0 = g_problem.project_x(jnp.zeros(g_problem.dim_x, dtype=y.dtype))
-        x_out, _, _ = _restart_jax(
+        x_out, _, _, _ = _restart_jax(
             _gd_step_warm, x0,
             max(20, params.T_inner * params.S_inner),
             step_tol=params.zeta_3,
@@ -1274,7 +1283,7 @@ def _solve_saddle_subproblem(
         z_new, calls = _run_inner(z)
         return z_new, calls, None
 
-    z_hat, epochs, _ = _restart_jax(
+    z_hat, epochs, _, _ = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(tolerance * 0.01, _ABS_TOL),
     )

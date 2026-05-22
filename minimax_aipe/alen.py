@@ -165,8 +165,9 @@ def aipe_restart_lazy(
             prox = prox_oracle_factory(z)
             _PROXY_CACHE[cache_key] = prox
             
-        z, calls, _ = aipe(prox, grad_fn, z, T, gamma,
-                           project=project, fn=fn)
+        result = aipe(prox, grad_fn, z, T, gamma,
+                       project=project, fn=fn)
+        z, calls = result[0], result[1]
         total_calls += calls
     return z, total_calls
 

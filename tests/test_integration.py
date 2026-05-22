@@ -4,7 +4,7 @@ Covers five gaps that unit tests and black-box solver tests miss:
 
   1. Three-loop interaction on nontrivial problems (tolerance threading,
      parameter scheduling, history completeness)
-  2. Warm-start mechanism (_WarmStart, _CallCounter, jax.debug.callback)
+  2. Oracle-call tracking via pure JAX return-value threading
   3. Gap estimator accuracy (estimate_gap vs known exact gaps)
   4. LEN-vs-NPE equivalence when m=1 (lazy Hessian degenerates to fresh)
   5. Nontrivial convergence (strongly convex-concave, offset saddle, 10D)
@@ -21,7 +21,7 @@ from minimax_aipe import (
     npe,
     make_crn_npe_oracle,
 )
-from minimax_aipe.framework import _CallCounter, _compute_loop_params
+from minimax_aipe.framework import _compute_loop_params
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Section 1 — Three-Loop Interaction
@@ -148,40 +148,26 @@ class TestThreeLoopOnHarderProblems:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Section 2 — Call Counter (used via jax.debug.callback for oracle stats)
+# Section 2 — Oracle-call tracking (pure JAX return-value threading)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestCallCounter:
-    """Direct tests on the _CallCounter dataclass."""
+class TestOracleCallTracking:
+    """Verify that inner oracle calls are tracked via return values."""
 
-    def test_initially_zero(self):
-        counter = _CallCounter()
-        assert counter.total == 0
+    def test_solve_reports_positive_oracle_calls(self, bilinear_3d):
+        """The solver should report a positive oracle_calls count."""
+        p = bilinear_3d
+        result = solve(p.problem, epsilon=0.5)
+        assert result.oracle_calls > 0, (
+            f"oracle_calls should be positive, got {result.oracle_calls}"
+        )
 
-    def test_increment(self):
-        counter = _CallCounter()
-        counter.total += 5
-        assert counter.total == 5
-        counter.total += 3
-        assert counter.total == 8
-
-
-class TestCallbackCounter:
-    """Verify call-counter accumulation via jax.debug.callback."""
-
-    def test_call_counter_accumulates_across_nested_loops(self):
-        """Simulating the _CallCounter pattern across _iProx_Psi calls."""
-        counter = _CallCounter()
-
-        for epoch in range(3):
-            inner_calls = (epoch + 1) * 10
-            jax.debug.callback(
-                lambda c: setattr(counter, "total", counter.total + c),
-                jnp.int32(inner_calls),
-            )
-
-        assert counter.total == 10 + 20 + 30
+    def test_oracle_calls_is_integer(self, bilinear_3d):
+        """oracle_calls should be a plain Python int, not a JAX array."""
+        p = bilinear_3d
+        result = solve(p.problem, epsilon=0.5)
+        assert isinstance(result.oracle_calls, int)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
