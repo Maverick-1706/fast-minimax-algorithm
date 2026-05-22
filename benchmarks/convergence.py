@@ -104,17 +104,17 @@ def sweep_epsilon(
 
     return rows
 
-def sweep_epsilon_with_traces(
+def sweep_epsilon_endpoints(
     prob,
     epsilons: list[float],
 ) -> list[BenchmarkResult]:
-    """Like sweep_epsilon(), but captures gap-vs-oracle-call traces.
+    """Like sweep_epsilon(), but captures independent gap-vs-oracle-call endpoints.
 
     Since the solver doesn't expose per-outer-iteration hooks, we build
-    the convergence trace by running ``solve()`` at geometrically-spaced
+    the convergence curve by independently running ``solve()`` at geometrically-spaced
     epsilon levels from coarse to target, cold-starting each run from the
-    initial point. This produces a true single-solve gap-vs-oracle-calls
-    curve without modifying the algorithm internals.
+    initial point. This produces a valid gap-vs-oracle-calls
+    curve for computing convergence rates without modifying the algorithm internals.
 
     Parameters
     ----------
@@ -126,8 +126,8 @@ def sweep_epsilon_with_traces(
     Returns
     -------
     list[BenchmarkResult]
-        One result per ε, with ``gap_trace`` and ``oracle_trace`` populated.
-        Empty traces are stored as empty lists (never None) so downstream
+        One result per ε, with ``gap_endpoints`` and ``oracle_endpoints`` populated.
+        Empty endpoints are stored as empty lists (never None) so downstream
         code can always iterate safely.
     """
     import jax.numpy as jnp
@@ -145,14 +145,14 @@ def sweep_epsilon_with_traces(
             for i in range(N_TRACE_POINTS)
         ]
 
-        gap_trace: list[float] = []
-        oracle_trace: list[int] = []
+        gap_endpoints: list[float] = []
+        oracle_endpoints: list[int] = []
 
-        # Run intermediate coarser resolutions from a cold start to collect trace points
+        # Run intermediate coarser resolutions from a cold start to collect data points
         for trace_eps in eps_schedule[:-1]:
             res_trace = solve(prob.problem, epsilon=trace_eps, z0=prob.z0)
-            gap_trace.append(float(res_trace.gap))
-            oracle_trace.append(int(res_trace.oracle_stats.oracle_calls))
+            gap_endpoints.append(float(res_trace.gap))
+            oracle_endpoints.append(int(res_trace.oracle_stats.oracle_calls))
 
         # Force device synchronization before starting the timer for the definitive target solve
         _ = jnp.zeros(1).block_until_ready()
@@ -163,9 +163,9 @@ def sweep_epsilon_with_traces(
         res.x.block_until_ready()
         elapsed = time.perf_counter() - t_start
 
-        # Append final target metrics to complete the trace arrays
-        gap_trace.append(float(res.gap))
-        oracle_trace.append(int(res.oracle_stats.oracle_calls))
+        # Append final target metrics to complete the endpoints arrays
+        gap_endpoints.append(float(res.gap))
+        oracle_endpoints.append(int(res.oracle_stats.oracle_calls))
 
         row = BenchmarkResult(
             solver="minimax_aipe",
@@ -180,8 +180,8 @@ def sweep_epsilon_with_traces(
             gap_achieved=res.gap <= eps,
             final_gap=float(res.gap),
             iterations=res.iterations,
-            gap_trace=gap_trace,
-            oracle_trace=oracle_trace,
+            gap_endpoints=gap_endpoints,
+            oracle_endpoints=oracle_endpoints,
         )
         rows.append(row)
 
@@ -240,19 +240,19 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     return "\n".join(lines)
 
 
-def format_trace_table(results: list[BenchmarkResult]) -> str:
-    """Format a single traced run as a convergence trace table.
+def format_endpoints_table(results: list[BenchmarkResult]) -> str:
+    """Format a single run as an endpoints convergence table.
     
-    Only formats the first result with a populated gap_trace.
+    Only formats the first result with a populated gap_endpoints.
     """
-    traced = [r for r in results if r.gap_trace]
-    if not traced:
-        return "(no trace data — solver did not return gap_trace)"
+    endpoints = [r for r in results if r.gap_endpoints]
+    if not endpoints:
+        return "(no data — solver did not return gap_endpoints)"
     
-    r = traced[0]
+    r = endpoints[0]
     header = f"{'Outer':>5}  {'Gap':>12}  {'Oracle calls':>14}"
     sep = "─" * len(header)
     lines = [header, sep]
-    for i, (gap, calls) in enumerate(zip(r.gap_trace, r.oracle_trace or [])):
+    for i, (gap, calls) in enumerate(zip(r.gap_endpoints, r.oracle_endpoints or [])):
         lines.append(f"{i+1:>5}  {gap:>12.6e}  {calls:>14}")
     return "\n".join(lines)

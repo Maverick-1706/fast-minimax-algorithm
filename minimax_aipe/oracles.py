@@ -146,9 +146,10 @@ def _stable_lam_update(lam: Array, lam_candidate: Array, i: Array) -> Array:
 
     Allow lambda to freely adapt initially (e.g., i < 3) before clipping.
     """
+    safe_candidate = jnp.where(jnp.isfinite(lam_candidate), lam_candidate, 2.0 * lam)
     return jnp.where(
         i < 3,
-        lam_candidate,
+        safe_candidate,
         jnp.clip(lam_candidate, 0.5 * lam, 2.0 * lam),
     )
 

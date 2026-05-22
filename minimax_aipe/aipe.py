@@ -232,7 +232,7 @@ def aipe(
                 )
 
                 g = grad_fn(z_tilde)
-                v_new = s.v - a_step * (g + u)
+                v_new = s.v - a_step * g
                 if project is not None:
                     v_new = project(v_new)
 
@@ -308,7 +308,7 @@ def aipe(
                 )
 
                 g = grad_fn(z_tilde)
-                v_new = s.v - a_step * (g + u)
+                v_new = s.v - a_step * g
                 if project is not None:
                     v_new = project(v_new)
 

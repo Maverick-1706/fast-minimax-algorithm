@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import random
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# os.environ.setdefault("JAX_PLATFORMS", "cpu") # Removed to allow GPU acceleration
 
 import jax
 import numpy as np

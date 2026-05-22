@@ -191,6 +191,10 @@ def _time_solve_loop(
     if not times:
         times = [0.0]
 
+    if result is None:
+        result = solve(problem, **kwargs)
+        _sync_result(result)
+
     return times, result
 
 def _build_result(

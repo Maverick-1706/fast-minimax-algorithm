@@ -165,7 +165,7 @@ def _run_memory(problems, epsilon, export_data):
 
 
 def _run_convergence(problems, epsilon, export_data):
-    from benchmarks.convergence import sweep_epsilon, format_convergence_table, sweep_epsilon_with_traces, format_trace_table
+    from benchmarks.convergence import sweep_epsilon, format_convergence_table, sweep_epsilon_endpoints, format_endpoints_table
     print(_header("Convergence: ε-Sweep"))
     epsilons = config.EPSILON_GRID
     for prob in problems[:6]:
@@ -178,8 +178,8 @@ def _run_convergence(problems, epsilon, export_data):
 
         trace_rows = []               # ← was inside the if-block
         if len(problems) > 0 :
-            trace_rows = sweep_epsilon_with_traces(prob, [epsilons[-1]])
-            print(format_trace_table(trace_rows))
+            trace_rows = sweep_epsilon_endpoints(prob, [epsilons[-1]])
+            print(format_endpoints_table(trace_rows))
 
         export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
         export_data.setdefault("traces", []).extend(flatten_convergence_rows(trace_rows))

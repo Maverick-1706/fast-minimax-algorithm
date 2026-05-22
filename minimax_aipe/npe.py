@@ -194,9 +194,10 @@ def npe(
     # ── output selection ──────────────────────────────────────────────
     if fn is not None:
         # candidates: z0, z_half_1 … z_half_T, z_1 … z_T, weighted_avg  (2T + 2 total)
+        safe_denom = jnp.maximum(final_state.eta_sum, tiny)
         weighted_avg = jnp.where(
             final_state.eta_sum > tiny,
-            final_state.weighted_sum / final_state.eta_sum,
+            final_state.weighted_sum / safe_denom,
             final_state.z,
         )
         candidates = jnp.concatenate(
@@ -208,9 +209,10 @@ def npe(
         z_out = candidates[jnp.argmin(values)]
     else:
         # η-weighted average (Theorem E.2 output)
+        safe_denom = jnp.maximum(final_state.eta_sum, tiny)
         z_out = jnp.where(
             final_state.eta_sum > tiny,
-            final_state.weighted_sum / final_state.eta_sum,
+            final_state.weighted_sum / safe_denom,
             final_state.z,
         )
 

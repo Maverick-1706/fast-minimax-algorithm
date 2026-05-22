@@ -55,11 +55,11 @@ class BenchmarkResult:
     n_outliers: Optional[int] = None
     final_residual: Optional[float] = None
     normalized_cost: Optional[float] = None
-    # ── Per-iteration traces (Experiment 5) ───────────────────────────
-    gap_trace: Optional[list[float]] = None
-    """Duality gap after each outer iteration.  Length = outer_iters."""
-    oracle_trace: Optional[list[int]] = None
-    """Cumulative oracle calls after each outer iteration."""
+    # ── Independent Convergence Endpoints (Experiment 5) ──────────────
+    gap_endpoints: Optional[list[float]] = None
+    """Duality gap at different epsilon targets.  Length = len(epsilons)."""
+    oracle_endpoints: Optional[list[int]] = None
+    """Cumulative oracle calls for each target epsilon solve."""
     outer_iterations: Optional[int] = None
     """Number of outer iterations completed."""
 
@@ -94,9 +94,9 @@ class BenchmarkResult:
         # Explicitly label the call type for the unified metric
         d["oracle_call_type"] = stats.get("call_type", "crn")
 
-        # Traces — keep as lists (JSON-serializable)
-        d["gap_trace"] = self.gap_trace
-        d["oracle_trace"] = self.oracle_trace
+        # Endpoints — keep as lists (JSON-serializable)
+        d["gap_endpoints"] = self.gap_endpoints
+        d["oracle_endpoints"] = self.oracle_endpoints
         d["outer_iterations"] = self.outer_iterations
         
         return d

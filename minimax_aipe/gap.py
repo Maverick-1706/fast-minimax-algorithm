@@ -21,7 +21,7 @@ def estimate_gap(
     y: Array,
     *,
     num_restarts: int = 10,
-    num_steps: int = 500,
+    num_steps: int = 10000,
     lr: Optional[float] = None,
     momentum: float = 0.9,
     key: Optional[Array] = None,

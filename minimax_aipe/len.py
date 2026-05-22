@@ -432,9 +432,10 @@ def _len_scan_loop(
     else:
         # For the standard η-weighted average we fall back to the current
         # iterate when η_sum ≈ 0 (can happen if all steps rejected).
+        safe_denom = jnp.maximum(final_state.eta_sum, eta_floor_arr)
         z_out = jnp.where(
             final_state.eta_sum > eta_floor_arr,
-            final_state.weighted_sum / final_state.eta_sum,
+            final_state.weighted_sum / safe_denom,
             final_state.z,
         )
 

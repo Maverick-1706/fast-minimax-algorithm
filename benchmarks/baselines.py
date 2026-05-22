@@ -83,11 +83,7 @@ def run_eg_jit(
 
         def cond(state):
             i, _z, Fz = state
-            gap = estimate_gap(problem, _z[: problem.dim_x], _z[problem.dim_x :])
-            not_done = i < max_i
-            gap_big = gap > tol_val
-            # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
-            return not_done & gap_big
+            return i < max_i
 
         def body(state):
             i, z, Fz = state
@@ -174,11 +170,7 @@ def run_gda_jit(
 
         def cond(state):
             i, _z, Fz = state
-            gap = estimate_gap(problem, _z[: problem.dim_x], _z[problem.dim_x :])
-            not_done = i < max_i
-            gap_big = gap > tol_val
-            # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
-            return not_done & gap_big
+            return i < max_i
 
         def body(state):
             i, z, Fz = state
@@ -247,7 +239,7 @@ def run_npe_restart_jit(
     gamma = 2.0 * rho
     
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
-    T = min(max_iters, max(10, int(ell / rho)))
+    T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
 
     if z0 is None:
         x0 = problem.project_x(jnp.zeros(problem.dim_x))
@@ -324,7 +316,7 @@ def run_npe_restart_jit_benchmark(
     # Compute maximum allowed iterations based on internal epoch floor allocation
     rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
-    T = min(max_iters, max(10, int(ell / rho)))
+    T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
     max_expected_iters = (max_iters // T) * T
 
     return BaselineResult(

@@ -40,7 +40,7 @@ from minimax_aipe.alen import (
 from minimax_aipe.gap import estimate_gap
 from minimax_aipe.len import len_loop, len_restart, make_lazy_crn_npe_oracle
 from minimax_aipe.npe import make_crn_npe_oracle, npe, npe_restart, project_z
-from minimax_aipe.oracles import _stable_lam_update, eg_step
+from minimax_aipe.oracles import _block_chol_solve, _stable_lam_update, eg_step
 from minimax_aipe.problem import MinimaxProblem, OracleStats, SolverResult
 from minimax_aipe._precision import (
     ABS_TOL as _ABS_TOL,
@@ -57,46 +57,6 @@ logger = logging.getLogger(__name__)
 # ═════════════════════════════════════════════════════════════════════════════
 # Block Schur-complement linear solve  
 # ═════════════════════════════════════════════════════════════════════════════
-
-def _schur_solve(
-    J_xx: Array, J_xy: Array, J_yx: Array, J_yy: Array,
-    g_x: Array, g_y: Array, alpha: Array
-) -> Array:
-    """Solve ``(J + α·I) δ = −g`` exploiting saddle-point block structure."""
-    dim_x = J_xx.shape[0]
-    dim_y = J_yy.shape[0]
-    dtype = J_xx.dtype
-    eye_x = jnp.eye(dim_x, dtype=dtype)
-    eye_y = jnp.eye(dim_y, dtype=dtype)
-    
-    # 1. Protect alpha from extreme underflow (caps the worst-case conditioning)
-    alpha = jnp.maximum(alpha, jnp.asarray(1e-6, dtype=dtype))
-    
-    A = J_xx + alpha * eye_x
-    D = J_yy + alpha * eye_y  
-    
-    rhs = jnp.concatenate([J_yx, g_y[:, None]], axis=1)     
-    
-    D_inv_rhs = jsp_linalg.solve(D, rhs)
-    
-    D_inv_C = D_inv_rhs[:, :-1]                           
-    D_inv_g_y = D_inv_rhs[:, -1]                          
-    
-    # Schur complement S = A − B D⁻¹ C
-    # 2. Add a tiny numerical regularisation to S to ensure stability in FP32
-    nudge = jnp.asarray(1e-7, dtype=dtype) * eye_x
-    S = A - J_xy @ D_inv_C + nudge
-    
-    rhs_x = -g_x + J_xy @ D_inv_g_y
-    
-    delta_x = jsp_linalg.solve(S, rhs_x)
-    
-    delta_y = -D_inv_g_y - D_inv_C @ delta_x
-    delta = jnp.concatenate([delta_x, delta_y])
-    
-    # 3. Final safety net just in case
-    return jnp.where(jnp.isfinite(delta), delta, jnp.zeros_like(delta))
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Mutable call counter
@@ -184,23 +144,9 @@ class _CachedPipeline:
         return x_out, calls, warm_y_new, inner_calls
 
 
-# Module-level cache keyed by (problem id, gamma, M_saddle, loop params).
-_pipeline_cache: dict[tuple, _CachedPipeline] = {}
-
-
 def _get_pipeline(problem, gamma, params, M_saddle):
     """Retrieve or create a cached :class:`_CachedPipeline`."""
-    cache_key = (id(problem), gamma, M_saddle, params)
-    cached = _pipeline_cache.get(cache_key)
-    if cached is not None and cached.problem is not problem:
-        del _pipeline_cache[cache_key]
-        cached = None
-    if cached is None:
-        if len(_pipeline_cache) >= 16:
-            _pipeline_cache.clear()
-        cached = _CachedPipeline(problem, gamma, params, M_saddle)
-        _pipeline_cache[cache_key] = cached
-    return cached
+    return _CachedPipeline(problem, gamma, params, M_saddle)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -441,12 +387,12 @@ class RegularizedSubproblem:
                 J_xy = H[:dim_x, dim_x:]
                 J_yx = H[dim_x:, :dim_x]
                 J_yy = H[dim_x:, dim_x:]
-                g_x = g[:dim_x]
-                g_y = g[dim_x:]
                 
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 tol_jax = jnp.asarray(tol, dtype=dtype)
+                eye_x = jnp.eye(dim_x, dtype=dtype)
+                eye_y = jnp.eye(self.dim_y, dtype=dtype)
                 #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
@@ -457,9 +403,8 @@ class RegularizedSubproblem:
 
                 def body(state):
                     lam, _z, i, _prev = state
-                    alpha = lam + tiny
                     #  Block Schur-complement solve
-                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
+                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -487,19 +432,18 @@ class RegularizedSubproblem:
                 J_xy = H[:dim_x, dim_x:]
                 J_yx = H[dim_x:, :dim_x]
                 J_yy = H[dim_x:, dim_x:]
-                g_x = g[:dim_x]
-                g_y = g[dim_x:]
                 
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
+                eye_x = jnp.eye(dim_x, dtype=dtype)
+                eye_y = jnp.eye(self.dim_y, dtype=dtype)
                 #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
                 def body(i, state):
                     lam, z = state
-                    alpha = lam + tiny
                     #  Block Schur-complement solve
-                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
+                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -881,6 +825,8 @@ def _iProx_Psi(
                 J_yy = H_snapshot[dim_x_local:, dim_x_local:]
                 g_x = g[:dim_x_local]
                 g_y = g[dim_x_local:]
+                eye_x = jnp.eye(dim_x_local, dtype=dtype_local)
+                eye_y = jnp.eye(kernel.dim_y, dtype=dtype_local)
 
                 def cond(state):
                     lam, _z, i, prev_lam = state
@@ -889,8 +835,7 @@ def _iProx_Psi(
 
                 def body(state):
                     lam, _z, i, _prev = state
-                    alpha = lam + tiny_local
-                    delta = _schur_solve(J_xx, J_xy, J_yx, J_yy, g_x, g_y, alpha)
+                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny_local)
                     z_new = proj(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -1066,6 +1011,8 @@ def solve(
     final_eg_grad = 2
     final_eg_proj = 2
 
+    total_oracle_calls = inner_crn + outer_grad
+
     oracle_stats = OracleStats(
         grad_calls=(inner_grad + outer_grad + middle_grad
                     + final_eg_grad),
@@ -1074,7 +1021,7 @@ def solve(
         crn_calls=inner_crn,
         projection_calls=inner_proj + final_eg_proj,
         linear_solves=inner_linear,
-        oracle_calls=inner_crn,
+        oracle_calls=total_oracle_calls,
         fn_evals=0,
     )
 
@@ -1083,7 +1030,7 @@ def solve(
         y=y_out,
         gap=gap,
         iterations=actual_outer,
-        oracle_calls=int(calls.item()) if hasattr(calls, "item") else int(calls),
+        oracle_calls=total_oracle_calls,
         oracle_stats=oracle_stats,
         converged=gap <= epsilon,
         history=history,
@@ -1145,19 +1092,19 @@ def _algorithm_3(
         steps=max(20, params.T_middle * params.S_middle),
     )
 
-    total_calls = int(total_inner_calls) + int(outer_epochs) * params.T_outer
+    total_inner = int(total_inner_calls)
 
     grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)))
     phi_val = float(pipeline.phi_fn(x_hat))
     logger.info(
         "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d  "
         "outer_epochs=%d/%d",
-        phi_val, grad_norm, total_calls,
+        phi_val, grad_norm, total_inner,
         int(outer_epochs), params.S_outer,
     )
 
     z_hat = jnp.concatenate([x_hat, y_hat])
-    return z_hat, total_calls, outer_epochs
+    return z_hat, total_inner, outer_epochs
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1188,8 +1135,12 @@ def _make_phi_oracle(
     def grad_phi(x: Array) -> Array:
         y = _solve_y(x)
         gx, gy_neg = problem.grad_f(x, y)
-        # Implicit gradient correction is disabled as it can add bias with inexact inner solves.
-        return gx
+        # Implicit gradient correction to remove first-order bias from inexact y.
+        # ∇Φ(x) ≈ ∇_x f - ∇_{xy} f (∇_{yy} f)^{-1} ∇_y f
+        (_, H_xy), (_, H_yy) = problem.hessian_f(x, y)
+        damping = 1e-5 * jnp.eye(H_yy.shape[0], dtype=H_yy.dtype)
+        correction = H_xy @ jsp_linalg.solve(H_yy + damping, gy_neg)
+        return gx + correction
 
     return phi, grad_phi
 
@@ -1235,8 +1186,12 @@ def _make_psi_oracle(
     def grad_neg_psi(y: Array) -> Array:
         x = _solve_x(y)
         gx, gy_neg = g_problem.grad_f(x, y)
-        # Implicit gradient correction is disabled as it can add bias with inexact inner solves.
-        return gy_neg
+        # Implicit gradient correction to remove first-order bias from inexact x.
+        # ∇(-Ψ)(y) ≈ -∇_y g + ∇_{xy} g (∇_{xx} g)^{-1} ∇_x g
+        (H_xx, _), (H_yx, _) = g_problem.hessian_f(x, y)
+        damping = 1e-5 * jnp.eye(H_xx.shape[0], dtype=H_xx.dtype)
+        correction = H_yx @ jsp_linalg.solve(H_xx + damping, gx)
+        return gy_neg + correction
 
     return neg_psi, grad_neg_psi
 
@@ -1495,7 +1450,7 @@ def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> fl
 
     D = _diameter(problem)
     lr = 0.5 / max(_ell(problem), 1.0)
-    num_steps = max(200, min(2000, int(200 * D / max(epsilon, _GAP_FLOOR))))
+    num_steps = max(5000, min(15000, int(200 * D / max(epsilon, _GAP_FLOOR))))
     gap = estimate_gap(
         problem, x, y,
         num_restarts=8, num_steps=num_steps, lr=lr,
