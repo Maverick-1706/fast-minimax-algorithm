@@ -47,6 +47,7 @@ class BenchmarkResult:
     npe_T_factor: Optional[float] = None
     condition_number: Optional[float] = None
     rho: Optional[float] = None
+    sparsity: Optional[float] = None
     peak_bytes: Optional[int] = None
     jax_bytes: Optional[int] = None
     wall_time_min: Optional[float] = None

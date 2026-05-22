@@ -178,9 +178,7 @@ def make_bilinear_saddle(
 
     def hessian_f(x, y):
         zeros = jnp.zeros((dim, dim))
-        # FIX: Align with the Jacobian of the saddle operator vector field.
-        # d/dx (-A.T @ x) is -A.T
-        return ((zeros, A), (-A.T, zeros))
+        return ((zeros, A), (A.T, zeros))
 
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
@@ -514,8 +512,7 @@ def make_logsumexp_saddle(
         py = ey / jnp.sum(ey)
         H_xx = jnp.diag(px) - jnp.outer(px, px)
         H_yy = -jnp.diag(py) + jnp.outer(py, py)
-        # FIX: Flip the signs of the bottom row blocks to match the Jacobian of grad_f
-        return ((H_xx, A), (-A.T, -H_yy))
+        return ((H_xx, A), (A.T, H_yy))
 
     KKT = hessian_f(jnp.zeros(dim), jnp.zeros(dim))
     H_full = jnp.block([
@@ -698,17 +695,17 @@ def make_random_cubic_quadratic(
         return gx, gy_neg
 
     def hessian_f(x, y):
-        # FIX: Hessian of |z|^3 / 3 is 2 * |z|
         H_xx = Q + rho * jnp.diag(2.0 * c * jnp.abs(x))
-        H_yy = R + rho * jnp.diag(2.0 * c * jnp.abs(y))
-        # FIX: Return the Jacobian of the saddle operator (gx, gy_neg)
-        return ((H_xx, B), (-B.T, H_yy))
+        H_yy = -R - rho * jnp.diag(2.0 * c * jnp.abs(y))
+        return ((H_xx, B), (B.T, H_yy))
 
+    rho_hess = 2 * rho if rho > 0 else 0.0
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=rho, ell=ell,
+        rho=rho_hess, ell=ell,
     )
+
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
     return BenchmarkProblem(
@@ -1185,6 +1182,7 @@ def make_diagonal_saddle(
         grad_f=grad_f, hessian_f=hessian_f,
         rho=rho, ell=ell,
     )
+
     mu_x = float(jnp.min(lam))
     mu_y = float(jnp.min(mu))
     return BenchmarkProblem(

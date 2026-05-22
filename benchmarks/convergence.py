@@ -112,8 +112,8 @@ def sweep_epsilon_with_traces(
 
     Since the solver doesn't expose per-outer-iteration hooks, we build
     the convergence trace by running ``solve()`` at geometrically-spaced
-    epsilon levels from coarse to target, warm-starting each run from the
-    previous solution.  This produces a real gap-vs-cumulative-oracle-calls
+    epsilon levels from coarse to target, cold-starting each run from the
+    initial point. This produces a true single-solve gap-vs-oracle-calls
     curve without modifying the algorithm internals.
 
     Parameters
@@ -147,24 +147,25 @@ def sweep_epsilon_with_traces(
 
         gap_trace: list[float] = []
         oracle_trace: list[int] = []
-        cumulative_calls = 0
-        z_warm = prob.z0  # Start from the problem's initial point
 
-        # Force device synchronization before starting the timer
+        # Run intermediate coarser resolutions from a cold start to collect trace points
+        for trace_eps in eps_schedule[:-1]:
+            res_trace = solve(prob.problem, epsilon=trace_eps, z0=prob.z0)
+            gap_trace.append(float(res_trace.gap))
+            oracle_trace.append(int(res_trace.oracle_stats.oracle_calls))
+
+        # Force device synchronization before starting the timer for the definitive target solve
         _ = jnp.zeros(1).block_until_ready()
-        t_total = time.perf_counter()
-        res = None
-        for trace_eps in eps_schedule:
-            res = solve(prob.problem, epsilon=trace_eps, z0=z_warm)
-            cumulative_calls += int(res.oracle_stats.oracle_calls)
-            gap_trace.append(float(res.gap))
-            oracle_trace.append(cumulative_calls)
-            # Warm-start the next (tighter) solve from this solution
-            z_warm = jnp.concatenate([res.x, res.y])
-        z_warm.block_until_ready()
-        elapsed = time.perf_counter() - t_total
+        t_start = time.perf_counter()
+        
+        # Run the definitive final target epsilon solve
+        res = solve(prob.problem, epsilon=eps, z0=prob.z0)
+        res.x.block_until_ready()
+        elapsed = time.perf_counter() - t_start
 
-        assert res is not None  # eps_schedule is never empty
+        # Append final target metrics to complete the trace arrays
+        gap_trace.append(float(res.gap))
+        oracle_trace.append(int(res.oracle_stats.oracle_calls))
 
         row = BenchmarkResult(
             solver="minimax_aipe",
@@ -185,7 +186,6 @@ def sweep_epsilon_with_traces(
         rows.append(row)
 
     return rows
-
 
 def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     """Format convergence sweep results as a text table.

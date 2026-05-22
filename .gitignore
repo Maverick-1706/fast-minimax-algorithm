@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *~
-minimax_aipe copy/
 .kilo
 metadata.json
+tests/__pycache__/
+benchmarks/__pycache__/
+minimax_aipe/__pycache__/

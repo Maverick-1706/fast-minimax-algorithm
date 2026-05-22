@@ -44,11 +44,13 @@ def _time_solve(
         solve_kwargs["m_lazy"] = 5
 
     # Warmup and JIT compilation
-    w_res = solve(problem, **solve_kwargs)
-    if hasattr(w_res, "x"): w_res.x.block_until_ready()
-    if hasattr(w_res, "y"): w_res.y.block_until_ready()
-    if hasattr(w_res, "gap") and hasattr(w_res.gap, "block_until_ready"):
-        w_res.gap.block_until_ready()
+    w_res = None
+    for _ in range(config.N_WARMUP):
+        w_res = solve(problem, **solve_kwargs)
+        if hasattr(w_res, "x"): w_res.x.block_until_ready()
+        if hasattr(w_res, "y"): w_res.y.block_until_ready()
+        if hasattr(w_res, "gap") and hasattr(w_res.gap, "block_until_ready"):
+            w_res.gap.block_until_ready()
 
     times = []
     last_result = w_res  # Use warmup as fallback baseline
@@ -71,6 +73,10 @@ def _time_solve(
     ci = bootstrap_ci(times)
     d = problem.dim_x + problem.dim_y
     
+    opt_fields = {k: v for k, v in kwargs.items() if k in (
+        "m_lazy", "npe_T_factor", "condition_number", "rho", "sparsity"
+    )}
+
     res = BenchmarkResult(
         solver=f"aipe_{M_saddle}",
         problem=prob.name or "?",
@@ -85,14 +91,9 @@ def _time_solve(
         final_gap=float(last_result.gap),
         iterations=last_result.iterations,
         normalized_cost=last_result.oracle_stats.normalized_cost(d),
+        **opt_fields,
     )
     
-    for k, v in kwargs.items():
-        try:
-            object.__setattr__(res, k, v)
-        except Exception:
-            pass
-            
     return res
 
 
@@ -116,9 +117,11 @@ def scale_dimension(
         rows.append(_time_solve(prob, epsilon, "len", n_repeats))
 
         # (a) Warmup JIT first
-        w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-        if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-        if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
+        w_eg = None
+        for _ in range(config.N_WARMUP):
+            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
+            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
 
         # (b) Repeated timed runs
         if n_repeats is None:
@@ -191,9 +194,11 @@ def scale_condition_number(
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, condition_number=kappa))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, condition_number=kappa))
 
-        w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-        if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-        if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
+        w_eg = None
+        for _ in range(config.N_WARMUP):
+            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
+            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
 
         if n_repeats is None:
             n_repeats = config.N_REPEATS_SCALING
@@ -227,12 +232,8 @@ def scale_condition_number(
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
             normalized_cost=eg_stats.normalized_cost(d),
+            condition_number=kappa,
         )
-        try:
-            object.__setattr__(eg_res, "condition_number", kappa)
-        except Exception:
-            pass
-            
         rows.append(eg_res)
 
     return rows
@@ -257,9 +258,11 @@ def scale_rho(
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, rho=rho))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, rho=rho))
 
-        w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-        if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-        if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
+        w_eg = None
+        for _ in range(config.N_WARMUP):
+            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
+            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
 
         if n_repeats is None:
             n_repeats = config.N_REPEATS_SCALING
@@ -293,12 +296,8 @@ def scale_rho(
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
             normalized_cost=eg_stats.normalized_cost(d),
+            rho=rho,
         )
-        try:
-            object.__setattr__(eg_res, "rho", rho)
-        except Exception:
-            pass
-            
         rows.append(eg_res)
 
     return rows
@@ -325,9 +324,11 @@ def scale_sparsity(
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, sparsity=sparsity))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, sparsity=sparsity))
 
-        w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-        if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-        if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
+        w_eg = None
+        for _ in range(config.N_WARMUP):
+            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
+            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
 
         if n_repeats is None:
             n_repeats = config.N_REPEATS_SCALING
@@ -361,12 +362,8 @@ def scale_sparsity(
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
             normalized_cost=eg_stats.normalized_cost(d),
+            sparsity=sparsity,
         )
-        try:
-            object.__setattr__(eg_res, "sparsity", sparsity)
-        except Exception:
-            pass
-            
         rows.append(eg_res)
 
     return rows
@@ -386,6 +383,8 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
             return getattr(r, "condition_number", None) or 0.0
         elif key_col == "rho":
             return getattr(r, "rho", None) or 0.0
+        elif key_col == "sparsity":
+            return getattr(r, "sparsity", None) or 0.0
         return 0.0
 
     key = lambda r: (r.problem, _key_val(r))

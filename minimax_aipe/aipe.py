@@ -127,49 +127,8 @@ def aipe(
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], float]] = None,
     warm_init: Optional[Array] = None,
-) -> tuple[Array, int, Array]:
-    """Algorithm 1: Accelerated Inexact Proximal Extragradient.
-
-    Solves ``min_{z ∈ Z} h(z)`` for a convex function *h* using an
-    accelerated scheme with inexact second-order proximal oracles.
-
-    Parameters
-    ----------
-    prox_oracle : ProxOracle
-        ``(z_bar) → (z_tilde, u)`` satisfying Definition 4.1, or
-        ``(z_bar, warm) → (z_tilde, u, warm_out)`` when *warm_init*
-        is provided.
-    grad_fn : Callable
-        Gradient of *h* (used for the v-update, line 22 of Alg 1).
-    z0 : Array
-        Initial iterate.
-    T : int
-        Number of iterations.  **Must be a concrete (static) integer
-        under** ``jax.jit``.
-    gamma : float
-        Regularisation parameter for the proximal sub-problems.
-    project : Callable or None
-        Optional feasible-set projection for the v-update.
-    fn : Callable or None
-        Optional function-value oracle for output selection (line 25).
-        When provided, the iterate with smallest ``fn`` value among
-        all ``z_t``, ``z̃_t``, and ``z0`` is returned.
-    warm_init : Array or None
-        Optional warm-start state threaded through the scan.  When
-        provided, ``prox_oracle`` is called as ``(z_bar, warm)`` and
-        must return ``(z_tilde, u, warm_out)``.
-
-    Returns
-    -------
-    z_out : Array
-        Approximate minimiser.
-    oracle_calls : int
-        Number of proximal oracle invocations (= T). The eager call at
-        ``z0`` is reused for the first scan iteration, so it does not add
-        an extra effective oracle evaluation.
-    warm_final : Array
-        Final warm state.  Equal to *warm_init* when warm is not used.
-    """
+) -> tuple[Array, int, Optional[Array]]:
+    """Algorithm 1: Accelerated Inexact Proximal Extragradient."""
     dtype = z0.dtype
     tiny = jnp.asarray(_TINY_AIPE, dtype=dtype)
     one = jnp.asarray(1.0, dtype=dtype)
@@ -344,12 +303,20 @@ def aipe(
         final_state, (all_z_tilde, all_z) = jax.lax.scan(
             step, init, jnp.arange(T, dtype=jnp.int32),
         )
-        warm_final = warm_0
+        # Bug A Fix: Return Python None when warm-start isn't being used
+        warm_final = None
 
     # ── line 25 — output selection ────────────────────────────────
     if fn is not None:
+        # Bug B Fix: Explicitly capture z_tilde_0 so early convergence doesn't drop it
         candidates = jnp.concatenate(
-            [jnp.expand_dims(z0, 0), all_z_tilde, all_z], axis=0,
+            [
+                jnp.expand_dims(z0, 0), 
+                jnp.expand_dims(z_tilde_0, 0), 
+                all_z_tilde, 
+                all_z
+            ], 
+            axis=0,
         )
         values = jax.vmap(fn)(candidates)
         z_out = candidates[jnp.argmin(values)]
@@ -357,7 +324,7 @@ def aipe(
         z_out = final_state.z
 
     return z_out, T, warm_final
-
+    
 # ── Algorithm 2 ────────────────────────────────────────────────────────────
 
 def aipe_restart(

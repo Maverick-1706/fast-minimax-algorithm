@@ -26,6 +26,9 @@ metal = [
 mps = [
     "jax-mps",
 ]
+bench = [
+    "scipy>=1.11",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["minimax_aipe"]

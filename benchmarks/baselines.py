@@ -76,14 +76,14 @@ def run_eg_jit(
     @jax.jit
     def eg_loop(z_init):
         tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_i = jnp.int32(max_iters)
         init_Fz = F_op(z_init)
 
         def cond(state):
             i, _z, Fz = state
-            resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
+            resid_sq = jnp.sum(Fz ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
             # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
@@ -123,7 +123,10 @@ def run_eg_jit_benchmark(
     )
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap = estimate_gap(problem, x_out, y_out)
+    gap_val = estimate_gap(problem, x_out, y_out)
+    if hasattr(gap_val, "block_until_ready"):
+        gap_val.block_until_ready()
+    gap = float(gap_val)
 
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
@@ -164,14 +167,14 @@ def run_gda_jit(
     @jax.jit
     def gda_loop(z_init):
         tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_i = jnp.int32(max_iters)
         init_Fz = F_op(z_init)
 
         def cond(state):
             i, _z, Fz = state
-            resid_sq = jnp.sum(Fz.astype(jnp.float64) ** 2)
+            resid_sq = jnp.sum(Fz ** 2)
             not_done = i < max_i
             resid_big = resid_sq > tol_sq
             # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
@@ -214,7 +217,10 @@ def run_gda_jit_benchmark(
     )
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap = estimate_gap(problem, x_out, y_out)
+    gap_val = estimate_gap(problem, x_out, y_out)
+    if hasattr(gap_val, "block_until_ready"):
+        gap_val.block_until_ready()
+    gap = float(gap_val)
 
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
@@ -265,7 +271,7 @@ def run_npe_restart_jit(
     @jax.jit
     def npe_epoch_loop(z_init):
         tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=jnp.float64
+            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_epochs = jnp.int32(max(1, max_iters // T))
         init_resid_sq = merit(z_init)
@@ -273,7 +279,7 @@ def run_npe_restart_jit(
         def cond(state):
             epoch, _z, resid_sq = state
             not_done = epoch < max_epochs
-            resid_big = resid_sq.astype(jnp.float64) > tol_sq
+            resid_big = resid_sq > tol_sq
             # FIX: Remove the jnp.where guard to allow exit at epoch=0 if already within tolerance
             return not_done & resid_big
 
@@ -310,7 +316,10 @@ def run_npe_restart_jit_benchmark(
     )
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap = estimate_gap(problem, x_out, y_out)
+    gap_val = estimate_gap(problem, x_out, y_out)
+    if hasattr(gap_val, "block_until_ready"):
+        gap_val.block_until_ready()
+    gap = float(gap_val)
 
     # Compute maximum allowed iterations based on internal epoch floor allocation
     rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)

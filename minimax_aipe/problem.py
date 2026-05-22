@@ -40,6 +40,10 @@ class OracleStats:
         Feasible-set projections.
     linear_solves : int
         Linear system solves (inside CRN secular equation).
+    fn_evals : int
+        Output-selection ``vmap(fn)`` evaluations.  Each evaluation may
+        involve an inner first-order solve (e.g. gradient ascent for
+        ``Φ`` or descent for ``−Ψ``), so these can dominate runtime.
     """
 
     grad_calls: int = 0
@@ -50,12 +54,18 @@ class OracleStats:
     linear_solves: int = 0
     oracle_calls: int = 0  # Unified metric: CRN for 2nd order, grad for 1st order
     call_type: str = "crn" # Type of the primary metric (crn, gradient, etc)
+    fn_evals: int = 0      # Output-selection vmap(fn) evaluations
 
     def normalized_cost(self, dim: int) -> float:
         """FLOP-equivalent work units.
 
         Costs: grad=d, hessian=d², hvp=d², crn=d³, projection=d,
-        linear_solve=d³.
+        fn_eval=d (same as grad).
+
+        ``linear_solves`` are **not** separately costed because they are
+        a sub-operation inside each CRN call; counting both
+        ``crn_calls * d³`` and ``linear_solves * d³`` would double-count
+        the dominant d³ term.
         """
         return (
             self.grad_calls * dim
@@ -63,7 +73,7 @@ class OracleStats:
             + self.hvp_calls * dim * dim
             + self.crn_calls * dim * dim * dim
             + self.projection_calls * dim
-            + self.linear_solves * dim * dim * dim
+            + self.fn_evals * dim
         )
 
     def __add__(self, other: OracleStats) -> OracleStats:
@@ -78,6 +88,7 @@ class OracleStats:
             linear_solves=self.linear_solves + other.linear_solves,
             oracle_calls=self.oracle_calls + other.oracle_calls,
             call_type=self.call_type,
+            fn_evals=self.fn_evals + other.fn_evals,
         )
 
     def __radd__(self, other) -> OracleStats:
@@ -95,6 +106,7 @@ class OracleStats:
             "linear_solves": self.linear_solves,
             "oracle_calls": self.oracle_calls,
             "call_type": self.call_type,
+            "fn_evals": self.fn_evals,
         }
 
     def __repr__(self) -> str:
@@ -102,7 +114,7 @@ class OracleStats:
             f"OracleStats(grad={self.grad_calls}, hessian={self.hessian_calls}, "
             f"hvp={self.hvp_calls}, crn={self.crn_calls}, "
             f"proj={self.projection_calls}, linear={self.linear_solves}, "
-            f"oracle_calls={self.oracle_calls})"
+            f"oracle_calls={self.oracle_calls}, fn_evals={self.fn_evals})"
         )
 
 
@@ -131,6 +143,10 @@ class MinimaxProblem:
         Hessian Lipschitz constant (Assumption 3.5).
     ell : float, optional
         Gradient Lipschitz constant (Assumption 3.4).
+    ell_x : float, optional
+        Gradient Lipschitz constant for x. Defaults to ``ell``.
+    ell_y : float, optional
+        Gradient Lipschitz constant for y. Defaults to ``ell``.
     L : float, optional
         Function Lipschitz constant (Assumption 3.3).
     """
@@ -147,6 +163,8 @@ class MinimaxProblem:
         hessian_f: Optional[Callable[[Array, Array], Array]] = None,
         rho: Optional[float] = None,
         ell: Optional[float] = None,
+        ell_x: Optional[float] = None,
+        ell_y: Optional[float] = None,
         L: Optional[float] = None,
         project_x: Optional[Callable[[Array], Array]] = None,
         project_y: Optional[Callable[[Array], Array]] = None,
@@ -168,6 +186,8 @@ class MinimaxProblem:
         self.D_y = D_y
         self.rho = rho
         self.ell = ell
+        self.ell_x = ell_x if ell_x is not None else ell
+        self.ell_y = ell_y if ell_y is not None else ell
         self.L = L
 
         # Projections onto X and Y (default: Euclidean ball of radius D/2)

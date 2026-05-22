@@ -15,12 +15,16 @@ FP32 min normal       ≈ 1.2e-38
 
 from __future__ import annotations
 
+import os
+
 import jax
 
-# ── Disable FP64 globally (GPU-safe) ────────────────────────────────────────
-# This must happen before any JAX array is created.  It is a no-op when
-# JAX_ENABLE_X64=1 is set in the environment.
-jax.config.update("jax_enable_x64", False)
+# ── Disable FP64 globally (GPU-safe) unless user opts in ───────────────────
+# Respect the JAX_ENABLE_X64 environment variable: only force FP32 when
+# the user has NOT explicitly requested FP64.  This prevents the library
+# from silently overriding a deliberate precision choice.
+if os.environ.get("JAX_ENABLE_X64", "0") not in ("1", "true", "True"):
+    jax.config.update("jax_enable_x64", False)
 
 # ── Guard constants scaled for FP32 ─────────────────────────────────────────
 

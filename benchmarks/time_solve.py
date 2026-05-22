@@ -143,7 +143,7 @@ def benchmark_jit_vs_eager(
             z_out.block_until_ready()
             return z_out
 
-    eager_times = _time_callable(run_eager, n_warmup=n_warmup or 1, n_repeats=n_repeats)
+    eager_times = _time_callable(run_eager, n_warmup=n_warmup, n_repeats=n_repeats)
 
     # 3. Pure JIT Run Closure (Isolating the compiled XLA execution pipeline)
     core_jit = jax.jit(_core)
@@ -153,7 +153,7 @@ def benchmark_jit_vs_eager(
         z_out.block_until_ready()
         return z_out
 
-    jit_times = _time_callable(run_jit, n_warmup=n_warmup or 1, n_repeats=n_repeats)
+    jit_times = _time_callable(run_jit, n_warmup=n_warmup, n_repeats=n_repeats)
 
     speedup = eager_times["mean"] / max(jit_times["mean"], 1e-12)
 
@@ -201,7 +201,7 @@ def benchmark_solver_comparison(
             if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
                 res.gap.block_until_ready()
             return res
-        t_npe = _time_callable(run_npe, n_warmup=1, n_repeats=n_repeats)
+        t_npe = _time_callable(run_npe, n_warmup=None, n_repeats=n_repeats)
         result_npe = t_npe["result"]
         rows.append(BenchmarkResult(
             solver="aipe_npe",
@@ -231,7 +231,7 @@ def benchmark_solver_comparison(
                 res.gap.block_until_ready()
             return res
             
-        t_len = _time_callable(run_len, n_warmup=1, n_repeats=n_repeats)
+        t_len = _time_callable(run_len, n_warmup=None, n_repeats=n_repeats)
         result_len = t_len["result"]
         rows.append(BenchmarkResult(
             solver="aipe_len",
@@ -262,7 +262,7 @@ def benchmark_solver_comparison(
             z_out.block_until_ready()
             return z_out, residual, actual_iters
 
-        t_eg = _time_callable(run_eg, n_warmup=1, n_repeats=n_repeats)
+        t_eg = _time_callable(run_eg, n_warmup=None, n_repeats=n_repeats)
         eg_z_out, eg_residual, eg_actual_iters = t_eg["result"]
         eg_x = eg_z_out[:problem.dim_x]
         eg_y = eg_z_out[problem.dim_x:]
@@ -300,7 +300,7 @@ def benchmark_solver_comparison(
             z_out.block_until_ready()
             return z_out, residual, actual_iters
 
-        t_gda = _time_callable(run_gda, n_warmup=1, n_repeats=n_repeats)
+        t_gda = _time_callable(run_gda, n_warmup=None, n_repeats=n_repeats)
         gda_z_out, gda_residual, gda_actual_iters = t_gda["result"]
         gda_x = gda_z_out[:problem.dim_x]
         gda_y = gda_z_out[problem.dim_x:]

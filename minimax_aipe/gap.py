@@ -25,7 +25,7 @@ def estimate_gap(
     lr: Optional[float] = None,
     momentum: float = 0.9,
     key: Optional[Array] = None,
-) -> float:
+) -> Array:
     """Estimate the duality gap via Nesterov accelerated gradient ascent/descent.
 
     For small problems, computes:
@@ -72,18 +72,27 @@ def estimate_gap(
 
     Returns
     -------
-    gap : float
+    gap : Array
         Estimated duality gap (guaranteed ≥ 0 when the first restart
         seed is the current iterate and the optimisation does not
         diverge).
     """
     if key is None:
-        key = jax.random.PRNGKey(42)
+        import time
+        # Use nanosecond timestamp to ensure unique seeds across rapid sequential calls
+        seed = time.time_ns() % (2**31 - 1)
+        key = jax.random.PRNGKey(seed)
 
     # ── Dynamic learning rate from problem smoothness ─────────────────
     if lr is None:
-        ell = problem.ell
-        lr = 1.0 / ell if ell is not None and ell > 0.0 else 0.01
+        ell_x = problem.ell_x
+        lr_x = 1.0 / ell_x if ell_x is not None and ell_x > 0.0 else 0.01
+        
+        ell_y = problem.ell_y
+        lr_y = 1.0 / ell_y if ell_y is not None and ell_y > 0.0 else 0.01
+    else:
+        lr_x = lr
+        lr_y = lr
 
     # Keep x,y 1D even when caller passed scalar values.
     x = jnp.atleast_1d(jnp.asarray(x))
@@ -123,10 +132,11 @@ def estimate_gap(
             v_new   = β · v_cur + lr · g          (ascent)
             y_new   = Π(y_cur + v_new)            (project)
         """
+        """Single NAG ascent step on y (traced inside fori_loop)."""
         y_cur, v_cur = carry
         y_ahead = y_cur + beta * v_cur
         g = grad_f_x(y_ahead)
-        v_new = beta * v_cur + lr * g
+        v_new = beta * v_cur + lr_y * g  # Fixed: uses lr_y instead of joint lr
         y_new = project_y(y_cur + v_new)
         return (y_new, v_new)
 
@@ -153,10 +163,11 @@ def estimate_gap(
             v_new   = β · v_cur − lr · g          (descent)
             x_new   = Π(x_cur + v_new)            (project)
         """
+        """Single NAG descent step on x (traced inside fori_loop)."""
         x_cur, v_cur = carry
         x_ahead = x_cur + beta * v_cur
         g = grad_f_y(x_ahead)
-        v_new = beta * v_cur - lr * g
+        v_new = beta * v_cur - lr_x * g  # Fixed: uses lr_x instead of joint lr
         x_new = project_x(x_cur + v_new)
         return (x_new, v_new)
 
@@ -171,7 +182,7 @@ def estimate_gap(
     grad_f_y = jax.grad(f_y)
     best_min = jax.lax.fori_loop(0, num_restarts, x_restart_body, jnp.inf)
 
-    return max(0.0, float(best_max - best_min))
+    return jnp.maximum(0.0, best_max - best_min)
 
 
 __all__ = [

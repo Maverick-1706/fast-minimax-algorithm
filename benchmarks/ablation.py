@@ -172,8 +172,10 @@ def _time_solve_loop(
 ) -> tuple[list[float], object]:
     """Run ``solve(problem, **kwargs)`` with warmup + n_repeats timed calls."""
     import gc
-    w_result = solve(problem, **kwargs)
-    _sync_result(w_result)
+    w_result = None
+    for _ in range(config.N_WARMUP):
+        w_result = solve(problem, **kwargs)
+        _sync_result(w_result)
 
     times: list[float] = []
     result = w_result  # Fix: Initialize with warmup as the fallback baseline

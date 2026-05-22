@@ -215,6 +215,14 @@ def test_make_phi_oracle_shape_and_signature():
 
     phi_fn, grad_phi_fn = _make_phi_oracle(problem, gamma=1.0, params=params)
 
+    x = jnp.array([0.3, -0.1])
+    val = phi_fn(x)
+    grad = grad_phi_fn(x)
+    assert val.ndim == 0, f"phi should be scalar, got shape {val.shape}"
+    assert grad.shape == x.shape, f"grad shape {grad.shape} != x shape {x.shape}"
+    assert jnp.all(jnp.isfinite(val))
+    assert jnp.all(jnp.isfinite(grad))
+
 def test_make_phi_oracle_at_origin():
     """For a quadratic problem centred at zero, max_y f(0, y) should be zero
     and ∇Phi(0) should be zero since A·0 = 0."""
@@ -223,12 +231,32 @@ def test_make_phi_oracle_at_origin():
 
     phi_fn, grad_phi_fn = _make_phi_oracle(problem, gamma=1.0, params=params)
 
+    x0 = jnp.zeros(2)
+    val = phi_fn(x0)
+    grad = grad_phi_fn(x0)
+    assert float(jnp.abs(val)) < 1e-4, f"phi(0) should be ~0, got {val}"
+    assert jnp.allclose(grad, 0.0, atol=1e-4), f"grad_phi(0) should be ~0, got {grad}"
+
 def test_make_phi_oracle_gradient_is_approximate_subgradient():
     """∇Phi(x) ≈ ∇_x f(x, y*(x)) where y*(x) = argmax_y f(x, y)."""
     problem, _A = _quadratic_problem(mu=1.0)
     params = _compute_loop_params(problem, epsilon=0.1, gamma=1.0)
 
     phi_fn, grad_phi_fn = _make_phi_oracle(problem, gamma=1.0, params=params)
+
+    x = jnp.array([0.5, -0.3])
+    grad = grad_phi_fn(x)
+    # For f = (1/2)(||x||^2 - ||y||^2) + x^T A y, grad_phi = x + A y*(x)
+    # The grad should be finite and nonzero at a nonzero x
+    assert jnp.all(jnp.isfinite(grad))
+    assert jnp.linalg.norm(grad) > 0.0, "grad should be nonzero away from origin"
+    # Directional consistency: phi(x + eps*d) >= phi(x) + grad.dot(d)*eps - O(eps^2)
+    # for a convex function (basic sanity check on sign)
+    eps = 1e-3
+    d = grad / jnp.linalg.norm(grad)
+    val_x = phi_fn(x)
+    val_xd = phi_fn(x + eps * d)
+    assert float(val_xd - val_x) >= -1e-3, "phi should not decrease along gradient direction"
 
 def test_make_psi_oracle_shape_and_signature():
     """-Psi oracles should return scalars and matching-shape grads."""
@@ -239,6 +267,14 @@ def test_make_psi_oracle_shape_and_signature():
     neg_psi_fn, grad_neg_psi_fn = _make_psi_oracle(
         problem, x_bar, gamma=1.0, params=params,
     )
+
+    y = jnp.array([0.1, 0.2])
+    val = neg_psi_fn(y)
+    grad = grad_neg_psi_fn(y)
+    assert val.ndim == 0, f"neg_psi should be scalar, got shape {val.shape}"
+    assert grad.shape == y.shape, f"grad shape {grad.shape} != y shape {y.shape}"
+    assert jnp.all(jnp.isfinite(val))
+    assert jnp.all(jnp.isfinite(grad))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Inexact proximal oracles  (Algorithms 4 and 5)
