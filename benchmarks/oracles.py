@@ -45,6 +45,7 @@ def count_npe_oracles(n_iters: int) -> OracleStats:
         grad_calls=n_iters,
         hessian_calls=n_iters,
         projection_calls=2 * n_iters,
+        linear_solves=50 * n_iters,
         # Default to base calls; the normalized_cost(d) method will handle scaling
         oracle_calls=n_iters, 
         call_type="crn",

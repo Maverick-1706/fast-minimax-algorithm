@@ -255,8 +255,8 @@ def scale_rho(
         prob = get_problem("nonzero_rho", dim, seed=prob_seed, rho=rho)
         problem = prob.problem
 
-        rows.append(_time_solve(prob, epsilon, "npe", n_repeats, rho=rho))
-        rows.append(_time_solve(prob, epsilon, "len", n_repeats, rho=rho))
+        rows.append(_time_solve(prob, epsilon, "npe", n_repeats, rho=2 * rho))
+        rows.append(_time_solve(prob, epsilon, "len", n_repeats, rho=2 * rho))
 
         w_eg = None
         for _ in range(config.N_WARMUP):
@@ -296,7 +296,7 @@ def scale_rho(
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
             normalized_cost=eg_stats.normalized_cost(d),
-            rho=rho,
+            rho=2 * rho,
         )
         rows.append(eg_res)
 

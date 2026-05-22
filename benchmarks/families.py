@@ -19,6 +19,7 @@ Sweep generators
 
 from __future__ import annotations
 
+import math
 from typing import Any, Callable
 
 import jax
@@ -112,13 +113,22 @@ def _make_polytope_projector(
         rhs = G @ z0 - h
         y = alpha
         t = 1.0
-        for _ in range(n_steps):
+
+        def cond(state):
+            i, alpha, y, t, change = state
+            return (i < n_steps) & (change > tol)
+
+        def body(state):
+            i, alpha, y, t, _ = state
             grad = GGT @ y - rhs
             alpha_new = jnp.maximum(y - step * grad, 0.0)
             t_new = 0.5 * (1.0 + jnp.sqrt(1.0 + 4.0 * t * t))
             y = alpha_new + ((t - 1.0) / t_new) * (alpha_new - alpha)
-            alpha = alpha_new
-            t = t_new
+            change = jnp.linalg.norm(alpha_new - alpha)
+            return (i + 1, alpha_new, y, t_new, change)
+
+        init_state = (jnp.int32(0), alpha, y, t, jnp.array(1.0 + tol))
+        _, alpha, _, _, _ = jax.lax.while_loop(cond, body, init_state)
         return z0 - G.T @ alpha
 
     return project
@@ -190,7 +200,7 @@ def make_bilinear_saddle(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="bilinear_saddle",
         dim=dim,
         z0=None,
@@ -264,7 +274,7 @@ def make_quadratic_saddle(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, seed=seed),
         name="quadratic_saddle",
         dim=dim,
         z0=None,
@@ -368,7 +378,7 @@ def make_nonzero_rho_quadratic(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, seed=seed),
         name="nonzero_rho",
         dim=dim,
         z0=None,
@@ -416,7 +426,7 @@ def make_box_constrained_quadratic(
 
     KKT = jnp.block([[Q, B], [B.T, -R]])
     ell = float(jnp.linalg.norm(KKT, ord=2))
-    D = 2.0  # box [-1, 1] has diameter 2
+    D = 2.0 * math.sqrt(dim)
 
     def f(x, y):
         return 0.5 * x @ Q @ x + x @ B @ y - 0.5 * y @ R @ y
@@ -441,7 +451,7 @@ def make_box_constrained_quadratic(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, seed=seed),
         name="box_quadratic",
         dim=dim,
         z0=None,
@@ -514,24 +524,20 @@ def make_logsumexp_saddle(
         H_yy = -jnp.diag(py) + jnp.outer(py, py)
         return ((H_xx, A), (A.T, H_yy))
 
-    KKT = hessian_f(jnp.zeros(dim), jnp.zeros(dim))
-    H_full = jnp.block([
-        [KKT[0][0], KKT[0][1]],
-        [KKT[1][0], KKT[1][1]],
-    ])
-    ell = float(jnp.linalg.norm(H_full, ord=2))
+    ell = float(jnp.linalg.norm(A, ord=2)) + 1.0
+    rho = 1.0
 
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=0.0, ell=ell,
+        rho=rho, ell=ell,
     )
     return BenchmarkProblem(
         problem=problem,
-        x_star=jnp.zeros(dim),
-        y_star=jnp.zeros(dim),
+        x_star=None,
+        y_star=None,
         gap_star=None,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="logsumexp_saddle",
         dim=dim,
         z0=None,
@@ -613,7 +619,7 @@ def make_sparse_bilinear(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="sparse_bilinear",
         dim=dim,
         z0=None,
@@ -699,7 +705,7 @@ def make_random_cubic_quadratic(
         H_yy = -R - rho * jnp.diag(2.0 * c * jnp.abs(y))
         return ((H_xx, B), (B.T, H_yy))
 
-    rho_hess = 2 * rho if rho > 0 else 0.0
+    rho_hess = 2 * rho * float(jnp.max(c)) if rho > 0 else 0.0
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
@@ -713,7 +719,7 @@ def make_random_cubic_quadratic(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, seed=seed),
         name="random_cubic",
         dim=dim,
         z0=None,
@@ -804,7 +810,7 @@ def make_adversarial_training_toy(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x_val, mu_y=mu_y_val),
+        meta=build_benchmark_meta(problem, mu_x=mu_x_val, mu_y=mu_y_val, seed=seed),
         name="adversarial_training",
         dim=dim,
         z0=None,
@@ -846,6 +852,8 @@ def make_bilinear_polytope(
         Saddle at origin (if feasible), gap = 0.
     """
     from minimax_aipe import MinimaxProblem
+
+    n_constraints = max(n_constraints, 2 * dim)
 
     key = jax.random.PRNGKey(seed)
     k1, k2, k3, k4, k5 = jax.random.split(key, 5)
@@ -891,7 +899,7 @@ def make_bilinear_polytope(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="bilinear_polytope",
         dim=dim,
         z0=None,
@@ -1030,7 +1038,7 @@ def make_scalable_diagonal(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity, seed=seed),
         name="scalable_diagonal",
         dim=dim,
         z0=None,
@@ -1044,7 +1052,7 @@ def make_diagonal_saddle(
     dim: int,
     kappa: float = 1e4,
     rho: float = 0.0,
-    sparsity: float = 0.0,
+    sparsity: float = 1.0,
     n_blocks: int = 1,
     seed: int = 0,
 ) -> BenchmarkProblem:
@@ -1072,10 +1080,10 @@ def make_diagonal_saddle(
         quadratic with ``ρ = 0``.  ``rho > 0`` adds an isotropic cubic
         perturbation ``(ρ/3)(‖x‖³ − ‖y‖³)``.
     sparsity : float
-        Fraction of coordinates that are coupled (``0 ≤ sparsity ≤ 1``).
-        ``sparsity=0`` couples all coordinates; ``sparsity=1`` gives
-        fully dense coupling.  Values in ``(0, 1)`` create a Bernoulli
-        mask so only that fraction of ``σ_i`` are nonzero.
+        Fraction of coordinates that are coupled (``0 < sparsity ≤ 1``).
+        ``sparsity=1`` couples all coordinates (fully dense coupling).
+        Values in ``(0, 1)`` create a Bernoulli mask so only that
+        fraction of ``σ_i`` are nonzero.
     n_blocks : int
         Number of conditioning blocks for heterogeneous curvature.
         Each block gets an independent eigenvalue rescaling factor
@@ -1120,10 +1128,10 @@ def make_diagonal_saddle(
             mu  = _restore_kappa(mu,  log_range)
 
     # ── 3. Coupling coefficients with optional sparsity ──────────────
-    if sparsity <= 0.0:
+    if sparsity >= 1.0:
         sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
     else:
-        p_active = jnp.clip(1.0 - sparsity, 0.0, 1.0)
+        p_active = jnp.clip(sparsity, 0.0, 1.0)
         k_mask, k_val = jax.random.split(k_coupling)
         mask = jax.random.bernoulli(k_mask, p=p_active, shape=(dim,))
         raw_sigma = jax.random.uniform(k_val, (dim,), minval=-1.0, maxval=1.0)
@@ -1180,7 +1188,7 @@ def make_diagonal_saddle(
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=rho, ell=ell,
+        rho=2 * rho, ell=ell,
     )
 
     mu_x = float(jnp.min(lam))
@@ -1190,7 +1198,7 @@ def make_diagonal_saddle(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, sparsity=sparsity, seed=seed),
         name="diagonal_saddle",
         dim=dim,
         z0=None,

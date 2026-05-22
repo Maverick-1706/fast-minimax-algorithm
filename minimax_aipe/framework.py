@@ -175,7 +175,7 @@ class _CachedPipeline:
         result = aipe(
             self.prox_phi, self.grad_phi_fn, x_cur,
             self.params.T_outer, self.gamma,
-            project=self.problem.project_x, fn=self.phi_fn,
+            project=self.problem.project_x,
             warm_init=warm_y,
         )
         x_out, calls, warm_y_new, inner_calls = (
@@ -464,7 +464,7 @@ class RegularizedSubproblem:
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
                     return (
-                        _stable_lam_update(lam, lam_candidate),
+                        _stable_lam_update(lam, lam_candidate, i),
                         z_new, i + 1, lam,
                     )
 
@@ -503,7 +503,7 @@ class RegularizedSubproblem:
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
-                    return _stable_lam_update(lam, lam_candidate), z_new
+                    return _stable_lam_update(lam, lam_candidate, i), z_new
 
                 lam, z = jax.lax.fori_loop(
                     0, n_iters, body, (lam0, z_bar)
@@ -767,7 +767,7 @@ def _iProx_Phi(
         return aipe(
             _prox_psi, grad_neg_psi_fn, y_cur,
             params.T_middle, gamma,
-            project=problem.project_y, fn=neg_psi_fn,
+            project=problem.project_y,
             warm_init=warm_z,
         )
 
@@ -895,7 +895,7 @@ def _iProx_Psi(
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
                     return (
-                        _stable_lam_update(lam, lam_candidate),
+                        _stable_lam_update(lam, lam_candidate, i),
                         z_new,
                         i + 1,
                         lam,
@@ -929,15 +929,14 @@ def _iProx_Psi(
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
-    def _run_inner_warm(z: Array, _warm) -> tuple[Array, int, None]:
+    def _run_inner_warm(z: Array, _warm):
         z_new, inner_calls = _run_inner(z)
-        return z_new, inner_calls, None
+        return z_new, inner_calls, None, inner_calls
 
-    z_hat, epochs, _, _inner_restart_calls = _restart_jax(
+    z_hat, epochs, _, calls = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
     )
-    calls = epochs * inner_T
 
     # ── EG refinement ────────────────────────────────────────────────
     ell_h = max(kernel.ell_h, _ABS_TOL)
@@ -971,6 +970,9 @@ def solve(
     npe_T_factor: float = 1.0,
     z0: Optional[Array] = None,
     verbose: bool = False,
+    no_restart: bool = False,
+    no_acceleration: bool = False,
+    fixed_inner_iters: Optional[int] = None,
 ) -> SolverResult:
     """Solve ``min_x max_y f(x, y)`` to approximately ``epsilon`` gap."""
     if epsilon <= 0:
@@ -990,6 +992,7 @@ def solve(
     mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
     params = _compute_loop_params(
         problem, epsilon, gamma, npe_T_factor, m_lazy=m_lazy,
+        no_restart=no_restart, fixed_inner_iters=fixed_inner_iters,
     )
 
     if verbose:
@@ -1008,6 +1011,7 @@ def solve(
     z_hat, calls, outer_epochs = _algorithm_3(
         problem, gamma, mu_x, mu_y, params.zeta_1,
         params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
+        no_acceleration=no_acceleration,
     )
 
     eta = 1.0 / (2.0 * max(_ell(problem), _ABS_TOL))
@@ -1062,20 +1066,16 @@ def solve(
     final_eg_grad = 2
     final_eg_proj = 2
 
-    steps_per_fn_eval = max(20, params.T_middle * params.S_middle)
-    fn_evals = actual_outer * (2 * params.T_outer + 1)
-    output_selection_grad = fn_evals * steps_per_fn_eval
-
     oracle_stats = OracleStats(
         grad_calls=(inner_grad + outer_grad + middle_grad
-                    + final_eg_grad + output_selection_grad),
+                    + final_eg_grad),
         hessian_calls=inner_hessians,
         hvp_calls=0,
         crn_calls=inner_crn,
         projection_calls=inner_proj + final_eg_proj,
         linear_solves=inner_linear,
         oracle_calls=inner_crn,
-        fn_evals=fn_evals,
+        fn_evals=0,
     )
 
     return SolverResult(
@@ -1083,7 +1083,7 @@ def solve(
         y=y_out,
         gap=gap,
         iterations=actual_outer,
-        oracle_calls=int(calls.item()) + 1 if hasattr(calls, "item") else int(calls) + 1,
+        oracle_calls=int(calls.item()) if hasattr(calls, "item") else int(calls),
         oracle_stats=oracle_stats,
         converged=gap <= epsilon,
         history=history,
@@ -1105,6 +1105,7 @@ def _algorithm_3(
     M_saddle: str = "npe",
     z0: Optional[Array] = None,
     verbose: bool = False,
+    no_acceleration: bool = False,
 ) -> tuple[Array, int, int]:
     """Algorithm 3: Full three-loop Minimax-AIPE reduction."""
     if params is None:
@@ -1120,8 +1121,21 @@ def _algorithm_3(
     logger.debug("Pipeline kernel: %r", pipeline.kernel)
 
     # ── Outer AIPE with restart + early stopping ─────────────────────
+    if no_acceleration:
+        def _non_accel_epoch(x: Array, w: Optional[Array] = None) -> tuple[Array, int, Optional[Array], Array]:
+            """Non-accelerated proximal point epoch (ablation baseline)."""
+            if w is not None:
+                x_new, _u, y_new, inner_calls = pipeline.prox_phi(x, w)
+            else:
+                x_new, _u, y_new, inner_calls = pipeline.prox_phi(x)
+            return x_new, 1, y_new, inner_calls
+
+        epoch_fn = _non_accel_epoch
+    else:
+        epoch_fn = pipeline.run_outer_epoch
+
     x_hat, outer_epochs, _warm_y_out, total_inner_calls = _restart_jax(
-        pipeline.run_outer_epoch, x0, params.S_outer,
+        epoch_fn, x0, params.S_outer,
         step_tol=params.zeta_1,
     )
 
@@ -1131,7 +1145,7 @@ def _algorithm_3(
         steps=max(20, params.T_middle * params.S_middle),
     )
 
-    total_calls = int(total_inner_calls)
+    total_calls = int(total_inner_calls) + int(outer_epochs) * params.T_outer
 
     grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)))
     phi_val = float(pipeline.phi_fn(x_hat))
@@ -1174,11 +1188,8 @@ def _make_phi_oracle(
     def grad_phi(x: Array) -> Array:
         y = _solve_y(x)
         gx, gy_neg = problem.grad_f(x, y)
-        # Implicit gradient correction to remove first-order bias from inexact y.
-        # ∇Φ(x) ≈ ∇_x f - ∇_{xy} f (∇_{yy} f)^{-1} ∇_y f
-        (_, H_xy), (_, H_yy) = problem.hessian_f(x, y)
-        correction = H_xy @ jsp_linalg.solve(H_yy, gy_neg)
-        return gx + correction
+        # Implicit gradient correction is disabled as it can add bias with inexact inner solves.
+        return gx
 
     return phi, grad_phi
 
@@ -1224,11 +1235,8 @@ def _make_psi_oracle(
     def grad_neg_psi(y: Array) -> Array:
         x = _solve_x(y)
         gx, gy_neg = g_problem.grad_f(x, y)
-        # Implicit gradient correction to remove first-order bias from inexact x.
-        # ∇(-Ψ)(y) ≈ -∇_y g + ∇_{xy} g (∇_{xx} g)^{-1} ∇_x g
-        (H_xx, _), (H_yx, _) = g_problem.hessian_f(x, y)
-        correction = H_yx @ jsp_linalg.solve(H_xx, gx)
-        return gy_neg + correction
+        # Implicit gradient correction is disabled as it can add bias with inexact inner solves.
+        return gy_neg
 
     return neg_psi, grad_neg_psi
 
@@ -1390,6 +1398,8 @@ def _compute_loop_params(
     gamma: float,
     npe_T_factor: float = 0.5,
     m_lazy: int = -1,  # -1 = auto-adapt
+    no_restart: bool = False,
+    fixed_inner_iters: Optional[int] = None,
 ) -> _LoopParams:
     """Compute iteration counts and accuracy parameters for all three loops."""
     D = max(_diameter(problem), _ABS_TOL)
@@ -1411,6 +1421,9 @@ def _compute_loop_params(
         _S_CAP,
     ))
 
+    if no_restart:
+        S = 1
+
     # ── Outer loop: AIPE on Φ (Theorem 4.1) ───────────────────────────
     T_outer = max(1, min(200, int(ceil(
         npe_T_factor * (gamma / max(mu_x, _ABS_TOL)) ** (2.0 / 7.0)
@@ -1429,6 +1442,12 @@ def _compute_loop_params(
         npe_T_factor * (npe_gamma / max(mu_inner, _ABS_TOL)) ** (2.0 / 3.0)
     ))))
 
+    S_inner_default = max(1, min(S, _S_CAP))
+
+    if fixed_inner_iters is not None:
+        T_inner = max(1, fixed_inner_iters)
+        S_inner_default = 1
+
     # ── Adaptive m_lazy heuristic ─────────────────────────────────────
     if m_lazy <= 0:
         dim_total = problem.dim_x + problem.dim_y
@@ -1444,7 +1463,7 @@ def _compute_loop_params(
         T_middle=T_middle,
         S_middle=max(1, min(S, _S_CAP)),
         T_inner=T_inner,
-        S_inner=max(1, min(S, _S_CAP)),
+        S_inner=S_inner_default,
         zeta_1=zeta_1,
         zeta_2=zeta_2,
         zeta_3=zeta_3,

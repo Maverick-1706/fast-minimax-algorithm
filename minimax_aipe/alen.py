@@ -45,8 +45,6 @@ from minimax_aipe.oracles import crn_oracle_minimization
 #: ``z_snapshot → (z_bar → (z_tilde, u))``
 ProxOracleFactory = Callable[[Array], ProxOracle]
 
-# Persistent cache to maintain stable proximal oracle identities across outer loop iterations
-_PROXY_CACHE: dict[tuple[ProxOracleFactory, int], ProxOracle] = {}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Core factory
@@ -157,15 +155,9 @@ def aipe_restart_lazy(
     z = z0
     total_calls = 0
     for s in range(S):
-        # Look up or populate the persistent cache using a stable identifier per epoch slot
-        cache_key = (prox_oracle_factory, s)
-        if cache_key in _PROXY_CACHE:
-            prox = _PROXY_CACHE[cache_key]
-        else:
-            prox = prox_oracle_factory(z)
-            _PROXY_CACHE[cache_key] = prox
+        prox = prox_oracle_factory(z)
             
-        result = aipe(prox, grad_fn, z, T, gamma,
+        result = aipe(prox, grad_fn, z, T, gamma,   
                        project=project, fn=fn)
         z, calls = result[0], result[1]
         total_calls += calls

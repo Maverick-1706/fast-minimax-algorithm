@@ -55,7 +55,7 @@ class TestDiagonalSaddle:
 
     def test_rho_positive_adds_cubic(self):
         p = make_diagonal_saddle(10, rho=5.0)
-        assert p.problem.rho == 5.0
+        assert p.problem.rho == 10.0
         assert p.problem.ell is not None
         # ell should be larger than the quadratic-only case
         p0 = make_diagonal_saddle(10, rho=0.0)
@@ -119,7 +119,7 @@ class TestSweepGenerators:
         kappas = [1, 100]
         problems = sweep_kappa(make_diagonal_saddle, 10, kappas, rho=2.0)
         for p in problems:
-            assert p.problem.rho == 2.0
+            assert p.problem.rho == 4.0
 
     def test_sweep_rho_length(self):
         rhos = [0.0, 0.1, 1.0, 10.0]

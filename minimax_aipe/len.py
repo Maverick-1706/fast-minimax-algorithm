@@ -354,10 +354,10 @@ def _len_scan_loop(
 
         # ── Line 2: lazy cubic-regularised Newton step ───────────────
         result = oracle(s.z, z_snapshot)
-        if builtins.len(result) == 3:
+        if isinstance(result, tuple) and builtins.len(result) == 3:
             z_half, _u, F_half = result   # type: ignore[misc]
         else:
-            z_half, _u = result           # type: ignore[misc]
+            z_half, _u = result[:2]       # type: ignore[misc]
             F_half = F_fn(z_half)
 
         # ── Line 3: step size η_t = 1 / (2γ · ‖z_t − z_{t+1/2}‖) ──

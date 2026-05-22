@@ -70,8 +70,12 @@ def _block_chol_solve(g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny):
     # (2,2) block of the symmetrised system: K = H_yy − λI
     K = H_yy - lam * eye_y
 
-    # Heuristic: trace < 0 ⇒ K is "negative" ⇒ factor −K
-    neg = jnp.trace(K) < 0.0
+    # Robust check: which sign requires a smaller Gershgorin shift to become SPD?
+    dK = jnp.diag(K)
+    oK = jnp.sum(jnp.abs(K), axis=1) - jnp.abs(dK)
+    shift_pos = jnp.maximum(-jnp.min(dK - oK), 0.0)
+    shift_neg = jnp.maximum(-jnp.min(-dK - oK), 0.0)
+    neg = shift_neg < shift_pos
 
     def _solve(k_mat, sign_val):
         k_spd = k_mat + tiny * eye_y
@@ -137,14 +141,13 @@ def _safe_sym_chol_solve(A, b, tiny):
     )
 
 
-def _stable_lam_update(lam: Array, lam_candidate: Array) -> Array:
+def _stable_lam_update(lam: Array, lam_candidate: Array, i: Array) -> Array:
     """Secular-equation safeguard: clip to [0.5 λ, 2 λ] after first iter.
 
-    On the very first iteration ``lam == 0`` so clipping is skipped;
-    afterwards the ratio is bounded to prevent oscillation.
+    Allow lambda to freely adapt initially (e.g., i < 3) before clipping.
     """
     return jnp.where(
-        lam == 0.0,
+        i < 3,
         lam_candidate,
         jnp.clip(lam_candidate, 0.5 * lam, 2.0 * lam),
     )
@@ -225,7 +228,7 @@ def crn_oracle(
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return (_stable_lam_update(lam, lam_candidate), z_new, i + 1, lam)
+            return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
@@ -240,7 +243,7 @@ def crn_oracle(
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return _stable_lam_update(lam, lam_candidate), z_new
+            return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
 
@@ -280,7 +283,7 @@ def crn_oracle_minimization(
                 z_new = project(z_new)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return (_stable_lam_update(lam, lam_candidate), z_new, i + 1, lam)
+            return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
@@ -295,7 +298,7 @@ def crn_oracle_minimization(
                 z_new = project(z_new)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return _stable_lam_update(lam, lam_candidate), z_new
+            return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
 
@@ -336,7 +339,7 @@ def lazy_crn_oracle(
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return (_stable_lam_update(lam, lam_candidate), z_new, i + 1, lam)
+            return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
         lam, z, _i, _p = jax.lax.while_loop(
             cond, body,
@@ -351,7 +354,7 @@ def lazy_crn_oracle(
             z_new = _project_z(problem, z_bar + delta)
             d_eff = z_new - z_bar
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
-            return _stable_lam_update(lam, lam_candidate), z_new
+            return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
 

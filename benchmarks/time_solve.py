@@ -259,14 +259,14 @@ def benchmark_solver_comparison(
 
         def run_eg():
             z_out, residual, wall_time, actual_iters = run_eg_jit(problem, max_iters=100_000, z0=z0, tol=epsilon)
+            eg_x = z_out[:problem.dim_x]
+            eg_y = z_out[problem.dim_x:]
+            eg_gap = float(estimate_gap(problem, eg_x, eg_y))
             z_out.block_until_ready()
-            return z_out, residual, actual_iters
+            return z_out, residual, actual_iters, eg_gap
 
         t_eg = _time_callable(run_eg, n_warmup=None, n_repeats=n_repeats)
-        eg_z_out, eg_residual, eg_actual_iters = t_eg["result"]
-        eg_x = eg_z_out[:problem.dim_x]
-        eg_y = eg_z_out[problem.dim_x:]
-        eg_gap = float(estimate_gap(problem, eg_x, eg_y))
+        eg_z_out, eg_residual, eg_actual_iters, eg_gap = t_eg["result"]
         eg_stats = OracleStats(
             grad_calls=2 * eg_actual_iters,
             projection_calls=2 * eg_actual_iters,
@@ -297,14 +297,14 @@ def benchmark_solver_comparison(
 
         def run_gda():
             z_out, residual, wall_time, actual_iters = run_gda_jit(problem, max_iters=200_000, z0=z0, tol=epsilon)
+            gda_x = z_out[:problem.dim_x]
+            gda_y = z_out[problem.dim_x:]
+            gda_gap = float(estimate_gap(problem, gda_x, gda_y))
             z_out.block_until_ready()
-            return z_out, residual, actual_iters
+            return z_out, residual, actual_iters, gda_gap
 
         t_gda = _time_callable(run_gda, n_warmup=None, n_repeats=n_repeats)
-        gda_z_out, gda_residual, gda_actual_iters = t_gda["result"]
-        gda_x = gda_z_out[:problem.dim_x]
-        gda_y = gda_z_out[problem.dim_x:]
-        gda_gap = float(estimate_gap(problem, gda_x, gda_y))
+        gda_z_out, gda_residual, gda_actual_iters, gda_gap = t_gda["result"]
         gda_stats = OracleStats(
             grad_calls=gda_actual_iters,
             projection_calls=2 * gda_actual_iters,

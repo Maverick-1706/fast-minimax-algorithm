@@ -30,7 +30,7 @@ Key design choices
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -46,6 +46,9 @@ from minimax_aipe.oracles import crn_oracle_minimization
 #: A proximal oracle: ``z_bar ↦ (z_tilde, u)`` satisfying Definition 4.1.
 #: The oracle's ``(γ, δ)`` parameters are baked into the closure.
 ProxOracle = Callable[[Array], tuple[Array, Array]]
+
+#: A warm-start proximal oracle: ``(z_bar, warm_init) ↦ (z_tilde, u, warm_out)``.
+WarmStartProxOracle = Callable[[Array, Array], tuple[Array, Array, Array, ...]]
 
 
 # ── loop state ─────────────────────────────────────────────────────────────
@@ -119,7 +122,7 @@ def make_crn_prox_oracle(
 
 @partial(jax.jit, static_argnums=[0,1,3,5,6])
 def aipe(
-    prox_oracle: ProxOracle,
+    prox_oracle: Union[ProxOracle, WarmStartProxOracle],
     grad_fn: Callable[[Array], Array],
     z0: Array,
     T: int,
@@ -168,8 +171,6 @@ def aipe(
     if _has_warm:
         def step(carry, t):
             s, warm, total_inner_calls = carry
-
-            is_converged = s.lam_prime < lam_tol
 
             def _do_step(_):
                 disc = one + 8.0 * s.lam_prime * s.A
@@ -241,10 +242,7 @@ def aipe(
                 return (new_state, warm_new,
                         total_inner_calls + step_inner_calls), (z_tilde, z_new)
 
-            def _noop(_):
-                return (s, warm, total_inner_calls), (s.z, s.z)
-
-            return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
+            return _do_step(None)
 
         scan_init = (init, warm_0, init_inner_calls)
         (final_state, warm_final, total_inner_calls), (all_z_tilde, all_z) = jax.lax.scan(
@@ -253,8 +251,6 @@ def aipe(
     else:
         def step(carry, t):
             s, total_inner_calls = carry
-
-            is_converged = s.lam_prime < lam_tol
 
             def _do_step(_):
                 disc = one + 8.0 * s.lam_prime * s.A
@@ -322,10 +318,7 @@ def aipe(
                 return (new_state,
                         total_inner_calls + step_inner_calls), (z_tilde, z_new)
 
-            def _noop(_):
-                return (s, total_inner_calls), (s.z, s.z)
-
-            return jax.lax.cond(is_converged, _noop, _do_step, operand=None)
+            return _do_step(None)
 
         (final_state, total_inner_calls), (all_z_tilde, all_z) = jax.lax.scan(
             step, (init, init_inner_calls), jnp.arange(T, dtype=jnp.int32),

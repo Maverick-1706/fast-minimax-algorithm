@@ -75,7 +75,7 @@ def make_bilinear_problem(dim: int = 3, kappa: float = 1.0, seed: int = 42) -> B
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="bilinear",
         dim=dim,
     )
@@ -137,7 +137,7 @@ def make_quadratic_saddle_problem(
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y),
+        meta=build_benchmark_meta(problem, mu_x=mu_x, mu_y=mu_y, seed=seed),
         name="quadratic",
         dim=dim,
     )
@@ -261,7 +261,7 @@ def make_ill_conditioned_bilinear(dim: int = 4, kappa: float = 1e4, seed: int = 
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0),
+        meta=build_benchmark_meta(problem, mu_x=0.0, mu_y=0.0, seed=seed),
         name="ill_conditioned_bilinear",
         dim=dim,
     )
@@ -329,7 +329,7 @@ def make_ill_conditioned_quadratic(dim: int = 4, kappa: float = 1e4, seed: int =
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=1.0, mu_y=1.0),
+        meta=build_benchmark_meta(problem, mu_x=1.0, mu_y=1.0, seed=seed),
         name="ill_conditioned_quadratic",
         dim=dim,
     )
@@ -442,7 +442,7 @@ def make_10d_quadratic(dim: int = 5, kappa: float = 10.0, seed: int = 0) -> Benc
         x_star=jnp.zeros(dim),
         y_star=jnp.zeros(dim),
         gap_star=0.0,
-        meta=build_benchmark_meta(problem, mu_x=1.0, mu_y=1.0),
+        meta=build_benchmark_meta(problem, mu_x=1.0, mu_y=1.0, seed=seed),
         name="10d_quadratic",
         dim=dim,
     )

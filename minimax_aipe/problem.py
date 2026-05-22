@@ -314,6 +314,8 @@ class BenchmarkMeta:
     """Whether a closed-form saddle point is known."""
     sparsity: float | None = None
     """Fraction of coupled coordinates (0 = dense, 1 = fully sparse)."""
+    seed: int | None = None
+    """Deterministic seed used when constructing the problem."""
 
     @property
     def strongly_convex_concave(self) -> bool:
@@ -348,6 +350,7 @@ def build_benchmark_meta(
     mu_y: float | None,
     has_analytical_solution: bool = True,
     sparsity: float | None = None,
+    seed: int | None = None,
 ) -> BenchmarkMeta:
     """Construct standardized benchmark metadata."""
 
@@ -371,6 +374,7 @@ def build_benchmark_meta(
         mu_y=mu_y,
         has_analytical_solution=has_analytical_solution,
         sparsity=sparsity,
+        seed=seed,
     )
 
 class SolverResult(NamedTuple):

@@ -207,12 +207,7 @@ def fit_from_convergence_rows(
             continue
 
         epsilons = [r.epsilon for r in valid_rows]
-        calls = [
-            int(r.oracle_stats.normalized_cost(2 * dim)) 
-            if hasattr(r.oracle_stats, "normalized_cost") 
-            else int(r.oracle_stats.oracle_calls)
-            for r in valid_rows
-        ]
+        calls = [int(r.oracle_stats.oracle_calls) for r in valid_rows]
 
         fit = fit_loglog_slope(
             epsilons=epsilons,

@@ -75,19 +75,19 @@ def run_eg_jit(
 
     @jax.jit
     def eg_loop(z_init):
-        tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
+        tol_val = jnp.asarray(
+            tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_i = jnp.int32(max_iters)
         init_Fz = F_op(z_init)
 
         def cond(state):
             i, _z, Fz = state
-            resid_sq = jnp.sum(Fz ** 2)
+            gap = estimate_gap(problem, _z[: problem.dim_x], _z[problem.dim_x :])
             not_done = i < max_i
-            resid_big = resid_sq > tol_sq
+            gap_big = gap > tol_val
             # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
-            return not_done & resid_big
+            return not_done & gap_big
 
         def body(state):
             i, z, Fz = state
@@ -166,19 +166,19 @@ def run_gda_jit(
 
     @jax.jit
     def gda_loop(z_init):
-        tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
+        tol_val = jnp.asarray(
+            tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_i = jnp.int32(max_iters)
         init_Fz = F_op(z_init)
 
         def cond(state):
             i, _z, Fz = state
-            resid_sq = jnp.sum(Fz ** 2)
+            gap = estimate_gap(problem, _z[: problem.dim_x], _z[problem.dim_x :])
             not_done = i < max_i
-            resid_big = resid_sq > tol_sq
+            gap_big = gap > tol_val
             # FIX: Remove the jnp.where guard to allow exit at i=0 if already within tolerance
-            return not_done & resid_big
+            return not_done & gap_big
 
         def body(state):
             i, z, Fz = state
@@ -270,27 +270,27 @@ def run_npe_restart_jit(
 
     @jax.jit
     def npe_epoch_loop(z_init):
-        tol_sq = jnp.asarray(
-            tol ** 2 if tol > 0 else -1.0, dtype=z_init.dtype
+        tol_val = jnp.asarray(
+            tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_epochs = jnp.int32(max(1, max_iters // T))
-        init_resid_sq = merit(z_init)
+        init_gap = estimate_gap(problem, z_init[: problem.dim_x], z_init[problem.dim_x :])
 
         def cond(state):
-            epoch, _z, resid_sq = state
+            epoch, _z, gap = state
             not_done = epoch < max_epochs
-            resid_big = resid_sq > tol_sq
+            gap_big = gap > tol_val
             # FIX: Remove the jnp.where guard to allow exit at epoch=0 if already within tolerance
-            return not_done & resid_big
+            return not_done & gap_big
 
         def body(state):
             epoch, z, _ = state
             z_new, _ = npe(oracle, F_op, z, T, gamma, project=proj, fn=merit)
-            new_resid_sq = merit(z_new)
-            return (epoch + 1, z_new, new_resid_sq)
+            new_gap = estimate_gap(problem, z_new[: problem.dim_x], z_new[problem.dim_x :])
+            return (epoch + 1, z_new, new_gap)
 
         epochs_out, z_out, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, init_resid_sq)
+            cond, body, (jnp.int32(0), z_init, init_gap)
         )
         return epochs_out, z_out
 
