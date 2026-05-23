@@ -124,8 +124,11 @@ def _make_polytope_projector(
             alpha_new = jnp.maximum(y - step * grad, 0.0)
             t_new = 0.5 * (1.0 + jnp.sqrt(1.0 + 4.0 * t * t))
             y = alpha_new + ((t - 1.0) / t_new) * (alpha_new - alpha)
-            change = jnp.linalg.norm(alpha_new - alpha)
-            return (i + 1, alpha_new, y, t_new, change)
+            
+            # FIX: Better to evaluate exact primal constraint violation for the stopping condition 
+            # to guarantee the polytope projector doesn't return infeasible points.
+            primal_viol = jnp.linalg.norm(jnp.maximum(rhs - GGT @ alpha_new, 0.0))
+            return (i + 1, alpha_new, y, t_new, primal_viol)
 
         init_state = (jnp.int32(0), alpha, y, t, jnp.array(1.0 + tol))
         _, alpha, _, _, _ = jax.lax.while_loop(cond, body, init_state)
@@ -946,8 +949,8 @@ def make_scalable_diagonal(
         eigenvalues; ``α=2`` gives aggressive decay (many near-zero
         eigenvalues, a few large ones).
     sparsity : float
-        Fraction of coordinates that are coupled (``0 < sparsity ≤ 1``).
-        ``sparsity=1.0`` recovers dense diagonal coupling.
+        Fraction of coordinates that are zeroes (``0 ≤ sparsity ≤ 1``).
+        ``sparsity=0.0`` recovers dense coupling, ``sparsity=1.0`` is fully decoupled.
     n_blocks : int
         Number of conditioning blocks.  Each block gets a separate
         eigenvalue rescaling factor ``β_b`` drawn uniformly from
@@ -998,7 +1001,8 @@ def make_scalable_diagonal(
         mu  = _restore_condition_number(mu,  log_range_mu)
 
     # ── 3. Sparse random coupling ────────────────────────────────────
-    mask = jax.random.bernoulli(k_coupling, p=sparsity, shape=(dim,))
+    p_active = jnp.clip(1.0 - sparsity, 0.0, 1.0)
+    mask = jax.random.bernoulli(k_coupling, p=p_active, shape=(dim,))
     raw_sigma = jax.random.uniform(k1, (dim,), minval=-1.0, maxval=1.0)
     sigma = jnp.where(mask, raw_sigma, 0.0)
     nnz = int(jnp.sum(mask))
@@ -1080,10 +1084,9 @@ def make_diagonal_saddle(
         quadratic with ``ρ = 0``.  ``rho > 0`` adds an isotropic cubic
         perturbation ``(ρ/3)(‖x‖³ − ‖y‖³)``.
     sparsity : float
-        Fraction of coordinates that are coupled (``0 < sparsity ≤ 1``).
-        ``sparsity=1`` couples all coordinates (fully dense coupling).
-        Values in ``(0, 1)`` create a Bernoulli mask so only that
-        fraction of ``σ_i`` are nonzero.
+        Fraction of zeros in the coupling matrix (``0 ≤ sparsity ≤ 1``).
+        ``sparsity=0.0`` couples all coordinates (fully dense coupling).
+        ``sparsity=1.0`` couples zero coordinates (fully decoupled).
     n_blocks : int
         Number of conditioning blocks for heterogeneous curvature.
         Each block gets an independent eigenvalue rescaling factor
@@ -1128,10 +1131,12 @@ def make_diagonal_saddle(
             mu  = _restore_kappa(mu,  log_range)
 
     # ── 3. Coupling coefficients with optional sparsity ──────────────
-    if sparsity >= 1.0:
+    if sparsity <= 0.0:
         sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
+    elif sparsity >= 1.0:
+        sigma = jnp.zeros(dim)
     else:
-        p_active = jnp.clip(sparsity, 0.0, 1.0)
+        p_active = 1.0 - sparsity
         k_mask, k_val = jax.random.split(k_coupling)
         mask = jax.random.bernoulli(k_mask, p=p_active, shape=(dim,))
         raw_sigma = jax.random.uniform(k_val, (dim,), minval=-1.0, maxval=1.0)

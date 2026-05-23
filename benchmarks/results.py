@@ -45,6 +45,7 @@ class BenchmarkResult:
     # ── Extended (optional) ───────────────────────────────────────
     m_lazy: Optional[int] = None
     npe_T_factor: Optional[float] = None
+    fixed_inner_iters: Optional[int] = None
     condition_number: Optional[float] = None
     rho: Optional[float] = None
     sparsity: Optional[float] = None
@@ -76,7 +77,17 @@ class BenchmarkResult:
         d["ci_lo"] = ci[0]
         d["ci_hi"] = ci[1]
 
-        stats = d.pop("oracle_stats")
+        stats_obj = d.pop("oracle_stats", {})
+        if stats_obj is None:
+            stats = {}
+        elif isinstance(stats_obj, dict):
+            stats = stats_obj
+        elif hasattr(stats_obj, "to_dict"):
+            stats = stats_obj.to_dict()
+        else:
+            from dataclasses import asdict, is_dataclass
+            stats = asdict(stats_obj) if is_dataclass(stats_obj) else dict(stats_obj)
+            
         for k, v in stats.items():
             # Standardize names: use 'oracle_calls' as the primary metric
             # but also keep the specific counts (grad, hessian, etc)

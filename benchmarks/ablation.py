@@ -401,7 +401,7 @@ def ablation_fixed_inner(
             times=times,
             result=result,
             d=d,
-            extra={"m_lazy": n_inner},  # Pack inner loop budget into m_lazy slot safely
+            extra={"fixed_inner_iters": n_inner},
         ))
 
     return rows
@@ -562,9 +562,9 @@ def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
         
         # FIX: Correct column logic mapping. 
-        # "Inner" pulls the budget allocated to the 'm_lazy' property via the generator.
+        # "Inner" pulls the budget allocated to the 'fixed_inner_iters' property via the generator.
         # "Outer" pulls the actual outer execution loop step counter.
-        inner_val = getattr(r, "m_lazy", 0)
+        inner_val = getattr(r, "fixed_inner_iters", 0)
         outer_val = getattr(r, "iterations", 0)
         calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
         

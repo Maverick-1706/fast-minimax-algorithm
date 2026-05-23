@@ -137,6 +137,8 @@ def estimate_gap(
         g = grad_f_x(y_ahead)
         v_new = beta * v_cur + lr_y * g  # Fixed: uses lr_y instead of joint lr
         y_new = project_y(y_cur + v_new)
+        # FISTA momentum reset: velocity is the actual step taken
+        v_new = y_new - y_cur
         return (y_new, v_new, jnp.maximum(current_max, f_x(y_new)))
 
     def y_restart_body(restart_idx: int, best_val: Array) -> Array:
@@ -168,6 +170,8 @@ def estimate_gap(
         g = grad_f_y(x_ahead)
         v_new = beta * v_cur - lr_x * g  # Fixed: uses lr_x instead of joint lr
         x_new = project_x(x_cur + v_new)
+        # FISTA momentum reset: velocity is the actual step taken
+        v_new = x_new - x_cur
         return (x_new, v_new, jnp.minimum(current_min, f_y(x_new)))
 
     def x_restart_body(restart_idx: int, best_val: Array) -> Array:

@@ -168,6 +168,10 @@ def _run_convergence(problems, epsilon, export_data):
     from benchmarks.convergence import sweep_epsilon, format_convergence_table, sweep_epsilon_endpoints, format_endpoints_table
     print(_header("Convergence: ε-Sweep"))
     epsilons = config.EPSILON_GRID
+    
+    all_convergence_rows = []
+    all_trace_rows = []
+    
     for prob in problems[:6]:
         name = prob.name or "?"
         dim = prob.dim or prob.problem.dim_x
@@ -176,13 +180,14 @@ def _run_convergence(problems, epsilon, export_data):
         print(format_convergence_table(rows))
         print()
 
-        trace_rows = []               # ← was inside the if-block
-        if len(problems) > 0 :
-            trace_rows = sweep_epsilon_endpoints(prob, [epsilons[-1]])
-            print(format_endpoints_table(trace_rows))
+        trace_rows = sweep_epsilon_endpoints(prob, [epsilons[-1]])
+        print(format_endpoints_table(trace_rows))
 
-        export_data.setdefault("convergence", []).extend(flatten_convergence_rows(rows))
-        export_data.setdefault("traces", []).extend(flatten_convergence_rows(trace_rows))
+        all_convergence_rows.extend(flatten_convergence_rows(rows))
+        all_trace_rows.extend(flatten_convergence_rows(trace_rows))
+        
+    export_data.setdefault("convergence", []).extend(all_convergence_rows)
+    export_data.setdefault("traces", []).extend(all_trace_rows)
 
 
 def _run_ablation(problems, epsilon, n_repeats, export_data):

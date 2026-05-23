@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from itertools import groupby
 from typing import Optional
 
-import jax.numpy as jnp
+import numpy as np
 from scipy.stats import t as t_dist
 
 from benchmarks.results import BenchmarkResult
@@ -62,29 +62,29 @@ class RateFit:
 # ── Private helpers ───────────────────────────────────────────────────────
 
 
-def _ols(x: jnp.ndarray, y: jnp.ndarray) -> tuple[float, float, float]:
+def _ols(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
     """Standard OLS: y ~ slope · x + intercept.
 
     Returns
     -------
     slope, intercept, r_squared
     """
-    x_mean = jnp.mean(x)
-    y_mean = jnp.mean(y)
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
     dx = x - x_mean
     dy = y - y_mean
-    slope = jnp.sum(dx * dy) / jnp.sum(dx * dx)
+    slope = np.sum(dx * dy) / np.sum(dx * dx)
     intercept = y_mean - slope * x_mean
     y_pred = slope * x + intercept
-    ss_res = jnp.sum((y - y_pred) ** 2)
-    ss_tot = jnp.sum((y - y_mean) ** 2)
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - y_mean) ** 2)
     r_squared = 1.0 - ss_res / ss_tot
     return float(slope), float(intercept), float(r_squared)
 
 
 def _jackknife_slope_ci(
-    x: jnp.ndarray,
-    y: jnp.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
     confidence: float = 0.95,
 ) -> tuple[float, float]:
     """Leave-one-out jackknife CI for the OLS slope.
@@ -109,13 +109,13 @@ def _jackknife_slope_ci(
     # Compute leave-one-out slopes
     loo_slopes: list[float] = []
     for i in range(n):
-        mask = jnp.arange(n) != i
+        mask = np.arange(n) != i
         si, _, _ = _ols(x[mask], y[mask])
         loo_slopes.append(si)
 
-    slopes_arr = jnp.array(loo_slopes)
-    theta_bar = jnp.mean(slopes_arr)
-    se = jnp.sqrt((n - 1) / n * jnp.sum((slopes_arr - theta_bar) ** 2))
+    slopes_arr = np.array(loo_slopes)
+    theta_bar = np.mean(slopes_arr)
+    se = np.sqrt((n - 1) / n * np.sum((slopes_arr - theta_bar) ** 2))
 
     df = n - 1
     t_crit = float(t_dist.ppf((1 + confidence) / 2, df))
@@ -163,8 +163,8 @@ def fit_loglog_slope(
     epsilons = [epsilons[i] for i in valid_indices]
     oracle_calls = [oracle_calls[i] for i in valid_indices]
 
-    x = jnp.log(1.0 / jnp.array(epsilons))
-    y = jnp.log(jnp.array(oracle_calls, dtype=jnp.float64))
+    x = np.log(1.0 / np.array(epsilons))
+    y = np.log(np.array(oracle_calls, dtype=np.float64))
 
     slope, intercept, r_squared = _ols(x, y)
     ci_lo, ci_hi = _jackknife_slope_ci(x, y)

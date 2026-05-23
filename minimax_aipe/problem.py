@@ -406,7 +406,7 @@ class SolverResult(NamedTuple):
     iterations: int
     oracle_calls: int
     converged: bool
-    oracle_stats: OracleStats = OracleStats()
+    oracle_stats: Optional[OracleStats] = None
     history: Optional[dict] = None
 
 __all__ = [

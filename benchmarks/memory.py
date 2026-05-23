@@ -231,6 +231,13 @@ def benchmark_memory(
     3. Timed solve with forced materialisation.
     4. Post-solve snapshot → deltas and peak.
 
+    Methodology Note: "Device Δ" (device_delta) measures *incremental memory
+    requested from the OS/Device allocator beyond the JIT-compiled steady-state pool*,
+    rather than the absolute HBM footprint of the tensors. Because XLA aggressively
+    holds onto memory blocks, this delta can drop to 0 MB if the timed solve
+    completely reuses the warmup pool. Thus, `primary_peak` reports the absolute
+    `device_peak_bytes_in_use` to avoid artificial 0 MB reports.
+
     Parameters
     ----------
     prob : BenchmarkProblem
@@ -284,7 +291,8 @@ def benchmark_memory(
         device_limit = after.device_bytes_limit
         device_reserved = after.device_bytes_reserved
         utilization = (device_peak / device_limit) if device_limit > 0 else 0.0
-        primary_peak = device_delta      # ← per-problem incremental memory
+        # FIX: Avoid XLA memory pool delta trap where reused warmup pools yield 0 MB peak
+        primary_peak = device_peak
     else:
         device_delta = 0
         device_peak = 0

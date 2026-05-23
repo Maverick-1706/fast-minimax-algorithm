@@ -896,7 +896,7 @@ def _iProx_Psi(
     _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
     v_out = c_out[kernel.dim_x :]
 
-    inner_calls = calls + 1
+    inner_calls = calls
 
     return y_out, v_out, z_hat, inner_calls
 
@@ -1008,18 +1008,47 @@ def solve(
     
     outer_grad = actual_outer * params.T_outer
     middle_grad = actual_outer * params.T_outer * params.S_middle * params.T_middle
-    final_eg_grad = 2
+    
+    N_y = max(20, params.T_middle * params.S_middle) # Hidden GD steps in _solve_y
+    N_x = max(20, params.T_inner * params.S_inner)   # Hidden GD steps in _solve_x
+
+    # grad_phi is called T_outer times per outer epoch
+    hidden_grad_phi = actual_outer * params.T_outer * N_y
+    # grad_neg_psi is called T_outer * S_middle * T_middle times
+    hidden_grad_psi = middle_grad * N_x
+    
+    # Missing first-order sources:
+    # 1. _minimize_x_auto inside _iProx_Phi
+    hidden_iprox_phi_min_x_grad = actual_outer * params.T_outer * N_x
+    # 2. Post-EG grads in _iProx_Phi
+    hidden_iprox_phi_eg_grad = actual_outer * params.T_outer * 2
+    # 3. EG refinement in _iProx_Psi
+    hidden_iprox_psi_eg_grad = middle_grad * 2
+    # 4. Final _maximize_y in _algorithm_3
+    final_maximize_y_grad = N_y
+
+    # Final gap estimation (if fallback triggered, though hard to track exactly, 
+    # we add the theoretical cost of the final EG step)
+    final_eg_grad = 2 
+
+    total_hidden_grad = (
+        hidden_grad_phi + hidden_grad_psi +
+        hidden_iprox_phi_min_x_grad + hidden_iprox_phi_eg_grad +
+        hidden_iprox_psi_eg_grad + final_maximize_y_grad
+    )
+    
+    total_hidden_proj = total_hidden_grad  # Inner GD/EG steps match proj 1:1 with grads
+
     final_eg_proj = 2
 
     total_oracle_calls = inner_crn + outer_grad
 
     oracle_stats = OracleStats(
-        grad_calls=(inner_grad + outer_grad + middle_grad
-                    + final_eg_grad),
+        grad_calls=(inner_grad + outer_grad + middle_grad + total_hidden_grad + final_eg_grad),
         hessian_calls=inner_hessians,
         hvp_calls=0,
         crn_calls=inner_crn,
-        projection_calls=inner_proj + final_eg_proj,
+        projection_calls=inner_proj + final_eg_proj + total_hidden_proj,
         linear_solves=inner_linear,
         oracle_calls=total_oracle_calls,
         fn_evals=0,
@@ -1139,7 +1168,8 @@ def _make_phi_oracle(
         # ∇Φ(x) ≈ ∇_x f - ∇_{xy} f (∇_{yy} f)^{-1} ∇_y f
         (_, H_xy), (_, H_yy) = problem.hessian_f(x, y)
         damping = 1e-5 * jnp.eye(H_yy.shape[0], dtype=H_yy.dtype)
-        correction = H_xy @ jsp_linalg.solve(H_yy + damping, gy_neg)
+        # Solve (-H_yy + damping) v = -gy_neg  (which is mathematically H_yy v = gy_neg)
+        correction = H_xy @ jsp_linalg.solve(-H_yy + damping, -gy_neg)
         return gx + correction
 
     return phi, grad_phi

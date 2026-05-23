@@ -78,25 +78,30 @@ def run_eg_jit(
         tol_val = jnp.asarray(
             tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
-        max_i = jnp.int32(max_iters)
-        init_Fz = F_op(z_init)
+        eval_freq = jnp.int32(100)
+        max_chunks = jnp.int32(max_iters // 100)
+        Fz_init = F_op(z_init)
 
         def cond(state):
-            i, _z, Fz = state
-            return i < max_i
+            chunk, _z, Fz = state
+            res_norm = jnp.linalg.norm(Fz)
+            return (chunk < max_chunks) & (res_norm > tol_val)
+
+        def chunk_body(i, z_cur):
+            z_half = proj(z_cur - eta * F_op(z_cur))
+            z_new = proj(z_cur - eta * F_op(z_half))
+            return z_new
 
         def body(state):
-            i, z, Fz = state
-            z_half = proj(z - eta * Fz)
-            F_half = F_op(z_half)
-            z_new = proj(z - eta * F_half)
-            new_Fz = F_op(z_new)
-            return (i + 1, z_new, new_Fz)
+            chunk, z, _ = state
+            z_new = jax.lax.fori_loop(0, eval_freq, chunk_body, z)
+            Fz_new = F_op(z_new)
+            return (chunk + 1, z_new, Fz_new)
 
-        iters_out, z_out, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, init_Fz)
+        chunks_out, z_out, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, Fz_init)
         )
-        return iters_out, z_out
+        return chunks_out * eval_freq, z_out
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
@@ -165,28 +170,34 @@ def run_gda_jit(
         tol_val = jnp.asarray(
             tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
-        max_i = jnp.int32(max_iters)
-        init_Fz = F_op(z_init)
+        eval_freq = jnp.int32(100)
+        max_chunks = jnp.int32(max_iters // 100)
+        Fz_init = F_op(z_init)
 
         def cond(state):
-            i, _z, Fz = state
-            return i < max_i
+            chunk, _z, Fz = state
+            res_norm = jnp.linalg.norm(Fz)
+            return (chunk < max_chunks) & (res_norm > tol_val)
 
-        def body(state):
-            i, z, Fz = state
+        def chunk_body(i, z_cur):
+            Fz = F_op(z_cur)
             gx = Fz[: problem.dim_x]
             gy_neg = Fz[problem.dim_x :]
-            x, y = z[: problem.dim_x], z[problem.dim_x :]
+            x, y = z_cur[: problem.dim_x], z_cur[problem.dim_x :]
             x_new = problem.project_x(x - eta * gx)
             y_new = problem.project_y(y - eta * gy_neg)
-            z_new = jnp.concatenate([x_new, y_new])
-            new_Fz = F_op(z_new)
-            return (i + 1, z_new, new_Fz)
+            return jnp.concatenate([x_new, y_new])
 
-        iters_out, z_out, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, init_Fz)
+        def body(state):
+            chunk, z, _ = state
+            z_new = jax.lax.fori_loop(0, eval_freq, chunk_body, z)
+            Fz_new = F_op(z_new)
+            return (chunk + 1, z_new, Fz_new)
+
+        chunks_out, z_out, _ = jax.lax.while_loop(
+            cond, body, (jnp.int32(0), z_init, Fz_init)
         )
-        return iters_out, z_out
+        return chunks_out * eval_freq, z_out
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
@@ -235,11 +246,19 @@ def run_npe_restart_jit(
     tol: float = 0.0,
 ) -> tuple[Array, float, float, int]:
     """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs."""
-    rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
-    gamma = 2.0 * rho
-    
+    actual_rho = float(problem.rho) if problem.rho is not None else 0.0
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
-    T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
+    
+    if actual_rho <= 1e-10:
+        # Smooth-case fallback using eps-dependent bound
+        eps = max(tol, 1e-4)
+        gamma = eps
+        T = min(max_iters, max(10, int((ell / eps) ** 0.5)))
+    else:
+        # Strongly monotone case
+        rho = max(actual_rho, 1e-6)
+        gamma = 2.0 * rho
+        T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
 
     if z0 is None:
         x0 = problem.project_x(jnp.zeros(problem.dim_x))
@@ -266,23 +285,22 @@ def run_npe_restart_jit(
             tol if tol > 0 else -1.0, dtype=z_init.dtype
         )
         max_epochs = jnp.int32(max(1, max_iters // T))
-        init_gap = estimate_gap(problem, z_init[: problem.dim_x], z_init[problem.dim_x :])
+        Fz_init = F_op(z_init)
 
         def cond(state):
-            epoch, _z, gap = state
+            epoch, _z, Fz = state
             not_done = epoch < max_epochs
-            gap_big = gap > tol_val
-            # FIX: Remove the jnp.where guard to allow exit at epoch=0 if already within tolerance
-            return not_done & gap_big
+            res_norm = jnp.linalg.norm(Fz)
+            return not_done & (res_norm > tol_val)
 
         def body(state):
             epoch, z, _ = state
             z_new, _ = npe(oracle, F_op, z, T, gamma, project=proj, fn=merit)
-            new_gap = estimate_gap(problem, z_new[: problem.dim_x], z_new[problem.dim_x :])
-            return (epoch + 1, z_new, new_gap)
+            Fz_new = F_op(z_new)
+            return (epoch + 1, z_new, Fz_new)
 
         epochs_out, z_out, _ = jax.lax.while_loop(
-            cond, body, (jnp.int32(0), z_init, init_gap)
+            cond, body, (jnp.int32(0), z_init, Fz_init)
         )
         return epochs_out, z_out
 
@@ -314,9 +332,16 @@ def run_npe_restart_jit_benchmark(
     gap = float(gap_val)
 
     # Compute maximum allowed iterations based on internal epoch floor allocation
-    rho = max(float(problem.rho) if problem.rho else 1.0, 1e-6)
+    actual_rho = float(problem.rho) if problem.rho is not None else 0.0
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
-    T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
+    
+    if actual_rho <= 1e-10:
+        eps = max(epsilon, 1e-4)
+        T = min(max_iters, max(10, int((ell / eps) ** 0.5)))
+    else:
+        rho = max(actual_rho, 1e-6)
+        T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
+    
     max_expected_iters = (max_iters // T) * T
 
     return BaselineResult(
