@@ -13,15 +13,51 @@ Usage::
 """
 
 from __future__ import annotations
-
+import warnings
 from dataclasses import dataclass, field
 from itertools import groupby
 from typing import Optional
-
 import numpy as np
 from scipy.stats import t as t_dist
-
 from benchmarks.results import BenchmarkResult
+
+# ── Problem classification for theoretical rates ─────────────────────────
+_SCSC_PROBLEMS = {
+    "quadratic", "quadratic_saddle", "ill_quadratic", "box_constrained_quadratic",
+    "box_quadratic", "adversarial_training", "diagonal_saddle", "scalable_diagonal",
+    "offset_quadratic", "nonzero_rho", "random_cubic",
+}
+
+_GENERAL_CVC_PROBLEMS = {
+    "bilinear", "ill_bilinear", "sparse_bilinear", "bilinear_polytope",
+    "logsumexp_saddle", "separable",
+}
+
+def _get_theoretical_slope(solver: str, problem: str) -> Optional[float]:
+    """Return the theoretical log-log convergence slope for a solver/problem pair.
+    
+    Returns None if the rate is sub-polynomial (e.g. logarithmic) or unknown,
+    preventing false mismatches in polynomial rate fitting.
+    """
+    solver = solver.lower()
+    is_scsc = problem in _SCSC_PROBLEMS
+    is_general = problem in _GENERAL_CVC_PROBLEMS
+    
+    if solver in ("eg", "gda"):
+        if is_scsc:
+            return 0.0  # Linear convergence -> O(log(1/ε)) -> log-log slope ≈ 0
+        if is_general:
+            return 1.0  # Sublinear -> O(1/ε) -> log-log slope = 1.0
+        return None
+        
+    if solver in ("aipe_npe", "aipe_len", "npe_restart", "minimax_aipe"):
+        if is_general:
+            return 4.0 / 7.0
+        # For SCSC, AIPE's rate may differ or not be strictly polynomial 4/7.
+        # Return None to avoid false mismatches.
+        return None
+        
+    return None
 
 
 # ── Data class ────────────────────────────────────────────────────────────
@@ -40,16 +76,11 @@ class RateFit:
     slope_ci: tuple[float, float]   # 95 % jackknife CI
     n_points: int
     theoretical_slope: Optional[float] = None
-
-    THEORY: dict = field(default_factory=lambda: {
-        "aipe_npe": 4 / 7,        
-        "aipe_len": 4 / 7,
-        "eg": 1.0,
-        "gda": 1.0,
-    }, init=False, repr=False)
+    n_dropped: int = 0              # Number of non-converged points excluded
 
     def __post_init__(self):
-        self.theoretical_slope = self.THEORY.get(self.solver)
+        if self.theoretical_slope is None:
+            self.theoretical_slope = _get_theoretical_slope(self.solver, self.problem)
 
     @property
     def matches_theory(self) -> Optional[bool]:
@@ -146,23 +177,27 @@ def _group_by_solver_problem_dim(
 
 def fit_loglog_slope(
     epsilons: list[float],
-    oracle_calls: list[int],
+    oracle_calls: list[float],
     solver: str = "",
     problem: str = "",
     dim: int = 0,
 ) -> RateFit:
-    """Fit a log-log slope to (1/ε, oracle_calls) data."""
-    # Filter out degenerate cases where the solver took 0 or 1 call
-    valid_indices = [i for i, c in enumerate(oracle_calls) if c > 1]
+    """Fit a log-log slope to (1/ε, cost) data.
+    
+    Parameters
+    ----------
+    oracle_calls : list[float]
+        Normalized cost (e.g., gradient equivalents) or raw oracle calls.
+    """
+    # Filter out degenerate cases where the solver took <= 1 cost unit
+    valid_indices = [i for i, c in enumerate(oracle_calls) if c > 1.0]
     if len(valid_indices) < 3:
         raise ValueError(
-            f"Need ≥ 3 valid data points with >1 oracle calls, got {len(valid_indices)}"
+            f"Need ≥ 3 valid data points with >1.0 cost, got {len(valid_indices)}"
         )
-
     # Rebuild clean lists using only valid indices
     epsilons = [epsilons[i] for i in valid_indices]
     oracle_calls = [oracle_calls[i] for i in valid_indices]
-
     x = np.log(1.0 / np.array(epsilons))
     y = np.log(np.array(oracle_calls, dtype=np.float64))
 
@@ -182,23 +217,44 @@ def fit_loglog_slope(
 
 def fit_from_convergence_rows(
     rows: list[BenchmarkResult],
-    require_converged: bool = True,
+    require_converged: bool = False,
 ) -> list[RateFit]:
-    """Fit log-log slopes from convergence benchmark rows."""
+    """Fit log-log slopes from convergence benchmark rows.
+    
+    Parameters
+    ----------
+    require_converged : bool, default=False
+        If True, drops non-converged points. WARNING: This systematically
+        biases the slope optimistically (making the solver appear faster)
+        because the hardest (tightest ε) instances are excluded. 
+        If False (default), non-converged points are included using their
+        exhausted oracle budget as a lower-bound on the true cost.
+    """
     groups = _group_by_solver_problem_dim(rows)
     fits: list[RateFit] = []
 
     for (solver, problem, dim), group_rows in groups:
         # Sort by epsilon descending (largest → smallest)
         group_rows.sort(key=lambda r: r.epsilon, reverse=True)
+        n_total = len(group_rows)
+        n_dropped = 0
 
         # Filter to converged rows if requested
         if require_converged:
-            group_rows = [r for r in group_rows if r.gap_achieved]
+            converged_rows = [r for r in group_rows if r.gap_achieved]
+            n_dropped = n_total - len(converged_rows)
+            if n_dropped > 0:
+                warnings.warn(
+                    f"Dropped {n_dropped} non-converged points for {solver} on {problem} (dim={dim}). "
+                    "This biases the slope optimistically. Consider require_converged=False.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            group_rows = converged_rows
 
         # Guard against None stats and degenerate 0 or 1 call iterations
         valid_rows = [
-            r for r in group_rows 
+            r for r in group_rows
             if r.oracle_stats is not None and r.oracle_stats.oracle_calls > 1
         ]
 
@@ -207,7 +263,35 @@ def fit_from_convergence_rows(
             continue
 
         epsilons = [r.epsilon for r in valid_rows]
-        calls = [int(r.oracle_stats.oracle_calls) for r in valid_rows]
+        
+        # Normalize oracle calls to "gradient equivalents" so that CRN calls 
+        # (which include Hessian + linear solve) are commensurable with plain 
+        # gradient calls. This fixes the apples-to-oranges comparison.
+        calls = []
+        for r in valid_rows:
+            stats = r.oracle_stats
+            if stats is None:
+                calls.append(0.0)
+                continue
+            
+            if hasattr(stats, 'normalized_cost'):
+                try:
+                    # r.dim is typically dim_x; pass it to normalized_cost
+                    d = r.dim if r.dim else 1
+                    cost = float(stats.normalized_cost(d))
+                except Exception:
+                    # Fallback if signature differs or method fails
+                    cost = float(getattr(stats, 'oracle_calls', 0))
+            else:
+                # Manual fallback: scale CRN calls by dimension to approximate
+                # the O(d) or O(d^2) overhead of Hessian/solves vs gradients.
+                call_type = getattr(stats, 'call_type', 'gradient')
+                base_calls = float(getattr(stats, 'oracle_calls', 0))
+                if call_type == 'crn':
+                    cost = base_calls * max(r.dim, 1)
+                else:
+                    cost = base_calls
+            calls.append(cost)
 
         fit = fit_loglog_slope(
             epsilons=epsilons,
@@ -246,7 +330,7 @@ def format_rates_table(fits: list[RateFit]) -> str:
     headers = [
         "Solver", "Problem", "Dim",
         "Slope", "CI [lo, hi]", "R²",
-        "Theory", "Match?",
+        "Theory", "Match?", "Drop",
     ]
 
     # ── Build cell rows ─────────────────────────────────────────────
@@ -274,6 +358,7 @@ def format_rates_table(fits: list[RateFit]) -> str:
             f"{f.r_squared:.4f}",
             theory_str,
             match_str,
+            str(f.n_dropped) if f.n_dropped > 0 else "0",
         ])
 
     # ── Column widths ───────────────────────────────────────────────
@@ -284,7 +369,7 @@ def format_rates_table(fits: list[RateFit]) -> str:
 
     # ── Render ──────────────────────────────────────────────────────
     # Numeric columns: right-align.  Everything else: left-align.
-    _NUMERIC = {2, 3, 5}  # Dim, Slope, R²
+    _NUMERIC = {2, 3, 5, 8}  # Dim, Slope, R², Drop
 
     def _fmt(cells: list[str]) -> str:
         parts: list[str] = []

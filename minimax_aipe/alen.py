@@ -103,7 +103,7 @@ def make_lazy_crn_prox_oracle(
         def stale_hess(_z: Array) -> Array:
             return H_ss
 
-        def prox(z_bar: Array) -> tuple[Array, Array]:
+        def prox(z_bar: Array) -> tuple[Array, Array, Array]:
             return crn_oracle_minimization(
                 grad_fn, stale_hess, z_bar, 2.0 * gamma,
                 n_iters=n_iters, project=project, tol=tol,
@@ -153,15 +153,17 @@ def aipe_restart_lazy(
         Total proximal oracle invocations (≈ S × (T + 1)).
     """
     z = z0
-    total_calls = 0
+    total_stats = jnp.zeros(2, dtype=jnp.int32)
     for s in range(S):
         prox = prox_oracle_factory(z)
             
         result = aipe(prox, grad_fn, z, T, gamma,   
                        project=project, fn=fn)
-        z, calls = result[0], result[1]
-        total_calls += calls
-    return z, total_calls
+        z = result[0]
+        # result[3] holds total_inner_calls from aipe
+        calls_arr = result[3] 
+        total_stats = total_stats + calls_arr
+    return z, total_stats
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Convenience wrappers for M_min usage
@@ -210,11 +212,11 @@ def minimize_x_alen(
     )
     T_ep, S_ep = _alen_schedule(steps, m)
 
-    z_out, _ = aipe_restart_lazy(
+    z_out, calls = aipe_restart_lazy(
         factory, grad_fn, x0, T_ep, effective_gamma, S_ep,
         project=problem.project_x,
     )
-    return z_out
+    return z_out, calls
 
 
 def maximize_y_alen(
@@ -249,11 +251,11 @@ def maximize_y_alen(
     )
     T_ep, S_ep = _alen_schedule(steps, m)
 
-    z_out, _ = aipe_restart_lazy(
+    z_out, calls = aipe_restart_lazy(
         factory, grad_fn, y0, T_ep, effective_gamma, S_ep,
         project=problem.project_y,
     )
-    return z_out
+    return z_out, calls
 
 
 __all__ = [

@@ -7,7 +7,7 @@ Implements Algorithm 6 (NPE) and Algorithm 7 (NPE-restart) from:
 Key design choices
 ──────────────────
 * **Oracle abstraction** — NPE operates on *any* callable satisfying
-  ``NPEOracle = Callable[[Array], tuple[Array, Array]]``; swap in
+  ``NPEOracle = Callable[[Array], tuple[Array, Array, Array]]``; swap in
   stochastic, quasi-Newton, or custom oracles without touching the
   main loop logic.
 * **JIT-native** — the main loop uses ``jax.lax.scan``;
@@ -29,13 +29,14 @@ from functools import partial
 
 from minimax_aipe.oracles import crn_oracle
 from minimax_aipe._precision import TINY as _TINY_NPE
+from minimax_aipe._compat import CallStats
 
 
 # ── public types ───────────────────────────────────────────────────────────
 
-#: An NPE cubic-regularised Newton oracle: ``z ↦ (z_half, u)``.
+#: An NPE cubic-regularised Newton oracle: ``z ↦ (z_half, u, stats)``.
 #: The oracle's ``γ`` parameter and ``problem`` are baked into the closure.
-NPEOracle = Callable[[Array], tuple[Array, Array]]
+NPEOracle = Callable[[Array], tuple[Array, Array, Array]]
 
 
 # ── loop state ─────────────────────────────────────────────────────────────
@@ -46,6 +47,7 @@ class NPEState(NamedTuple):
     z: Array            # current iterate
     weighted_sum: Array # accumulator for η · z_{t+1/2}
     eta_sum: Array      # accumulator for η
+    stats: Array        # [crn_calls, linear_solves] accumulator
 
 
 # ── numerical guards ────────────────────────────────────────────────────────
@@ -90,7 +92,7 @@ def make_crn_npe_oracle(
         is easy.
     """
 
-    def oracle(z: Array) -> tuple[Array, Array]:
+    def oracle(z: Array) -> tuple[Array, Array, Array]:
         return crn_oracle(problem, z, gamma, tol=tol)
 
     return oracle
@@ -99,7 +101,7 @@ def make_crn_npe_oracle(
 # ── Algorithm 6 ────────────────────────────────────────────────────────────
 
 @partial(jax.jit, static_argnums=[0,1,3,5,6])
-def npe(
+def _npe_impl(
     oracle: NPEOracle,
     F_fn: Callable[[Array], Array],
     z0: Array,
@@ -107,7 +109,7 @@ def npe(
     gamma: float,
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], float]] = None,
-) -> tuple[Array, int]:
+) -> tuple[Array, Array]:
     """Algorithm 6 — Newton Proximal Extragradient.
 
     Each iteration:
@@ -123,7 +125,7 @@ def npe(
     Parameters
     ----------
     oracle : NPEOracle
-        ``(z) → (z_half, u)`` — cubic-regularised Newton step.
+        ``(z) → (z_half, u, stats)`` — cubic-regularised Newton step.
         Use :func:`make_crn_npe_oracle` to create a CRN-based oracle.
     F_fn : Callable
         Saddle-point operator ``F(z) = [∇_x L, −∇_y L]``.
@@ -146,8 +148,9 @@ def npe(
     -------
     z_out : Array
         Approximate saddle point.
-    oracle_calls : int
-        Number of oracle invocations (= T).
+    stats : Array
+        ``jnp.int32`` array of shape ``(2,)``:
+        ``[crn_calls, linear_solves]`` accumulated over all ``T`` iterations.
     """
     dtype = z0.dtype
     tiny = jnp.asarray(_TINY_NPE, dtype=dtype)
@@ -155,17 +158,19 @@ def npe(
     two_gamma = jnp.asarray(2.0 * gamma, dtype=dtype)
     max_eta = jnp.asarray(_MAX_ETA, dtype=dtype)
 
+    stats_zero = jnp.zeros(2, dtype=jnp.int32)
     init = NPEState(
         z=z0,
         weighted_sum=jnp.zeros_like(z0),
         eta_sum=jnp.zeros((), dtype=dtype),
+        stats=stats_zero,
     )
 
     def step(carry: NPEState, _unused):
         s = carry
 
         # Line 2: cubic-regularised Newton step
-        z_half, _u = oracle(s.z)
+        z_half, _u, oracle_stats = oracle(s.z)
 
         # Line 3: step size  η_t = 1 / (2γ ‖z_t − z_{t+1/2}‖)
         # When dist is extremely small (≤ tiny), η_t is clamped to 0
@@ -186,6 +191,7 @@ def npe(
             z=z_new,
             weighted_sum=s.weighted_sum + eta * z_half,
             eta_sum=s.eta_sum + eta,
+            stats=s.stats + oracle_stats,
         )
         return new_carry, (z_half, z_new)
 
@@ -216,7 +222,25 @@ def npe(
             final_state.z,
         )
 
-    return z_out, T
+    return z_out, final_state.stats
+
+
+def npe(
+    oracle: NPEOracle,
+    F_fn: Callable[[Array], Array],
+    z0: Array,
+    T: int,
+    gamma: float,
+    project: Optional[Callable[[Array], Array]] = None,
+    fn: Optional[Callable[[Array], float]] = None,
+) -> tuple[Array, CallStats]:
+    """Public Algorithm 6 wrapper.
+
+    The second return value is indexable as ``[crn_calls, linear_solves]`` and
+    also compares as the primary CRN-call count for legacy callers.
+    """
+    z_out, stats = _npe_impl(oracle, F_fn, z0, T, gamma, project=project, fn=fn)
+    return z_out, CallStats(stats)
 
 
 # ── Algorithm 7 ────────────────────────────────────────────────────────────
@@ -230,7 +254,7 @@ def npe_restart(
     S: int,
     project: Optional[Callable[[Array], Array]] = None,
     fn: Optional[Callable[[Array], float]] = None,
-) -> tuple[Array, int]:
+) -> tuple[Array, Array]:
     """Algorithm 7 — NPE with epoch restarts.
 
     Under μ-strong monotonicity (Assumption 5.1 with μ_x = μ_y = μ),
@@ -252,17 +276,18 @@ def npe_restart(
     -------
     z_out : Array
         Approximate saddle point.
-    oracle_calls : int
-        Total oracle invocations (≈ S × T).
+    stats : Array
+        ``jnp.int32`` array of shape ``(2,)``:
+        ``[crn_calls, linear_solves]`` accumulated over all ``S`` epochs.
     """
     z = z0
-    total_calls = 0
+    total_stats = jnp.zeros(2, dtype=jnp.int32)
 
     for _ in range(S):
-        z, calls = npe(oracle, F_fn, z, T, gamma, project=project, fn=fn)
-        total_calls += calls
+        z, epoch_stats = _npe_impl(oracle, F_fn, z, T, gamma, project=project, fn=fn)
+        total_stats = total_stats + epoch_stats
 
-    return z, total_calls
+    return z, CallStats(total_stats)
 
 __all__ = [
     "NPEOracle",

@@ -81,12 +81,13 @@ def _device_memory_info(device=None) -> dict:
 
 
 def _reset_peak_tracking() -> None:
-    """Best-effort reset of device peak memory counter.
-
-    Calls ``gc.collect()`` to release Python-held references, then
-    issues a no-op device request so that XLA's allocator can reclaim
-    freed blocks.  Not all backends support a true peak-reset; this
-    shrinks the live pool so the *next* peak measurement is meaningful.
+    """Best-effort stabilization of the device memory pool.
+    
+    JAX has no public API to reset the ``peak_bytes_in_use`` counter.
+    This function merely forces garbage collection and a no-op device
+    sync to ensure the XLA allocator has reclaimed any Python-freed
+    buffers before we take the baseline snapshot. It does NOT reset
+    the lifetime peak counter.
     """
     gc.collect()
     try:
@@ -156,9 +157,9 @@ class MemoryResult:
     solver: str
     epsilon: float = 0.01
 
-    # ── Primary (backward-compatible) ───────────────────────────────
+        # ── Primary (backward-compatible) ───────────────────────────────
     peak_bytes: int = 0
-    """Best available peak: device peak (GPU/TPU) or RSS delta (CPU)."""
+    """Best available steady-state footprint: device bytes_in_use (GPU/TPU) or RSS delta (CPU)."""
     jax_bytes: int = 0
     """Python-visible JAX live-array bytes after solve."""
 
@@ -231,12 +232,14 @@ def benchmark_memory(
     3. Timed solve with forced materialisation.
     4. Post-solve snapshot → deltas and peak.
 
-    Methodology Note: "Device Δ" (device_delta) measures *incremental memory
+        Methodology Note: "Device Δ" (device_delta) measures *incremental memory
     requested from the OS/Device allocator beyond the JIT-compiled steady-state pool*,
     rather than the absolute HBM footprint of the tensors. Because XLA aggressively
     holds onto memory blocks, this delta can drop to 0 MB if the timed solve
-    completely reuses the warmup pool. Thus, `primary_peak` reports the absolute
-    `device_peak_bytes_in_use` to avoid artificial 0 MB reports.
+    completely reuses the warmup pool. Since JAX lacks a public API to reset the
+    lifetime `peak_bytes_in_use` counter (which is inflated by warmup JIT compilation),
+    `primary_peak` reports `device_bytes_in_use` — the steady-state XLA allocator
+    pool size — to accurately reflect the true memory footprint without warmup inflation.
 
     Parameters
     ----------
@@ -282,17 +285,21 @@ def benchmark_memory(
     # ── 4. Post-solve snapshot ──────────────────────────────────────
     after = _MemorySnapshot.capture()
 
-    # ── Derive metrics ──────────────────────────────────────────────
+        # ── Derive metrics ──────────────────────────────────────────────
     has_dev = after.has_device_stats
-
     if has_dev:
         device_delta = max(after.device_bytes_in_use - before.device_bytes_in_use, 0)
         device_peak = after.device_peak_bytes_in_use
         device_limit = after.device_bytes_limit
         device_reserved = after.device_bytes_reserved
-        utilization = (device_peak / device_limit) if device_limit > 0 else 0.0
-        # FIX: Avoid XLA memory pool delta trap where reused warmup pools yield 0 MB peak
-        primary_peak = device_peak
+        
+        # FIX: JAX lacks a public API to reset `peak_bytes_in_use`. The warmup solve's
+        # JIT compilation and execution inflate the lifetime peak, often by 2x or more.
+        # Because XLA's allocator aggressively retains the steady-state memory pool,
+        # `device_bytes_in_use` accurately reflects the true steady-state footprint
+        # without warmup inflation. We use it as the primary metric.
+        primary_peak = after.device_bytes_in_use
+        utilization = (primary_peak / device_limit) if device_limit > 0 else 0.0
     else:
         device_delta = 0
         device_peak = 0
@@ -300,13 +307,13 @@ def benchmark_memory(
         device_reserved = 0
         utilization = 0.0
         primary_peak = 0
-
+        
     rss_peak = after.process_rss
     rss_delta = max(after.process_rss - before.process_rss, 0)
-
+    
     # On CPU, fall back to RSS delta as the primary peak metric
     if not has_dev:
-        primary_peak = rss_peak
+        primary_peak = rss_delta
 
     return MemoryResult(
         name=name,

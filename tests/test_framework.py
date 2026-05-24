@@ -216,7 +216,7 @@ def test_make_phi_oracle_shape_and_signature():
 
     x = jnp.array([0.3, -0.1])
     val = phi_fn(x)
-    grad = grad_phi_fn(x)
+    grad, _calls = grad_phi_fn(x)
     assert val.ndim == 0, f"phi should be scalar, got shape {val.shape}"
     assert grad.shape == x.shape, f"grad shape {grad.shape} != x shape {x.shape}"
     assert jnp.all(jnp.isfinite(val))
@@ -232,7 +232,7 @@ def test_make_phi_oracle_at_origin():
 
     x0 = jnp.zeros(2)
     val = phi_fn(x0)
-    grad = grad_phi_fn(x0)
+    grad, _calls = grad_phi_fn(x0)
     assert float(jnp.abs(val)) < 1e-4, f"phi(0) should be ~0, got {val}"
     assert jnp.allclose(grad, 0.0, atol=1e-4), f"grad_phi(0) should be ~0, got {grad}"
 
@@ -244,7 +244,7 @@ def test_make_phi_oracle_gradient_is_approximate_subgradient():
     phi_fn, grad_phi_fn = _make_phi_oracle(problem, gamma=1.0, params=params)
 
     x = jnp.array([0.5, -0.3])
-    grad = grad_phi_fn(x)
+    grad, _calls = grad_phi_fn(x)
     # For f = (1/2)(||x||^2 - ||y||^2) + x^T A y, grad_phi = x + A y*(x)
     # The grad should be finite and nonzero at a nonzero x
     assert jnp.all(jnp.isfinite(grad))
@@ -269,7 +269,7 @@ def test_make_psi_oracle_shape_and_signature():
 
     y = jnp.array([0.1, 0.2])
     val = neg_psi_fn(y)
-    grad = grad_neg_psi_fn(y)
+    grad, _calls = grad_neg_psi_fn(y)
     assert val.ndim == 0, f"neg_psi should be scalar, got shape {val.shape}"
     assert grad.shape == y.shape, f"grad shape {grad.shape} != y shape {y.shape}"
     assert jnp.all(jnp.isfinite(val))
@@ -316,7 +316,7 @@ def test_iProx_Phi_tracks_calls_via_return():
         params=params, M_saddle="npe",
     )
 
-    assert total_inner_calls > 0, f"total_inner_calls should be positive, got {total_inner_calls}"
+    assert int(total_inner_calls[0]) > 0, f"total_inner_calls should be positive, got {total_inner_calls}"
 
 
 def test_iProx_Phi_returns_four_elements():
@@ -395,13 +395,13 @@ def test_algorithm_3_returns_valid_saddle_point():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)  
 
-    z_hat, calls, _ = _algorithm_3(
+    z_hat, calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )
 
     assert z_hat.shape == (4,)
-    assert calls > 0
+    assert int(calls[0]) > 0
     assert jnp.all(jnp.isfinite(z_hat))
 
 
@@ -411,7 +411,7 @@ def test_algorithm_3_improves_on_zero_init():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)
 
-    z_hat, _calls, _ = _algorithm_3(
+    z_hat, _calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )
@@ -438,12 +438,12 @@ def test_algorithm_3_with_default_params():
     z0 = jnp.concatenate([jnp.zeros(2), jnp.zeros(2)])
     params = _test_loop_params(problem)
 
-    z_hat, calls, _ = _algorithm_3(
+    z_hat, calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params=params, M_saddle="npe", z0=z0,
     )
     assert z_hat.shape == (4,)
-    assert calls > 0
+    assert int(calls[0]) > 0
 
 
 def test_algorithm_3_with_default_z0():
@@ -451,12 +451,12 @@ def test_algorithm_3_with_default_z0():
     problem, _x_star, _y_star, _A = _shifted_scsc_problem()
     params = _test_loop_params(problem)
 
-    z_hat, calls, _ = _algorithm_3(
+    z_hat, calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params=params, M_saddle="npe", z0=None,
     )
     assert z_hat.shape == (4,)
-    assert calls > 0
+    assert int(calls[0]) > 0
 
 
 @pytest.mark.parametrize("M_saddle", ["npe", "len"])
@@ -465,12 +465,12 @@ def test_algorithm_3_accepts_both_saddle_modes(M_saddle):
     problem, _x_star, _y_star, _A = _shifted_scsc_problem()
     params = _test_loop_params(problem)
 
-    z_hat, calls, _ = _algorithm_3(
+    z_hat, calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle=M_saddle, z0=None,
     )
     assert z_hat.shape == (4,)
-    assert calls > 0
+    assert int(calls[0]) > 0
 
 
 def test_algorithm_3_call_counter_is_threaded():
@@ -482,15 +482,16 @@ def test_algorithm_3_call_counter_is_threaded():
 
     # _algorithm_3 creates its own counter internally; the returned
     # total_calls should equal counter.total
-    z_hat, calls, _ = _algorithm_3(
+    z_hat, calls, _, _ = _algorithm_3(
         problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
         params = params, M_saddle="npe", z0=z0,
     )
 
-    assert calls > 0
-    # The calls value should be a sum of inner NPE calls, not an
-    # approximation via multiplication
-    assert isinstance(calls, int)
+    assert int(calls[0]) > 0
+    # calls is now a 2-element array [crn_calls, linear_solves] with
+    # exact runtime tracking rather than formula-based estimates.
+    assert calls.shape == (2,)
+    assert calls.dtype == jnp.int32
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

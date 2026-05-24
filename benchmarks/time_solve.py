@@ -219,7 +219,6 @@ def benchmark_solver_comparison(
             wall_time_min=t_npe["min"],
             wall_time_max=t_npe["max"],
             n_outliers=t_npe["n_outliers"],
-            normalized_cost=result_npe.oracle_stats.normalized_cost(d),
         ))
 
         # ── AIPE-LEN ───────────────────────────────────────────────
@@ -249,12 +248,11 @@ def benchmark_solver_comparison(
             wall_time_min=t_len["min"],
             wall_time_max=t_len["max"],
             n_outliers=t_len["n_outliers"],
-            normalized_cost=result_len.oracle_stats.normalized_cost(d),
         ))
 
         # ── JIT-EG ─────────────────────────────────────────────────
         from benchmarks.baselines import run_eg_jit
-        from minimax_aipe.problem import OracleStats
+        from benchmarks.oracles import count_eg_oracles  # ← Replaced OracleStats import
         from minimax_aipe.gap import estimate_gap
 
         def run_eg():
@@ -267,12 +265,9 @@ def benchmark_solver_comparison(
 
         t_eg = _time_callable(run_eg, n_warmup=None, n_repeats=n_repeats)
         eg_z_out, eg_residual, eg_actual_iters, eg_gap = t_eg["result"]
-        eg_stats = OracleStats(
-            grad_calls=2 * eg_actual_iters,
-            projection_calls=2 * eg_actual_iters,
-            oracle_calls=2 * eg_actual_iters,
-        )
-
+        
+        eg_stats = count_eg_oracles(eg_actual_iters)  # ← Replaced manual construction
+        
         rows.append(BenchmarkResult(
             solver="eg",
             problem=name,
@@ -282,18 +277,18 @@ def benchmark_solver_comparison(
             wall_time_std=t_eg["std"],
             ci=t_eg["ci"],
             oracle_stats=eg_stats,
-            converged=eg_residual <= epsilon,
+            converged=eg_gap <= epsilon,
             gap_achieved=eg_gap <= epsilon,
             final_gap=eg_gap,
             iterations=eg_actual_iters,
             wall_time_min=t_eg["min"],
             wall_time_max=t_eg["max"],
             n_outliers=t_eg["n_outliers"],
-            normalized_cost=eg_stats.normalized_cost(d),
         ))
 
         # ── JIT-GDA ────────────────────────────────────────────────
         from benchmarks.baselines import run_gda_jit
+        from benchmarks.oracles import count_gda_oracles  # ← Added helper import
 
         def run_gda():
             z_out, residual, wall_time, actual_iters = run_gda_jit(problem, max_iters=200_000, z0=z0, tol=epsilon)
@@ -305,12 +300,9 @@ def benchmark_solver_comparison(
 
         t_gda = _time_callable(run_gda, n_warmup=None, n_repeats=n_repeats)
         gda_z_out, gda_residual, gda_actual_iters, gda_gap = t_gda["result"]
-        gda_stats = OracleStats(
-            grad_calls=gda_actual_iters,
-            projection_calls=2 * gda_actual_iters,
-            oracle_calls=gda_actual_iters,
-        )
-
+        
+        gda_stats = count_gda_oracles(gda_actual_iters)  # ← Replaced manual construction
+        
         rows.append(BenchmarkResult(
             solver="gda",
             problem=name,
@@ -320,14 +312,13 @@ def benchmark_solver_comparison(
             wall_time_std=t_gda["std"],
             ci=t_gda["ci"],
             oracle_stats=gda_stats,
-            converged=gda_residual <= epsilon,
+            converged=gda_gap <= epsilon,
             gap_achieved=gda_gap <= epsilon,
             final_gap=gda_gap,
             iterations=gda_actual_iters,
             wall_time_min=t_gda["min"],
             wall_time_max=t_gda["max"],
             n_outliers=t_gda["n_outliers"],
-            normalized_cost=gda_stats.normalized_cost(d),
         ))
 
     return rows
@@ -363,15 +354,15 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
             ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
             return f"{r.wall_time_mean:.4f} {ci}"
 
-        def _norm(r: BenchmarkResult | None) -> str:
-            if r is None or r.normalized_cost is None:
-                return "N/A"
-            return f"{r.normalized_cost:.2e}"
+        def _format_cost(r: BenchmarkResult | None) -> str:
+            if r is None or getattr(r, "oracle_stats", None) is None:
+                return "      --- "
+            return f"{r.oracle_stats.oracle_calls:.2e}"
 
-        npe_str = f"{_fmt(npe)} | {_norm(npe)}"
-        lnn_str = f"{_fmt(lnn)} | {_norm(lnn)}"
-        eg_str = f"{_fmt(eg)} | {_norm(eg)}"
-        gda_str = f"{_fmt(gda)} | {_norm(gda)}"
+        npe_str = f"{_fmt(npe)} | {_format_cost(npe)}"
+        lnn_str = f"{_fmt(lnn)} | {_format_cost(lnn)}"
+        eg_str = f"{_fmt(eg)} | {_format_cost(eg)}"
+        gda_str = f"{_fmt(gda)} | {_format_cost(gda)}"
 
         npe_gap = npe.final_gap if npe else 0.0
         eg_gap = eg.final_gap if eg else 0.0

@@ -49,9 +49,14 @@ from minimax_aipe._precision import (
     REG_MIN as _REG_MIN,
     TINY as _TINY,
 )
+from minimax_aipe._compat import CRNResult, CallStats
 
 
 logger = logging.getLogger(__name__)
+
+
+def _stats_array(value):
+    return value.stats if isinstance(value, CallStats) else value
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -321,6 +326,34 @@ class RegularizedSubproblem:
         bot = jnp.concatenate([-H_yx, -H_yy_h], axis=1)
         return jnp.concatenate([top, bot], axis=0)
 
+    # ── raw Hessian blocks for _block_chol_solve ─────────────────────
+    def hessian_blocks_h(
+        self, x: Array, y: Array, x_bar: Array, y_bar: Array
+    ) -> tuple[tuple[Array, Array], tuple[Array, Array]]:
+        r"""Raw Hessian blocks of the h-subproblem (no Jacobian sign flip).
+
+        Returns ``((H_xx_h, H_xy), (H_yx, H_yy_h))`` — the *unsigned*
+        second-order blocks of ``h(x,y; x_bar, y_bar)``.  These are the
+        blocks that :func:`_block_chol_solve` expects: that function
+        internally accounts for the ``[[-H_yx, -H_yy]]`` sign structure
+        of the minimax Jacobian.
+
+        Parameters
+        ----------
+        x, y : Array
+            Current iterate components.
+        x_bar, y_bar : Array
+            Regularisation centres.
+
+        Returns
+        -------
+        ((H_xx_h, H_xy), (H_yx, H_yy_h))
+        """
+        (H_xx, H_xy), (H_yx, H_yy) = self._problem.hessian_f(x, y)
+        H_xx_h = H_xx + _cubic_hess(x - x_bar, self._gamma)
+        H_yy_h = H_yy - _cubic_hess(y - y_bar, self._gamma)
+        return (H_xx_h, H_xy), (H_yx, H_yy_h)
+
     # ── joint projection ─────────────────────────────────────────────
     def project(self, z: Array) -> Array:
         """Project a joint iterate onto ``D_x × D_y``."""
@@ -380,20 +413,18 @@ class RegularizedSubproblem:
             def oracle(z_bar: Array) -> tuple[Array, Array]:
                 g = self.operator_F_h(z_bar, x_bar, y_bar)
                 xb, yb = z_bar[:dim_x], z_bar[dim_x:]
+                # Jacobian (with sign flips) — used only for the residual
                 H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                
-                # Pre-slice blocks outside the loop to avoid redundant XLA ops
-                J_xx = H[:dim_x, :dim_x]
-                J_xy = H[:dim_x, dim_x:]
-                J_yx = H[dim_x:, :dim_x]
-                J_yy = H[dim_x:, dim_x:]
+                # Raw Hessian blocks — the format _block_chol_solve expects
+                (H_xx, H_xy), (H_yx, H_yy) = self.hessian_blocks_h(
+                    xb, yb, x_bar, y_bar,
+                )
                 
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 tol_jax = jnp.asarray(tol, dtype=dtype)
                 eye_x = jnp.eye(dim_x, dtype=dtype)
                 eye_y = jnp.eye(self.dim_y, dtype=dtype)
-                #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
                 def cond(state):
@@ -403,8 +434,7 @@ class RegularizedSubproblem:
 
                 def body(state):
                     lam, _z, i, _prev = state
-                    #  Block Schur-complement solve
-                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny)
+                    delta = _block_chol_solve(g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -413,37 +443,35 @@ class RegularizedSubproblem:
                         z_new, i + 1, lam,
                     )
 
-                lam, z, _i, _p = jax.lax.while_loop(
+                lam, z, n_secular, _p = jax.lax.while_loop(
                     cond, body,
                     (lam0, z_bar,
                      jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
                 )
                 d_eff = z - z_bar
                 u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
+                stats = jnp.stack([jnp.int32(1), n_secular])
+                return CRNResult(z, u, stats)
         else:
             def oracle(z_bar: Array) -> tuple[Array, Array]:
                 g = self.operator_F_h(z_bar, x_bar, y_bar)
                 xb, yb = z_bar[:dim_x], z_bar[dim_x:]
+                # Jacobian (with sign flips) — used only for the residual
                 H = self.jacobian_F_h(xb, yb, x_bar, y_bar)
-                
-                # Pre-slice blocks outside the loop to avoid redundant XLA ops
-                J_xx = H[:dim_x, :dim_x]
-                J_xy = H[:dim_x, dim_x:]
-                J_yx = H[dim_x:, :dim_x]
-                J_yy = H[dim_x:, dim_x:]
+                # Raw Hessian blocks — the format _block_chol_solve expects
+                (H_xx, H_xy), (H_yx, H_yy) = self.hessian_blocks_h(
+                    xb, yb, x_bar, y_bar,
+                )
                 
                 dtype = z_bar.dtype
                 tiny = jnp.asarray(_tiny, dtype=dtype)
                 eye_x = jnp.eye(dim_x, dtype=dtype)
                 eye_y = jnp.eye(self.dim_y, dtype=dtype)
-                #  Start λ at npe_gamma/2 for immediate regularization
                 lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype)
 
                 def body(i, state):
                     lam, z = state
-                    #  Block Schur-complement solve
-                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny)
+                    delta = _block_chol_solve(g, H_xx, H_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny)
                     z_new = _project_z_h(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -454,7 +482,8 @@ class RegularizedSubproblem:
                 )
                 d_eff = z - z_bar
                 u = -(g + H @ d_eff + lam * d_eff)
-                return z, u
+                stats = jnp.stack([jnp.int32(1), jnp.int32(n_iters)])
+                return CRNResult(z, u, stats)
 
         return oracle
 
@@ -594,6 +623,7 @@ def _restart_jax(
     *,
     step_tol: float = 0.0,
     warm: Optional[Array] = None,
+    stats_init: Optional[Array] = None,
 ) -> tuple[Array, int, Optional[Array], Array]:
     """JAX-compatible restart with early stopping via ``jax.lax.while_loop``.
 
@@ -601,6 +631,14 @@ def _restart_jax(
     *total_inner_calls* is the sum of the 4th element from each
     ``epoch_fn`` invocation (defaults to 0 when ``epoch_fn`` returns
     only 3 elements).
+
+    Parameters
+    ----------
+    stats_init : Array or None
+        Initial value for the inner-calls accumulator.  When ``None``,
+        defaults to ``jnp.int32(0)`` (scalar).  Pass
+        ``jnp.zeros(2, jnp.int32)`` to accumulate ``[crn_calls,
+        linear_solves]`` as a 2-element vector.
     """
     dtype = z0.dtype
     tol_sq = jnp.asarray(
@@ -608,7 +646,7 @@ def _restart_jax(
     )
     S_jax = jnp.int32(S)
     tol_sq_cast = tol_sq.astype(dtype)
-    int_zero = jnp.int32(0)
+    int_zero = stats_init if stats_init is not None else jnp.int32(0)
 
     if warm is not None:
         def cond(carry):
@@ -623,7 +661,7 @@ def _restart_jax(
             z, _prev_z, w, epoch, total_inner_calls = carry
             result = epoch_fn(z, w)
             z_new, _calls, w_new = result[0], result[1], result[2]
-            epoch_inner = result[3] if len(result) > 3 else int_zero
+            epoch_inner = _stats_array(result[3] if len(result) > 3 else int_zero)
             return (z_new, z, w_new, epoch + 1,
                     total_inner_calls + epoch_inner)
 
@@ -644,7 +682,7 @@ def _restart_jax(
             z, _prev_z, epoch, total_inner_calls = carry
             result = epoch_fn(z, None)
             z_new = result[0]
-            epoch_inner = result[3] if len(result) > 3 else int_zero
+            epoch_inner = _stats_array(result[3] if len(result) > 3 else int_zero)
             return (z_new, z, epoch + 1,
                     total_inner_calls + epoch_inner)
 
@@ -719,16 +757,18 @@ def _iProx_Phi(
     y_hat, _, _z_hat_out, total_inner_calls = _restart_jax(
         _run_middle_epoch, y0, params.S_middle,
         step_tol=params.zeta_2,
-        warm=z0_init,  # <-- Threads joint state down to the inner loop
+        warm=z0_init,
+        stats_init=jnp.zeros(2, dtype=jnp.int32),
     )
 
-    x_hat = _minimize_x_auto(
+    x_hat, min_x_crn = _minimize_x_auto(
         g_problem, y_hat,
         steps=max(20, params.T_inner * params.S_inner),
         M_saddle=M_saddle,
         gamma=gamma,
         m_lazy=params.m_lazy,
     )
+    total_inner_calls = total_inner_calls + min_x_crn
 
     ell_g = max(_ell(g_problem), _ABS_TOL)
     eta_g = 1.0 / (2.0 * max(ell_g, _ABS_TOL))
@@ -821,10 +861,11 @@ def _iProx_Psi(
 
                 J_xx = H_snapshot[:dim_x_local, :dim_x_local]
                 J_xy = H_snapshot[:dim_x_local, dim_x_local:]
-                J_yx = H_snapshot[dim_x_local:, :dim_x_local]
-                J_yy = H_snapshot[dim_x_local:, dim_x_local:]
-                g_x = g[:dim_x_local]
-                g_y = g[dim_x_local:]
+                # H_snapshot uses Jacobian sign convention:
+                #   bottom row = [-H_yx, -H_yy]
+                # _block_chol_solve expects raw Hessian blocks, so negate.
+                H_yx = -H_snapshot[dim_x_local:, :dim_x_local]
+                H_yy = -H_snapshot[dim_x_local:, dim_x_local:]
                 eye_x = jnp.eye(dim_x_local, dtype=dtype_local)
                 eye_y = jnp.eye(kernel.dim_y, dtype=dtype_local)
 
@@ -835,7 +876,7 @@ def _iProx_Psi(
 
                 def body(state):
                     lam, _z, i, _prev = state
-                    delta = _block_chol_solve(g, J_xx, J_xy, J_yx, J_yy, lam, eye_x, eye_y, tiny_local)
+                    delta = _block_chol_solve(g, J_xx, J_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny_local)
                     z_new = proj(z_bar + delta)
                     d_eff = z_new - z_bar
                     lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
@@ -846,41 +887,44 @@ def _iProx_Psi(
                         lam,
                     )
 
-                lam, z_half, _i, _prev = jax.lax.while_loop(
+                lam, z_half, n_secular, _prev = jax.lax.while_loop(
                     cond, body,
                     (lam0, z_bar, jnp.int32(0),
                      jnp.asarray(-1.0, dtype=dtype_local)),
                 )
                 d_eff = z_half - z_bar
                 u = -(g + H_snapshot @ d_eff + lam * d_eff)
-                return z_half, u
+                stats = jnp.stack([jnp.int32(1), n_secular])
+                return z_half, u, stats
 
             def _len_oracle(
                 z_bar: Array, z_snapshot: Array,
-            ) -> tuple[Array, Array]:
+            ) -> tuple[Array, Array, Array]:
                 xs = z_snapshot[: kernel.dim_x]
                 ys = z_snapshot[kernel.dim_x :]
                 H = kernel.jacobian_F_h(xs, ys, x_bar, y_bar)
                 return _crn_with_cached_hessian(z_bar, H)
 
             max_norm_val = 100.0 * max(D, 1.0)
-            z_out, _ = len_loop(
+            z_out, epoch_stats = len_loop(
                 _len_oracle, _F_h, z, inner_T, npe_gamma,
                 m=params.m_lazy, project=proj, fn=merit,
                 eta_floor=float(_ABS_TOL),
                 max_norm=float(max_norm_val),
             )
-            return z_out, inner_T
+            return z_out, epoch_stats
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
     def _run_inner_warm(z: Array, _warm):
-        z_new, inner_calls = _run_inner(z)
-        return z_new, inner_calls, None, inner_calls
+        z_new, inner_stats = _run_inner(z)
+        return z_new, inner_stats, None, inner_stats
 
+    stats_init = jnp.zeros(2, dtype=jnp.int32)
     z_hat, epochs, _, calls = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
+        stats_init=stats_init,
     )
 
     # ── EG refinement ────────────────────────────────────────────────
@@ -953,7 +997,7 @@ def solve(
         x0, y0 = _split(problem, z0_arr)
         z0_start = jnp.concatenate([problem.project_x(x0), problem.project_y(y0)])
 
-    z_hat, calls, outer_epochs = _algorithm_3(
+    z_hat, stats_array, outer_epochs, final_y_calls = _algorithm_3(
         problem, gamma, mu_x, mu_y, params.zeta_1,
         params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
         no_acceleration=no_acceleration,
@@ -983,15 +1027,8 @@ def solve(
         "M_saddle": M_saddle,
     }
 
-    total = calls
-    try:
-        total = int(total)
-    except (TypeError, Exception):
-        pass
-
-    # ── Oracle statistics ─────────────────────────────────────────────
-    secular_n = 15 if M_saddle == "npe" else 50
-    inner_crn = max(0, int(total))
+    inner_crn = int(stats_array[0])
+    inner_linear = int(stats_array[1])
     d = problem.dim_x + problem.dim_y
 
     if M_saddle == "npe":
@@ -1000,8 +1037,7 @@ def solve(
         inner_hessians = inner_crn // max(params.m_lazy, 1)
 
     inner_grad = inner_crn * 2 + 1
-    inner_linear = inner_crn * secular_n
-    inner_proj = inner_crn * (secular_n + 1) + 2
+    inner_proj = inner_linear + inner_crn + 2
 
     # Safe extraction to Python int to prevent JAX array leakage into OracleStats
     actual_outer = int(jnp.maximum(1, outer_epochs).item())
@@ -1041,15 +1077,15 @@ def solve(
 
     final_eg_proj = 2
 
-    total_oracle_calls = inner_crn + outer_grad
+    total_oracle_calls = inner_crn + outer_grad + int(final_y_calls[0].item())
 
     oracle_stats = OracleStats(
         grad_calls=(inner_grad + outer_grad + middle_grad + total_hidden_grad + final_eg_grad),
         hessian_calls=inner_hessians,
         hvp_calls=0,
-        crn_calls=inner_crn,
+        crn_calls=inner_crn + int(final_y_calls[0].item()),
         projection_calls=inner_proj + final_eg_proj + total_hidden_proj,
-        linear_solves=inner_linear,
+        linear_solves=inner_linear + int(final_y_calls[1].item()),
         oracle_calls=total_oracle_calls,
         fn_evals=0,
     )
@@ -1113,27 +1149,32 @@ def _algorithm_3(
     x_hat, outer_epochs, _warm_y_out, total_inner_calls = _restart_jax(
         epoch_fn, x0, params.S_outer,
         step_tol=params.zeta_1,
+        stats_init=jnp.zeros(2, dtype=jnp.int32),
     )
 
     # ── Recover y ≈ argmax_y f(x_hat, y) ────────────────────────────
-    y_hat = _maximize_y(
+    y_hat, final_y_calls = _maximize_y_auto(
         problem, x_hat,
         steps=max(20, params.T_middle * params.S_middle),
+        M_saddle=M_saddle,
+        gamma=gamma,
+        m_lazy=params.m_lazy,
     )
 
-    total_inner = int(total_inner_calls)
+    inner_crn = int(total_inner_calls[0])
+    inner_linear = int(total_inner_calls[1])
 
-    grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)))
+    grad_norm = float(jnp.linalg.norm(pipeline.grad_phi_fn(x_hat)[0]))
     phi_val = float(pipeline.phi_fn(x_hat))
     logger.info(
-        "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_calls=%d  "
+        "Algorithm 3: φ=%.4e  |∇φ|=%.3e  inner_crn=%d  inner_linear=%d  "
         "outer_epochs=%d/%d",
-        phi_val, grad_norm, total_inner,
+        phi_val, grad_norm, inner_crn, inner_linear,
         int(outer_epochs), params.S_outer,
     )
 
     z_hat = jnp.concatenate([x_hat, y_hat])
-    return z_hat, total_inner, outer_epochs
+    return z_hat, CallStats(total_inner_calls), outer_epochs, final_y_calls
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1151,18 +1192,21 @@ def _make_phi_oracle(
     Callable[[Array], Array],
 ]:
     """Build approximate value, gradient, and Hessian oracles for Φ."""
-    def _solve_y(x: Array) -> Array:
-        return _maximize_y(
+    def _solve_y(x: Array) -> tuple[Array, Array]:
+        return _maximize_y_auto(
             problem, x,
             steps=max(20, params.T_middle * params.S_middle),
+            M_saddle=M_saddle,
+            gamma=gamma,
+            m_lazy=m_lazy,
         )
 
     def phi(x: Array):
-        y = _solve_y(x)
+        y, _calls = _solve_y(x)
         return problem.f(x, y)
 
-    def grad_phi(x: Array) -> Array:
-        y = _solve_y(x)
+    def grad_phi(x: Array) -> tuple[Array, Array]:
+        y, calls = _solve_y(x)
         gx, gy_neg = problem.grad_f(x, y)
         # Implicit gradient correction to remove first-order bias from inexact y.
         # ∇Φ(x) ≈ ∇_x f - ∇_{xy} f (∇_{yy} f)^{-1} ∇_y f
@@ -1170,7 +1214,7 @@ def _make_phi_oracle(
         damping = 1e-5 * jnp.eye(H_yy.shape[0], dtype=H_yy.dtype)
         # Solve (-H_yy + damping) v = -gy_neg  (which is mathematically H_yy v = gy_neg)
         correction = H_xy @ jsp_linalg.solve(-H_yy + damping, -gy_neg)
-        return gx + correction
+        return gx + correction, calls
 
     return phi, grad_phi
 
@@ -1189,39 +1233,29 @@ def _make_psi_oracle(
     """Build approximate oracles for the convex function ``-Ψ(y; x̄)``."""
     g_problem = _make_g_problem(problem, x_bar, gamma)
 
-    def _solve_x(y: Array) -> Array:
-        lr = 1.0 / max(_ell(g_problem), _ABS_TOL)
-
-        def _gd_step(x_cur: Array) -> tuple[Array, int]:
-            gx, _ = g_problem.grad_f(x_cur, y)
-            x_new = g_problem.project_x(x_cur - lr * gx)
-            return x_new, 1
-
-        def _gd_step_warm(x_cur: Array, _warm) -> tuple[Array, int, None]:
-            x_new, calls = _gd_step(x_cur)
-            return x_new, calls, None
-
-        x0 = g_problem.project_x(jnp.zeros(g_problem.dim_x, dtype=y.dtype))
-        x_out, _, _, _ = _restart_jax(
-            _gd_step_warm, x0,
-            max(20, params.T_inner * params.S_inner),
-            step_tol=params.zeta_3,
+    def _solve_x(y: Array) -> tuple[Array, Array]:
+        return _minimize_x_auto(
+            g_problem, y,
+            steps=max(20, params.T_inner * params.S_inner),
+            M_saddle=M_saddle,
+            gamma=gamma,
+            m_lazy=m_lazy,
+            x_init=x_bar,
         )
-        return x_out
 
     def neg_psi(y: Array):
-        x = _solve_x(y)
+        x, _calls = _solve_x(y)
         return -g_problem.f(x, y)
 
-    def grad_neg_psi(y: Array) -> Array:
-        x = _solve_x(y)
+    def grad_neg_psi(y: Array) -> tuple[Array, Array]:
+        x, calls = _solve_x(y)
         gx, gy_neg = g_problem.grad_f(x, y)
         # Implicit gradient correction to remove first-order bias from inexact x.
         # ∇(-Ψ)(y) ≈ -∇_y g + ∇_{xy} g (∇_{xx} g)^{-1} ∇_x g
         (H_xx, _), (H_yx, _) = g_problem.hessian_f(x, y)
         damping = 1e-5 * jnp.eye(H_xx.shape[0], dtype=H_xx.dtype)
         correction = H_yx @ jsp_linalg.solve(H_xx + damping, gx)
-        return gy_neg + correction
+        return gy_neg + correction, calls
 
     return neg_psi, grad_neg_psi
 
@@ -1296,7 +1330,7 @@ def _minimize_x_auto(
     M_saddle: str = "npe",
     gamma: float = 1.0,
     m_lazy: int = 5,
-) -> Array:
+) -> tuple[Array, Array]:
     """Approximately minimise ``x ↦ f(x, y)``."""
     if M_saddle == "len":
         return minimize_x_alen(
@@ -1315,7 +1349,7 @@ def _maximize_y_auto(
     M_saddle: str = "npe",
     gamma: float = 1.0,
     m_lazy: int = 5,
-) -> Array:
+) -> tuple[Array, Array]:
     """Approximately maximise ``y ↦ f(x, y)``."""
     if M_saddle == "len":
         return maximize_y_alen(
@@ -1335,7 +1369,7 @@ def _maximize_y(
     *,
     steps: int,
     y_init: Optional[Array] = None,
-) -> Array:
+) -> tuple[Array, Array]:
     """Approximately maximise ``y ↦ f(x, y)`` by gradient ascent."""
     dtype = x.dtype
     if y_init is not None:
@@ -1348,7 +1382,7 @@ def _maximize_y(
         _gx, gy_neg = problem.grad_f(x, cur)
         return problem.project_y(cur - lr * gy_neg)
 
-    return jax.lax.fori_loop(0, int(steps), body, y)
+    return jax.lax.fori_loop(0, int(steps), body, y), jnp.zeros(2, dtype=jnp.int32)
 
 
 def _minimize_x(
@@ -1357,7 +1391,7 @@ def _minimize_x(
     *,
     steps: int,
     x_init: Optional[Array] = None,
-) -> Array:
+) -> tuple[Array, Array]:
     """Approximately minimise ``x ↦ f(x, y)`` by gradient descent."""
     dtype = y.dtype
     if x_init is not None:
@@ -1370,7 +1404,7 @@ def _minimize_x(
         gx, _gy_neg = problem.grad_f(cur, y)
         return problem.project_x(cur - lr * gx)
 
-    return jax.lax.fori_loop(0, int(steps), body, x)
+    return jax.lax.fori_loop(0, int(steps), body, x), jnp.zeros(2, dtype=jnp.int32)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1479,11 +1513,10 @@ def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> fl
         pass
 
     D = _diameter(problem)
-    lr = 0.5 / max(_ell(problem), 1.0)
     num_steps = max(5000, min(15000, int(200 * D / max(epsilon, _GAP_FLOOR))))
     gap = estimate_gap(
         problem, x, y,
-        num_restarts=8, num_steps=num_steps, lr=lr,
+        num_restarts=8, num_steps=num_steps, lr=None,
     )
     if hasattr(gap, "block_until_ready"):
         gap.block_until_ready()

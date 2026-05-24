@@ -1131,16 +1131,11 @@ def make_diagonal_saddle(
             mu  = _restore_kappa(mu,  log_range)
 
     # ── 3. Coupling coefficients with optional sparsity ──────────────
-    if sparsity <= 0.0:
-        sigma = jax.random.uniform(k_coupling, (dim,), minval=-1.0, maxval=1.0)
-    elif sparsity >= 1.0:
-        sigma = jnp.zeros(dim)
-    else:
-        p_active = 1.0 - sparsity
-        k_mask, k_val = jax.random.split(k_coupling)
-        mask = jax.random.bernoulli(k_mask, p=p_active, shape=(dim,))
-        raw_sigma = jax.random.uniform(k_val, (dim,), minval=-1.0, maxval=1.0)
-        sigma = jnp.where(mask, raw_sigma, 0.0)
+    p_active = jnp.clip(1.0 - sparsity, 0.0, 1.0)
+    k_mask, k_val = jax.random.split(k_coupling)
+    mask = jax.random.bernoulli(k_mask, p=p_active, shape=(dim,))
+    raw_sigma = jax.random.uniform(k_val, (dim,), minval=-1.0, maxval=1.0)
+    sigma = jnp.where(mask, raw_sigma, 0.0)
 
     # ── Constants ─────────────────────────────────────────────────────
     ell_quad = float(jnp.max(jnp.concatenate([lam + jnp.abs(sigma),

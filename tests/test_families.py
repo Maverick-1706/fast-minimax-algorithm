@@ -77,8 +77,8 @@ class TestDiagonalSaddle:
         assert float(x1) == float(x2)
 
     def test_different_seeds_give_different_problems(self):
-        p1 = make_diagonal_saddle(10, seed=0)
-        p2 = make_diagonal_saddle(10, seed=1)
+        p1 = make_diagonal_saddle(10, sparsity=0.0, seed=0)
+        p2 = make_diagonal_saddle(10, sparsity=0.0, seed=1)
         x1 = p1.problem.f(jnp.ones(10), jnp.ones(10))
         x2 = p2.problem.f(jnp.ones(10), jnp.ones(10))
         assert float(x1) != float(x2)

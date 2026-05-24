@@ -171,7 +171,7 @@ class TestOuterEarlyStop:
         z0 = jnp.zeros(4)
 
         start = time.time()
-        z_hat, calls, _ = _algorithm_3(
+        z_hat, calls, _, _ = _algorithm_3(
             problem, gamma=1.0, mu_x=0.01, mu_y=0.01, zeta_1=0.01,
             params=params, M_saddle="npe", z0=z0,
         )

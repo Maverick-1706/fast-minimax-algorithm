@@ -143,7 +143,7 @@ def aipe(
     one = jnp.asarray(1.0, dtype=dtype)
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
     lam_tol = jnp.asarray(_REG_MIN_AIPE, dtype=dtype)
-    int_zero = jnp.zeros((), dtype=jnp.int32)
+    int_zero = jnp.zeros(2, dtype=jnp.int32)
 
     _has_warm = warm_init is not None
 
@@ -153,12 +153,14 @@ def aipe(
         z_tilde_0, u_0, warm_0 = prox_result_0[0], prox_result_0[1], prox_result_0[2]
         _has_inner_calls = len(prox_result_0) > 3
         init_inner_calls = prox_result_0[3] if _has_inner_calls else int_zero
+        ic_zero = jnp.zeros_like(init_inner_calls) if _has_inner_calls else int_zero
     else:
         result = prox_oracle(z0)
         z_tilde_0, u_0 = result[0], result[1]
         warm_0 = jnp.zeros((), dtype=dtype)
-        _has_inner_calls = len(result) > 3
-        init_inner_calls = result[3] if _has_inner_calls else int_zero
+        _has_inner_calls = len(result) > 2
+        init_inner_calls = result[-1] if _has_inner_calls else int_zero
+        ic_zero = jnp.zeros_like(init_inner_calls) if _has_inner_calls else int_zero
     lam_0 = gamma * jnp.linalg.norm(z_tilde_0 - z0)
     lam_prime_init = jnp.maximum(lam_0, lam_tol)
 
@@ -185,7 +187,7 @@ def aipe(
 
                 def initial_prox(_):
                     if _has_inner_calls:
-                        return z_tilde_0, u_0, warm_0, int_zero
+                        return z_tilde_0, u_0, warm_0, ic_zero
                     return z_tilde_0, u_0, warm_0
 
                 def loop_prox(_):
@@ -199,7 +201,7 @@ def aipe(
                 if _has_inner_calls:
                     step_inner_calls = prox_result[3]
                 else:
-                    step_inner_calls = int_zero
+                    step_inner_calls = ic_zero
 
                 lam = gamma * jnp.linalg.norm(z_tilde - z_bar)
                 accept = lam <= s.lam_prime
@@ -231,7 +233,15 @@ def aipe(
                     accept, accept_fn, reject_fn, operand=None,
                 )
 
-                g = grad_fn(z_tilde)
+                g_res = grad_fn(z_tilde)
+                if isinstance(g_res, tuple):
+                    g, g_calls = g_res
+                    g_c = jnp.asarray(g_calls, dtype=jnp.int32)
+                    added_calls = jnp.stack([g_c, jnp.int32(0)]) if g_c.ndim == 0 else g_c
+                    step_inner_calls = step_inner_calls + added_calls
+                else:
+                    g = g_res
+
                 v_new = s.v - a_step * g
                 if project is not None:
                     v_new = project(v_new)
@@ -264,11 +274,11 @@ def aipe(
                 z_bar = w_A * s.z + w_a * s.v
 
                 def initial_prox(_):
-                    return z_tilde_0, u_0, int_zero
+                    return z_tilde_0, u_0, ic_zero
 
                 def loop_prox(_):
                     result = prox_oracle(z_bar)
-                    ic = result[3] if len(result) > 3 else int_zero
+                    ic = result[-1] if _has_inner_calls else ic_zero
                     return result[0], result[1], ic
 
                 prox_result = jax.lax.cond(
@@ -307,7 +317,15 @@ def aipe(
                     accept, accept_fn, reject_fn, operand=None,
                 )
 
-                g = grad_fn(z_tilde)
+                g_res = grad_fn(z_tilde)
+                if isinstance(g_res, tuple):
+                    g, g_calls = g_res
+                    g_c = jnp.asarray(g_calls, dtype=jnp.int32)
+                    added_calls = jnp.stack([g_c, jnp.int32(0)]) if g_c.ndim == 0 else g_c
+                    step_inner_calls = step_inner_calls + added_calls
+                else:
+                    g = g_res
+
                 v_new = s.v - a_step * g
                 if project is not None:
                     v_new = project(v_new)

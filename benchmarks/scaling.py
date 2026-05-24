@@ -90,7 +90,6 @@ def _time_solve(
         gap_achieved=last_result.gap <= epsilon,
         final_gap=float(last_result.gap),
         iterations=last_result.iterations,
-        normalized_cost=last_result.oracle_stats.normalized_cost(d),
         **opt_fields,
     )
     
@@ -154,7 +153,6 @@ def scale_dimension(
             gap_achieved=eg_result.gap_achieved,
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
-            normalized_cost=eg_stats.normalized_cost(d),
         ))
 
     return rows
@@ -231,7 +229,6 @@ def scale_condition_number(
             gap_achieved=eg_result.gap_achieved,
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
-            normalized_cost=eg_stats.normalized_cost(d),
             condition_number=kappa,
         )
         rows.append(eg_res)
@@ -295,7 +292,6 @@ def scale_rho(
             gap_achieved=eg_result.gap_achieved,
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
-            normalized_cost=eg_stats.normalized_cost(d),
             rho=2 * rho,
         )
         rows.append(eg_res)
@@ -361,7 +357,6 @@ def scale_sparsity(
             gap_achieved=eg_result.gap_achieved,
             final_gap=eg_result.gap,
             iterations=eg_result.iterations,
-            normalized_cost=eg_stats.normalized_cost(d),
             sparsity=sparsity,
         )
         rows.append(eg_res)
@@ -372,7 +367,7 @@ def scale_sparsity(
 def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> str:
     """Format scaling results as a text table."""
     lines = []
-    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE cost':>10}  {'LEN (s)':>10}  {'LEN cost':>10}  {'JIT-EG (s)':>10}  {'EG cost':>10}"
+    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE orc':>10}  {'LEN (s)':>10}  {'LEN orc':>10}  {'JIT-EG (s)':>10}  {'EG orc':>10}"
     lines.append(header)
     lines.append("─" * len(header))
 
@@ -397,11 +392,11 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
         eg = next((r for r in group_list if r.solver == "eg"), None)
 
         npe_time = npe.wall_time_mean if npe else 0.0
-        npe_cost = npe.normalized_cost if npe else 0.0
+        npe_cost = npe.oracle_stats.oracle_calls if npe else 0.0
         len_time = lnn.wall_time_mean if lnn else 0.0
-        len_cost = lnn.normalized_cost if lnn else 0.0
+        len_cost = lnn.oracle_stats.oracle_calls if lnn else 0.0
         eg_time = eg.wall_time_mean if eg else 0.0
-        eg_cost = eg.normalized_cost if eg else 0.0
+        eg_cost = eg.oracle_stats.oracle_calls if eg else 0.0
 
         lines.append(
             f"{kv:>8.6g}  {npe_time:>10.4f}  {npe_cost:>10.2e}  "

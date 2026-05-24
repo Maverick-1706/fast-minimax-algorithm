@@ -132,19 +132,18 @@ def flatten_jit_rows(rows: list[dict]) -> list[dict]:
 
 
 def flatten_memory_rows(rows: list[MemoryResult]) -> list[dict]:
-    """Flatten MemoryResult list into flat dicts, preserving hardware tracking metrics."""
+    """Flatten MemoryResult list into flat dicts, preserving all hardware tracking metrics.
+    
+    Delegates to MemoryResult.to_dict() to ensure all current and future 
+    device/process memory fields are captured without manual allowlist drift.
+    """
     flat = []
     for r in rows:
-        flat.append({
-            "name": r.name,
-            "dim": r.dim,
-            "solver": r.solver,
-            "peak_mb": r.peak_bytes / (1024 * 1024),
-            "jax_mb": r.jax_bytes / (1024 * 1024),
-            "device_peak_mb": r.device_bytes_peak / (1024 * 1024),
-            "device_delta_mb": r.device_bytes_delta / (1024 * 1024),
-            "utilization": r.device_utilization,
-        })
+        d = r.to_dict()
+        # Backward compatibility: retain legacy 'jax_mb' alias for older dashboards 
+        # that expect it, mapping it to the more accurate 'jax_live_mb' key.
+        d["jax_mb"] = d.get("jax_live_mb", 0.0)
+        flat.append(d)
     return flat
 
 

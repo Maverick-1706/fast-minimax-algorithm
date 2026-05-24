@@ -16,7 +16,9 @@ from jax import Array
 
 from minimax_aipe import OracleStats
 from minimax_aipe.problem import MinimaxProblem
-
+from minimax_aipe import OracleStats
+from minimax_aipe.problem import MinimaxProblem
+from benchmarks.oracles import count_eg_oracles, count_gda_oracles, count_npe_oracles
 
 @dataclass
 class BaselineResult:
@@ -25,7 +27,7 @@ class BaselineResult:
     Attributes
     ----------
     converged : bool
-        Whether the loop terminated early (operator residual < tol).
+        Whether the loop terminated early (gap-based stopping criterion met).
     gap_achieved : bool
         Whether the duality gap <= epsilon (the actual success criterion).
     """
@@ -75,9 +77,9 @@ def run_eg_jit(
 
     @jax.jit
     def eg_loop(z_init):
-        tol_val = jnp.asarray(
-            tol if tol > 0 else -1.0, dtype=z_init.dtype
-        )
+        D = max(float(problem.D_x), float(problem.D_y), 1.0)
+        res_tol = tol / D if tol > 0 else -1.0
+        tol_val = jnp.asarray(res_tol, dtype=z_init.dtype)
         eval_freq = jnp.int32(100)
         max_chunks = jnp.int32(max_iters // 100)
         Fz_init = F_op(z_init)
@@ -107,9 +109,9 @@ def run_eg_jit(
     t0 = time.perf_counter()
     iters_out, z_out = eg_loop(z_start)
     z_out.block_until_ready()
-    wall_time = time.perf_counter() - t0
-
+    # Include the blocking host-transfer for the residual in the timed region
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, int(iters_out)
 
 def run_eg_jit_benchmark(
@@ -119,24 +121,31 @@ def run_eg_jit_benchmark(
     z0: Array | None = None,
 ) -> BaselineResult:
     """JIT-EG benchmark wrapper returning BaselineResult with gap."""
-    z_out, residual, wall_time, actual_iters = run_eg_jit(
+    z_out, residual, loop_time, actual_iters = run_eg_jit(
         problem, max_iters=max_iters, z0=z0, tol=epsilon
     )
+    
+    # Time the post-processing (gap estimation) to ensure fair comparison
+    # with AIPE, which includes gap computation in its solve time.
+    t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
     gap_val = estimate_gap(problem, x_out, y_out)
     if hasattr(gap_val, "block_until_ready"):
         gap_val.block_until_ready()
     gap = float(gap_val)
+    gap_time = time.perf_counter() - t_gap
+    
+    wall_time = loop_time + gap_time
 
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
         # FIX: Explicitly check if the solver completed early before hitting the budget cap
-        converged=actual_iters < max_iters, 
+        converged=actual_iters < (max_iters // 100) * 100,
         gap_achieved=gap <= epsilon,
         final_residual=residual,
-        oracle_stats=OracleStats(grad_calls=2 * actual_iters, projection_calls=2 * actual_iters, oracle_calls=2 * actual_iters),
+        oracle_stats=count_eg_oracles(actual_iters),  # ← Replaced manual construction
     )
 
 
@@ -167,9 +176,9 @@ def run_gda_jit(
 
     @jax.jit
     def gda_loop(z_init):
-        tol_val = jnp.asarray(
-            tol if tol > 0 else -1.0, dtype=z_init.dtype
-        )
+        D = max(float(problem.D_x), float(problem.D_y), 1.0)
+        res_tol = tol / D if tol > 0 else -1.0
+        tol_val = jnp.asarray(res_tol, dtype=z_init.dtype)
         eval_freq = jnp.int32(100)
         max_chunks = jnp.int32(max_iters // 100)
         Fz_init = F_op(z_init)
@@ -203,9 +212,9 @@ def run_gda_jit(
     t0 = time.perf_counter()
     iters_out, z_out = gda_loop(z_start)
     z_out.block_until_ready()
-    wall_time = time.perf_counter() - t0
-
+    # Include the blocking host-transfer for the residual in the timed region
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, int(iters_out)
 
 def run_gda_jit_benchmark(
@@ -215,24 +224,30 @@ def run_gda_jit_benchmark(
     z0: Array | None = None,
 ) -> BaselineResult:
     """JIT-GDA benchmark wrapper returning BaselineResult with gap."""
-    z_out, residual, wall_time, actual_iters = run_gda_jit(
+    z_out, residual, loop_time, actual_iters = run_gda_jit(
         problem, max_iters=max_iters, z0=z0, tol=epsilon
     )
+    
+    # Time the post-processing (gap estimation) to ensure fair comparison
+    t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
     gap_val = estimate_gap(problem, x_out, y_out)
     if hasattr(gap_val, "block_until_ready"):
         gap_val.block_until_ready()
     gap = float(gap_val)
+    gap_time = time.perf_counter() - t_gap
+    
+    wall_time = loop_time + gap_time
 
     return BaselineResult(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
         # FIX: Explicitly check if the solver completed early before hitting the budget cap
-        converged=actual_iters < max_iters, 
+        converged=actual_iters < (max_iters // 100) * 100,
         gap_achieved=gap <= epsilon,
         final_residual=residual,
-        oracle_stats=OracleStats(grad_calls=actual_iters, projection_calls=2 * actual_iters, oracle_calls=actual_iters),
+        oracle_stats=count_gda_oracles(actual_iters),  # ← Replaced manual construction
     )
 
 # ── JIT-compiled NPE-restart ─────────────────────────────────────────────
@@ -281,9 +296,9 @@ def run_npe_restart_jit(
 
     @jax.jit
     def npe_epoch_loop(z_init):
-        tol_val = jnp.asarray(
-            tol if tol > 0 else -1.0, dtype=z_init.dtype
-        )
+        D = max(float(problem.D_x), float(problem.D_y), 1.0)
+        res_tol = tol / D if tol > 0 else -1.0
+        tol_val = jnp.asarray(res_tol, dtype=z_init.dtype)
         max_epochs = jnp.int32(max(1, max_iters // T))
         Fz_init = F_op(z_init)
 
@@ -308,10 +323,10 @@ def run_npe_restart_jit(
     t0 = time.perf_counter()
     epochs_out, z_out = npe_epoch_loop(z_start)
     z_out.block_until_ready()
-    wall_time = time.perf_counter() - t0
-
     actual_iters = int(epochs_out) * T
+    # Include the blocking host-transfer for the residual in the timed region
     residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, actual_iters
 
 def run_npe_restart_jit_benchmark(
@@ -321,15 +336,21 @@ def run_npe_restart_jit_benchmark(
     z0: Array | None = None,
 ) -> BaselineResult:
     """JIT-NPE-restart benchmark wrapper returning BaselineResult with gap."""
-    z_out, residual, wall_time, actual_iters = run_npe_restart_jit(
+    z_out, residual, loop_time, actual_iters = run_npe_restart_jit(
         problem, max_iters=max_iters, z0=z0, tol=epsilon
     )
+    
+    # Time the post-processing (gap estimation) to ensure fair comparison
+    t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
     gap_val = estimate_gap(problem, x_out, y_out)
     if hasattr(gap_val, "block_until_ready"):
         gap_val.block_until_ready()
     gap = float(gap_val)
+    gap_time = time.perf_counter() - t_gap
+    
+    wall_time = loop_time + gap_time
 
     # Compute maximum allowed iterations based on internal epoch floor allocation
     actual_rho = float(problem.rho) if problem.rho is not None else 0.0
@@ -348,14 +369,8 @@ def run_npe_restart_jit_benchmark(
         x=x_out, y=y_out, gap=gap,
         iterations=actual_iters, wall_time=wall_time,
         # FIX: Match the baseline early-termination check using the expected maximum epoch ceiling
-        converged=actual_iters < max_expected_iters, 
+        converged=actual_iters < max_expected_iters,
         gap_achieved=gap <= epsilon,
         final_residual=residual,
-        oracle_stats=OracleStats(
-            crn_calls=actual_iters,
-            grad_calls=actual_iters,
-            hessian_calls=actual_iters,
-            oracle_calls=actual_iters,
-            call_type="crn"
-        ),
+        oracle_stats=count_npe_oracles(actual_iters),  # ← Replaced manual construction
     )

@@ -60,13 +60,16 @@ class BenchmarkResult:
     gap_endpoints: Optional[list[float]] = None
     """Duality gap at different epsilon targets.  Length = len(epsilons)."""
     oracle_endpoints: Optional[list[int]] = None
-    """Cumulative oracle calls for each target epsilon solve."""
+    """Independent cold-start oracle calls for each target epsilon solve."""
     outer_iterations: Optional[int] = None
     """Number of outer iterations completed."""
 
+    # ── Dynamic Metadata ──────────────────────────────────────────
+    extra_metadata: dict = field(default_factory=dict)
+    """Flexible dictionary for arbitrary hyperparameter or ablation tracking."""
+
     def to_dict(self) -> dict:
         """Return a flat JSON-serializable dict.
-
         Oracle statistics are flattened into the top-level dict
         with an 'oracle_' prefix.
         """
@@ -76,7 +79,7 @@ class BenchmarkResult:
         ci = d.pop("ci")
         d["ci_lo"] = ci[0]
         d["ci_hi"] = ci[1]
-
+        
         stats_obj = d.pop("oracle_stats", {})
         if stats_obj is None:
             stats = {}
@@ -92,7 +95,7 @@ class BenchmarkResult:
             # Standardize names: use 'oracle_calls' as the primary metric
             # but also keep the specific counts (grad, hessian, etc)
             d[f"oracle_{k}"] = v
-        
+            
         # Add a unified 'calls' alias for the primary metric
         primary_calls = stats.get("oracle_calls", 0)
         d["oracle_calls"] = primary_calls
@@ -104,14 +107,24 @@ class BenchmarkResult:
         
         # Explicitly label the call type for the unified metric
         d["oracle_call_type"] = stats.get("call_type", "crn")
-
+        
         # Endpoints — keep as lists (JSON-serializable)
         d["gap_endpoints"] = self.gap_endpoints
         d["oracle_endpoints"] = self.oracle_endpoints
         d["outer_iterations"] = self.outer_iterations
         
+        # Unpack any arbitrary ablation parameters safely into the root dict
+        extra = d.pop("extra_metadata", {})
+        for k, v in extra.items():
+            # FIX: Prevent silent overwrites of core fields or dynamically 
+            # generated columns (like 'oracle_calls' or 'ci_lo') by 
+            # namespacing colliding keys.
+            if k in d:
+                d[f"extra_{k}"] = v
+            else:
+                d[k] = v
+                
         return d
-
     def to_row(self) -> dict:
         """Alias for :meth:`to_dict` — semantic clarity in comprehensions."""
         return self.to_dict()

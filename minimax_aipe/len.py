@@ -42,6 +42,7 @@ from functools import partial
 
 from minimax_aipe.npe import project_z  # single source of truth
 from minimax_aipe.oracles import lazy_crn_oracle
+from minimax_aipe._compat import CallStats
 from minimax_aipe.problem import MinimaxProblem
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -99,6 +100,7 @@ class LENState(NamedTuple):
     best_fn: Array           # ``fn(best_z)`` value
     snapshot_refreshes: int  # how many times the snapshot was refreshed
     num_rejected: int        # steps rejected by safety guards
+    stats: Array             # [crn_calls, linear_solves] accumulator
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -120,16 +122,19 @@ _DEFAULT_MAX_NORM: float = 1e10
 # Parameter validation
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _validate_params(*, T: int, m: int, gamma: float, S: int = 1) -> None:
+def _validate_params(*, T: int, m: int, S: int = 1, gamma: float = 1.0) -> None:
     """Fail loud on invalid parameters (raises ``ValueError``)."""
     if T <= 0:
         raise ValueError(f"T must be positive, got {T}")
     if m <= 0:
         raise ValueError(f"m must be positive, got {m}")
-    if gamma <= 0.0:
-        raise ValueError(f"gamma must be positive, got {gamma}")
     if S <= 0:
         raise ValueError(f"S must be positive, got {S}")
+    
+    import jax
+    if not isinstance(gamma, jax.core.Tracer):
+        if gamma <= 0:
+            raise ValueError(f"gamma must be positive, got {gamma}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -175,7 +180,7 @@ def make_lazy_crn_npe_oracle(
     def oracle(z: Array, z_snapshot: Array) -> Union[
         tuple[Array, Array], tuple[Array, Array, Array]
     ]:
-        z_half, u = lazy_crn_oracle(
+        z_half, u, oracle_stats = lazy_crn_oracle(
             problem,
             z_bar=z,
             z_snapshot=z_snapshot,
@@ -185,8 +190,8 @@ def make_lazy_crn_npe_oracle(
         )
         if return_F:
             F_half = problem.operator_F(z_half)
-            return z_half, u, F_half
-        return z_half, u
+            return z_half, u, F_half, oracle_stats
+        return z_half, u, oracle_stats
 
     return oracle
 
@@ -301,6 +306,7 @@ def _len_scan_loop(
     else:
         best_fn_init = jnp.asarray(jnp.inf, dtype=dtype)
 
+    stats_zero = jnp.zeros(2, dtype=jnp.int32)
     init = LENState(
         z=z0,
         z_snapshot=z0,
@@ -311,6 +317,7 @@ def _len_scan_loop(
         best_fn=best_fn_init,
         snapshot_refreshes=0,
         num_rejected=0,
+        stats=stats_zero,
     )
 
     def step(carry: LENState, _unused):
@@ -354,10 +361,10 @@ def _len_scan_loop(
 
         # ── Line 2: lazy cubic-regularised Newton step ───────────────
         result = oracle(s.z, z_snapshot)
-        if isinstance(result, tuple) and builtins.len(result) == 3:
-            z_half, _u, F_half = result   # type: ignore[misc]
+        if isinstance(result, tuple) and builtins.len(result) == 4:
+            z_half, _u, F_half, oracle_stats = result   # type: ignore[misc]
         else:
-            z_half, _u = result[:2]       # type: ignore[misc]
+            z_half, _u, oracle_stats = result[:3]       # type: ignore[misc]
             F_half = F_fn(z_half)
 
         # ── Line 3: step size η_t = 1 / (2γ · ‖z_t − z_{t+1/2}‖) ──
@@ -421,6 +428,7 @@ def _len_scan_loop(
             best_fn=best_fn,
             snapshot_refreshes=snapshot_refreshes,
             num_rejected=s.num_rejected + rejected,
+            stats=s.stats + oracle_stats,
         )
         return new_carry, (z_half, z_new)
 
@@ -445,7 +453,7 @@ def _len_scan_loop(
         final_gn = jnp.linalg.norm(final_grad)
         return LENResult(
             z=z_out,
-            oracle_calls=T,
+            oracle_calls=int(final_state.stats[0]),
             iterations=T,
             snapshot_refreshes=int(final_state.snapshot_refreshes),
             num_rejected=int(final_state.num_rejected),
@@ -453,17 +461,17 @@ def _len_scan_loop(
             converged=bool(final_state.num_rejected == 0),
         )
 
-    return z_out, T
+    return z_out, final_state.stats
 
 
 # ── public alias ──────────────────────────────────────────────────────────
 
 @partial(
     jax.jit,
-    static_argnums=(0, 1, 3, 4, 5, 6, 7),
+    static_argnums=(0, 1, 3, 5, 6, 7),
         static_argnames=("project", "fn", "adaptive_refresh", "safety_checks", "return_full"),
 )
-def len(
+def _len_impl(
     oracle: LENOracle,
     F_fn: Callable[[Array], Array],
     z0: Array,
@@ -522,7 +530,7 @@ def len_loop(
     return_full: bool = False,
 ) -> Union[tuple[Array, int], LENResult]:
     """Backward-compatible wrapper — delegates to :func:`len`."""
-    return _len_scan_loop(
+    result = _len_scan_loop(
         oracle, F_fn, z0, T, gamma, m,
         project=project, fn=fn,
         adaptive_refresh=adaptive_refresh,
@@ -530,6 +538,42 @@ def len_loop(
         eta_floor=eta_floor, max_norm=max_norm,
         safety_checks=safety_checks, return_full=return_full,
     )
+    if return_full:
+        return result
+    z_out, stats = result
+    return z_out, CallStats(stats)
+
+
+def len(
+    oracle: LENOracle,
+    F_fn: Callable[[Array], Array],
+    z0: Array,
+    T: int,
+    gamma: float,
+    m: int,
+    project: Optional[Callable[[Array], Array]] = None,
+    fn: Optional[Callable[[Array], Array]] = None,
+    *,
+    adaptive_refresh: bool = False,
+    staleness_threshold: float = 0.1,
+    eta_floor: float = _DEFAULT_ETA_FLOOR,
+    max_norm: float = _DEFAULT_MAX_NORM,
+    safety_checks: bool = True,
+    return_full: bool = False,
+) -> Union[tuple[Array, CallStats], LENResult]:
+    """Public Algorithm 8 wrapper with scalar-compatible call stats."""
+    result = _len_impl(
+        oracle, F_fn, z0, T, gamma, m,
+        project=project, fn=fn,
+        adaptive_refresh=adaptive_refresh,
+        staleness_threshold=staleness_threshold,
+        eta_floor=eta_floor, max_norm=max_norm,
+        safety_checks=safety_checks, return_full=return_full,
+    )
+    if return_full:
+        return result
+    z_out, stats = result
+    return z_out, CallStats(stats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -554,10 +598,10 @@ def len_restart(
     safety_checks: bool = True,
     return_full: bool = False,
 ) -> Union[tuple[Array, int], LENResult]:
-    _validate_params(T=T, m=m, gamma=gamma, S=S)
+    _validate_params(T=T, m=m, S=S, gamma=gamma)
 
     z = z0
-    total_calls = 0
+    total_stats = jnp.zeros(2, dtype=jnp.int32)
     total_rejected = 0
     total_refreshes = 0
     all_converged = True
@@ -574,27 +618,27 @@ def len_restart(
         )
         if return_full:
             z = result.z
-            total_calls += result.oracle_calls
+            total_stats = total_stats + jnp.stack([jnp.int32(result.oracle_calls), jnp.int32(0)])
             total_rejected += result.num_rejected
             total_refreshes += result.snapshot_refreshes
             all_converged = all_converged and result.converged
         else:
-            z, calls = result  # type: ignore[misc]
-            total_calls += calls
+            z, stats_arr = result  # type: ignore[misc]
+            total_stats = total_stats + stats_arr
 
     if return_full:
         final_grad = F_fn(z)
         return LENResult(
             z=z,
-            oracle_calls=total_calls,
-            iterations=total_calls,
+            oracle_calls=int(total_stats[0]),
+            iterations=int(total_stats[0]),
             snapshot_refreshes=total_refreshes,
             num_rejected=total_rejected,
             final_gradient_norm=jnp.linalg.norm(final_grad),
             converged=all_converged,
         )
 
-    return z, total_calls
+    return z, CallStats(total_stats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

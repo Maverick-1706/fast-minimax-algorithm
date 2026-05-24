@@ -223,10 +223,15 @@ def _build_result(
         gap_achieved=result.gap <= epsilon,
         final_gap=float(result.gap),
         iterations=result.iterations,
-        normalized_cost=result.oracle_stats.normalized_cost(d),
     )
     if extra:
-        kwargs.update(extra)
+        extra_meta = {}
+        for k, v in extra.items():
+            if k in BenchmarkResult.__dataclass_fields__:
+                kwargs[k] = v
+            else:
+                extra_meta[k] = v
+        kwargs["extra_metadata"] = extra_meta
     return BenchmarkResult(**kwargs)
 
 

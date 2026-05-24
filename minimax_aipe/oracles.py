@@ -16,6 +16,7 @@ import jax.scipy.linalg as jsp_linalg
 from jax import Array
 
 from minimax_aipe._precision import REG_MIN, TINY as _TINY
+from minimax_aipe._compat import CRNResult
 from minimax_aipe.problem import MinimaxProblem
 
 
@@ -146,11 +147,16 @@ def _stable_lam_update(lam: Array, lam_candidate: Array, i: Array) -> Array:
 
     Allow lambda to freely adapt initially (e.g., i < 3) before clipping.
     """
+    dtype = lam.dtype
+    reg_min = jnp.asarray(REG_MIN, dtype=dtype)
     safe_candidate = jnp.where(jnp.isfinite(lam_candidate), lam_candidate, 2.0 * lam)
+    # FIX: Ensure lambda never collapses exactly to 0 (which causes Schur-complement precision NaNs)
+    safe_candidate = jnp.maximum(safe_candidate, reg_min)
+    
     return jnp.where(
         i < 3,
         safe_candidate,
-        jnp.clip(lam_candidate, 0.5 * lam, 2.0 * lam),
+        jnp.clip(safe_candidate, jnp.maximum(0.5 * lam, reg_min), 2.0 * lam),
     )
 
 
@@ -231,7 +237,7 @@ def crn_oracle(
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
             return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
-        lam, z, _i, _p = jax.lax.while_loop(
+        lam, z, n_secular, _p = jax.lax.while_loop(
             cond, body,
             (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
@@ -247,10 +253,12 @@ def crn_oracle(
             return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+        n_secular = jnp.int32(n_iters)
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    return z, u
+    stats = jnp.stack([jnp.int32(1), n_secular])
+    return CRNResult(z, u, stats)
 
 def crn_oracle_minimization(
     grad_fn: Callable[[Array], Array],
@@ -286,7 +294,7 @@ def crn_oracle_minimization(
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
             return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
-        lam, z, _i, _p = jax.lax.while_loop(
+        lam, z, n_secular, _p = jax.lax.while_loop(
             cond, body,
             (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
@@ -302,10 +310,12 @@ def crn_oracle_minimization(
             return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+        n_secular = jnp.int32(n_iters)
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    return z, u
+    stats = jnp.stack([jnp.int32(1), n_secular])
+    return CRNResult(z, u, stats)
 
 def lazy_crn_oracle(
     problem: MinimaxProblem,
@@ -342,7 +352,7 @@ def lazy_crn_oracle(
             lam_candidate = (gamma / 2.0) * jnp.linalg.norm(d_eff)
             return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
 
-        lam, z, _i, _p = jax.lax.while_loop(
+        lam, z, n_secular, _p = jax.lax.while_loop(
             cond, body,
             (lam_init, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype)),
         )
@@ -358,10 +368,12 @@ def lazy_crn_oracle(
             return _stable_lam_update(lam, lam_candidate, i), z_new
 
         lam, z = jax.lax.fori_loop(0, n_iters, body, (lam_init, z_bar))
+        n_secular = jnp.int32(n_iters)
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    return z, u
+    stats = jnp.stack([jnp.int32(1), n_secular])
+    return CRNResult(z, u, stats)
 
 
 __all__ = [

@@ -87,16 +87,18 @@ class TestMakeCRNNPEOracle:
         problem = _bilinear(dim=2)
         oracle = make_crn_npe_oracle(problem, gamma=1.0)
         z0 = jnp.array([0.5, -0.5, 0.3, 0.7])
-        z_half, u = oracle(z0)
+        z_half, u, stats = oracle(z0)
         assert z_half.shape == z0.shape
         assert u.shape == z0.shape
+        assert stats.shape == (2,)
 
     def test_returns_jax_arrays(self):
         problem = _bilinear()
         oracle = make_crn_npe_oracle(problem, gamma=1.0)
-        z_half, u = oracle(jnp.zeros(4))
+        z_half, u, stats = oracle(jnp.zeros(4))
         assert isinstance(z_half, jax.Array)
         assert isinstance(u, jax.Array)
+        assert isinstance(stats, jax.Array)
 
 
 # ── Algorithm 6: NPE ──────────────────────────────────────────────────────
@@ -109,8 +111,8 @@ class TestNPE:
         oracle, F_fn, proj = _npe_args(problem, gamma=1.0)
         z0 = jnp.array([0.5, -0.5, 0.3, 0.7])
         for T in (1, 5, 10):
-            _, calls = npe(oracle, F_fn, z0, T, gamma=1.0, project=proj)
-            assert calls == T
+            _, stats = npe(oracle, F_fn, z0, T, gamma=1.0, project=proj)
+            assert stats[0] == T  # crn_calls == T
 
     def test_output_shape(self):
         """z_out has the same shape as z0."""
@@ -163,9 +165,9 @@ class TestNPE:
         oracle = make_crn_npe_oracle(problem, gamma=1.0)
         F_fn = problem.operator_F
         z0 = jnp.array([0.5, -0.5, 0.3, 0.7])
-        z_out, calls = npe(oracle, F_fn, z0, T=5, gamma=1.0)
+        z_out, stats = npe(oracle, F_fn, z0, T=5, gamma=1.0)
         assert z_out.shape == z0.shape
-        assert calls == 5
+        assert stats[0] == 5
 
     def test_fn_output_selection(self):
         """When fn is provided, output minimises fn over all candidates."""
@@ -192,7 +194,7 @@ class TestNPE:
     def test_scan_state_is_named_tuple(self):
         """NPEState is a NamedTuple (inspectable pytree)."""
         assert issubclass(NPEState, tuple)
-        assert NPEState._fields == ("z", "weighted_sum", "eta_sum")
+        assert NPEState._fields == ("z", "weighted_sum", "eta_sum", "stats")
 
 
 # ── Algorithm 7: NPE-restart ──────────────────────────────────────────────
@@ -204,10 +206,10 @@ class TestNPERestart:
         problem = _bilinear()
         oracle, F_fn, proj = _npe_args(problem, gamma=1.0)
         z0 = jnp.array([0.5, -0.5, 0.3, 0.7])
-        _, calls = npe_restart(
+        _, stats = npe_restart(
             oracle, F_fn, z0, T=5, gamma=1.0, S=4, project=proj,
         )
-        assert calls == 20
+        assert stats[0] == 20
 
     def test_scsc_convergence(self):
         """On a strongly-convex problem, restarts drive z toward z*."""
