@@ -18,7 +18,7 @@ from minimax_aipe import solve
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
 from benchmarks.results import BenchmarkResult
-from benchmarks.stats import summarise, should_repeat
+from benchmarks.stats import summarise
 from minimax_aipe.problem import BenchmarkProblem
 
 
@@ -53,15 +53,11 @@ def _time_callable(fn, n_warmup: int | None = None, n_repeats: int | None = None
         t1 = time.perf_counter()
         times.append(t1 - t0)
 
-    # ── Automated repeat policy ───────────────────────────────────────
+    # ── Automated repeat policy (uniform tier count) ─────────────────
     if config.AUTO_REPEAT:
         for _ in range(config.AUTO_REPEAT_MAX_EXTRA):
-            decision = should_repeat(times)
-            if not decision.should_repeat:
-                break
             for _ in range(config.AUTO_REPEAT_N):
                 gc.collect()
-                # Synchronize device queue before starting timer
                 _ = jnp.zeros(1).block_until_ready()
                 t0 = time.perf_counter()
                 last_result = fn()

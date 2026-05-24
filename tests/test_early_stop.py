@@ -153,7 +153,7 @@ class TestInnerEarlyStop:
         residual = float(jnp.linalg.norm(h_problem.operator_F(z_hat)))
         assert jnp.isfinite(residual)
         # The test is that it completed in reasonable time (not all S_inner epochs)
-        assert calls > 0
+        assert int(calls[0]) > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -178,7 +178,7 @@ class TestOuterEarlyStop:
         elapsed = time.time() - start
 
         assert jnp.all(jnp.isfinite(z_hat))
-        assert calls > 0
+        assert int(calls[0]) > 0
         assert elapsed < 120.0, (
             f"Algorithm 3 took {elapsed:.1f}s — early stopping may not be working"
         )

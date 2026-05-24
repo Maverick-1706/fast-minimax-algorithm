@@ -488,9 +488,9 @@ def test_algorithm_3_call_counter_is_threaded():
     )
 
     assert int(calls[0]) > 0
-    # calls is now a 2-element array [crn_calls, linear_solves] with
+    # calls is now a 3-element array [crn_calls, linear_solves, grad_calls] with
     # exact runtime tracking rather than formula-based estimates.
-    assert calls.shape == (2,)
+    assert calls.shape == (3,)
     assert calls.dtype == jnp.int32
 
 

@@ -90,7 +90,7 @@ class TestMakeCRNNPEOracle:
         z_half, u, stats = oracle(z0)
         assert z_half.shape == z0.shape
         assert u.shape == z0.shape
-        assert stats.shape == (2,)
+        assert stats.shape == (3,)
 
     def test_returns_jax_arrays(self):
         problem = _bilinear()

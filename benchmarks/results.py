@@ -131,7 +131,10 @@ class BenchmarkResult:
 
     def __getitem__(self, key):
         """Allow dict-style access for backward compatibility."""
-        return getattr(self, key)
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
 
     def __repr__(self) -> str:
         return (

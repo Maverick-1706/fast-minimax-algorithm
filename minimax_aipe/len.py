@@ -306,7 +306,7 @@ def _len_scan_loop(
     else:
         best_fn_init = jnp.asarray(jnp.inf, dtype=dtype)
 
-    stats_zero = jnp.zeros(2, dtype=jnp.int32)
+    stats_zero = jnp.zeros(3, dtype=jnp.int32)
     init = LENState(
         z=z0,
         z_snapshot=z0,
@@ -366,6 +366,8 @@ def _len_scan_loop(
         else:
             z_half, _u, oracle_stats = result[:3]       # type: ignore[misc]
             F_half = F_fn(z_half)
+            grad_call = jnp.array([jnp.int32(0), jnp.int32(0), jnp.int32(1)], dtype=jnp.int32)
+            oracle_stats = oracle_stats + grad_call
 
         # ── Line 3: step size η_t = 1 / (2γ · ‖z_t − z_{t+1/2}‖) ──
         # Mathematically η = 1/(2γ·‖Δ‖), but this explodes when ‖Δ‖→0.
@@ -601,7 +603,7 @@ def len_restart(
     _validate_params(T=T, m=m, S=S, gamma=gamma)
 
     z = z0
-    total_stats = jnp.zeros(2, dtype=jnp.int32)
+    total_stats = jnp.zeros(3, dtype=jnp.int32)
     total_rejected = 0
     total_refreshes = 0
     all_converged = True
@@ -618,7 +620,7 @@ def len_restart(
         )
         if return_full:
             z = result.z
-            total_stats = total_stats + jnp.stack([jnp.int32(result.oracle_calls), jnp.int32(0)])
+            total_stats = total_stats + jnp.stack([jnp.int32(result.oracle_calls), jnp.int32(0), jnp.int32(0)])
             total_rejected += result.num_rejected
             total_refreshes += result.snapshot_refreshes
             all_converged = all_converged and result.converged

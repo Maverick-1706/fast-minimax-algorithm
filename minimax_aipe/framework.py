@@ -450,7 +450,7 @@ class RegularizedSubproblem:
                 )
                 d_eff = z - z_bar
                 u = -(g + H @ d_eff + lam * d_eff)
-                stats = jnp.stack([jnp.int32(1), n_secular])
+                stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
                 return CRNResult(z, u, stats)
         else:
             def oracle(z_bar: Array) -> tuple[Array, Array]:
@@ -482,7 +482,7 @@ class RegularizedSubproblem:
                 )
                 d_eff = z - z_bar
                 u = -(g + H @ d_eff + lam * d_eff)
-                stats = jnp.stack([jnp.int32(1), jnp.int32(n_iters)])
+                stats = jnp.stack([jnp.int32(1), jnp.int32(n_iters), jnp.int32(1)])
                 return CRNResult(z, u, stats)
 
         return oracle
@@ -758,7 +758,7 @@ def _iProx_Phi(
         _run_middle_epoch, y0, params.S_middle,
         step_tol=params.zeta_2,
         warm=z0_init,
-        stats_init=jnp.zeros(2, dtype=jnp.int32),
+        stats_init=jnp.zeros(3, dtype=jnp.int32),
     )
 
     x_hat, min_x_crn = _minimize_x_auto(
@@ -773,13 +773,12 @@ def _iProx_Phi(
     ell_g = max(_ell(g_problem), _ABS_TOL)
     eta_g = 1.0 / (2.0 * max(ell_g, _ABS_TOL))
     
-    gx_hat, _ = g_problem.grad_f(x_hat, y_hat)
-    x_half = g_problem.project_x(x_hat - eta_g * gx_hat)
-    
+    gx_bar, _ = g_problem.grad_f(x_bar, y_hat)
+    x_half = g_problem.project_x(x_bar - eta_g * gx_bar)
     gx_half, _ = g_problem.grad_f(x_half, y_hat)
-    x_out = g_problem.project_x(x_hat - eta_g * gx_half)
-    u_out = (x_hat - x_out) / eta_g - gx_half
-    
+    x_out = g_problem.project_x(x_bar - eta_g * gx_half)
+    u_out = (x_bar - x_out) / eta_g - gx_half
+        
     return x_out, u_out, y_hat, total_inner_calls
 
 
@@ -894,7 +893,7 @@ def _iProx_Psi(
                 )
                 d_eff = z_half - z_bar
                 u = -(g + H_snapshot @ d_eff + lam * d_eff)
-                stats = jnp.stack([jnp.int32(1), n_secular])
+                stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
                 return z_half, u, stats
 
             def _len_oracle(
@@ -920,7 +919,7 @@ def _iProx_Psi(
         z_new, inner_stats = _run_inner(z)
         return z_new, inner_stats, None, inner_stats
 
-    stats_init = jnp.zeros(2, dtype=jnp.int32)
+    stats_init = jnp.zeros(3, dtype=jnp.int32)
     z_hat, epochs, _, calls = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(zeta_3 * 0.01, _ABS_TOL),
@@ -931,12 +930,13 @@ def _iProx_Psi(
     ell_h = max(kernel.ell_h, _ABS_TOL)
     eta = 1.0 / (2.0 * max(ell_h, _ABS_TOL))
 
-    F_hat = _F_h(z_hat)
-    z_half = proj(z_hat - eta * F_hat)
+    z_bar_joint = jnp.concatenate([x_bar, y_bar])
+    F_bar = _F_h(z_bar_joint)
+    z_half = proj(z_bar_joint - eta * F_bar)
     F_half = _F_h(z_half)
-    z_out = proj(z_hat - eta * F_half)
+    z_out = proj(z_bar_joint - eta * F_half)
 
-    c_out = (z_hat - z_out) / eta - F_half
+    c_out = (z_bar_joint - z_out) / eta - F_half
     _x_out, y_out = z_out[: kernel.dim_x], z_out[kernel.dim_x :]
     v_out = c_out[kernel.dim_x :]
 
@@ -1029,6 +1029,7 @@ def solve(
 
     inner_crn = int(stats_array[0])
     inner_linear = int(stats_array[1])
+    inner_grad = int(stats_array[2])
     d = problem.dim_x + problem.dim_y
 
     if M_saddle == "npe":
@@ -1036,7 +1037,6 @@ def solve(
     else:
         inner_hessians = inner_crn // max(params.m_lazy, 1)
 
-    inner_grad = inner_crn * 2 + 1
     inner_proj = inner_linear + inner_crn + 2
 
     # Safe extraction to Python int to prevent JAX array leakage into OracleStats
@@ -1044,43 +1044,28 @@ def solve(
     
     outer_grad = actual_outer * params.T_outer
     middle_grad = actual_outer * params.T_outer * params.S_middle * params.T_middle
-    
-    N_y = max(20, params.T_middle * params.S_middle) # Hidden GD steps in _solve_y
-    N_x = max(20, params.T_inner * params.S_inner)   # Hidden GD steps in _solve_x
 
-    # grad_phi is called T_outer times per outer epoch
-    hidden_grad_phi = actual_outer * params.T_outer * N_y
-    # grad_neg_psi is called T_outer * S_middle * T_middle times
-    hidden_grad_psi = middle_grad * N_x
-    
-    # Missing first-order sources:
-    # 1. _minimize_x_auto inside _iProx_Phi
-    hidden_iprox_phi_min_x_grad = actual_outer * params.T_outer * N_x
-    # 2. Post-EG grads in _iProx_Phi
+    # EG refinements still happen outside the JAX-traced stats pipeline:
+    # 2 grad evaluations per _iProx_Phi EG + 2 per _iProx_Psi EG
     hidden_iprox_phi_eg_grad = actual_outer * params.T_outer * 2
-    # 3. EG refinement in _iProx_Psi
     hidden_iprox_psi_eg_grad = middle_grad * 2
-    # 4. Final _maximize_y in _algorithm_3
-    final_maximize_y_grad = N_y
 
-    # Final gap estimation (if fallback triggered, though hard to track exactly, 
-    # we add the theoretical cost of the final EG step)
-    final_eg_grad = 2 
+    # Final _maximize_y in _algorithm_3: gradient calls tracked via final_y_calls[2]
+    final_maximize_y_grad = int(final_y_calls[2].item()) if final_y_calls.shape[0] > 2 else max(20, params.T_middle * params.S_middle)
 
-    total_hidden_grad = (
-        hidden_grad_phi + hidden_grad_psi +
-        hidden_iprox_phi_min_x_grad + hidden_iprox_phi_eg_grad +
-        hidden_iprox_psi_eg_grad + final_maximize_y_grad
-    )
+    # Final EG step in solve()
+    final_eg_grad = 2
+
+    total_hidden_grad = hidden_iprox_phi_eg_grad + hidden_iprox_psi_eg_grad + final_maximize_y_grad
     
-    total_hidden_proj = total_hidden_grad  # Inner GD/EG steps match proj 1:1 with grads
+    total_hidden_proj = total_hidden_grad  # EG steps match proj 1:1 with grads
 
     final_eg_proj = 2
 
     total_oracle_calls = inner_crn + outer_grad + int(final_y_calls[0].item())
 
     oracle_stats = OracleStats(
-        grad_calls=(inner_grad + outer_grad + middle_grad + total_hidden_grad + final_eg_grad),
+        grad_calls=inner_grad + total_hidden_grad + final_eg_grad,
         hessian_calls=inner_hessians,
         hvp_calls=0,
         crn_calls=inner_crn + int(final_y_calls[0].item()),
@@ -1149,7 +1134,7 @@ def _algorithm_3(
     x_hat, outer_epochs, _warm_y_out, total_inner_calls = _restart_jax(
         epoch_fn, x0, params.S_outer,
         step_tol=params.zeta_1,
-        stats_init=jnp.zeros(2, dtype=jnp.int32),
+        stats_init=jnp.zeros(3, dtype=jnp.int32),
     )
 
     # ── Recover y ≈ argmax_y f(x_hat, y) ────────────────────────────
@@ -1214,7 +1199,8 @@ def _make_phi_oracle(
         damping = 1e-5 * jnp.eye(H_yy.shape[0], dtype=H_yy.dtype)
         # Solve (-H_yy + damping) v = -gy_neg  (which is mathematically H_yy v = gy_neg)
         correction = H_xy @ jsp_linalg.solve(-H_yy + damping, -gy_neg)
-        return gx + correction, calls
+        grad_call = jnp.array([jnp.int32(0), jnp.int32(0), jnp.int32(1)], dtype=calls.dtype)
+        return gx + correction, calls + grad_call
 
     return phi, grad_phi
 
@@ -1255,7 +1241,8 @@ def _make_psi_oracle(
         (H_xx, _), (H_yx, _) = g_problem.hessian_f(x, y)
         damping = 1e-5 * jnp.eye(H_xx.shape[0], dtype=H_xx.dtype)
         correction = H_yx @ jsp_linalg.solve(H_xx + damping, gx)
-        return gy_neg + correction, calls
+        grad_call = jnp.array([jnp.int32(0), jnp.int32(0), jnp.int32(1)], dtype=calls.dtype)
+        return gy_neg + correction, calls + grad_call
 
     return neg_psi, grad_neg_psi
 
@@ -1306,16 +1293,16 @@ def _solve_saddle_subproblem(
     else:
         raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
 
-    def _run_inner_warm(z: Array, _warm) -> tuple[Array, int, None]:
+    def _run_inner_warm(z: Array, _warm):
         z_new, calls = _run_inner(z)
-        return z_new, calls, None
+        return z_new, calls, None, calls
 
-    z_hat, epochs, _, _ = _restart_jax(
+    z_hat, epochs, _, calls = _restart_jax(
         _run_inner_warm, z0, params.S_inner,
         step_tol=max(tolerance * 0.01, _ABS_TOL),
+        stats_init=jnp.zeros(3, dtype=jnp.int32),
     )
-    return z_hat, epochs * inner_T
-
+    return z_hat, calls
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ALEN-aware sub-solvers (dispatched by M_saddle)
@@ -1382,7 +1369,7 @@ def _maximize_y(
         _gx, gy_neg = problem.grad_f(x, cur)
         return problem.project_y(cur - lr * gy_neg)
 
-    return jax.lax.fori_loop(0, int(steps), body, y), jnp.zeros(2, dtype=jnp.int32)
+    return jax.lax.fori_loop(0, int(steps), body, y), jnp.stack([jnp.int32(0), jnp.int32(0), jnp.int32(steps)])
 
 
 def _minimize_x(
@@ -1404,7 +1391,7 @@ def _minimize_x(
         gx, _gy_neg = problem.grad_f(cur, y)
         return problem.project_x(cur - lr * gx)
 
-    return jax.lax.fori_loop(0, int(steps), body, x), jnp.zeros(2, dtype=jnp.int32)
+    return jax.lax.fori_loop(0, int(steps), body, x), jnp.stack([jnp.int32(0), jnp.int32(0), jnp.int32(steps)])
 
 
 # ═════════════════════════════════════════════════════════════════════════════

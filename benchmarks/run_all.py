@@ -296,8 +296,10 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
         export_data.setdefault("ablation_no_restart", []).extend(
             flatten_ablation_rows(no_restart_rows),
         )
-    except TypeError:
-        print("    [skip] solver does not support no_restart=True yet")
+    except TypeError as e:
+        if "unexpected keyword argument" not in str(e):
+            raise
+        print(f"    [skip] solver does not support the requested ablation yet: {e}")
     print()
 
     # ── NEW: No-acceleration ────────────────────────────────────────
@@ -314,8 +316,10 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
         export_data.setdefault("ablation_no_accel", []).extend(
             flatten_ablation_rows(no_accel_rows),
         )
-    except TypeError:
-        print("    [skip] solver does not support no_acceleration=True yet")
+    except TypeError as e:
+        if "unexpected keyword argument" not in str(e):
+            raise
+        print(f"    [skip] solver does not support the requested ablation yet: {e}")
     print()
 
     # ── NEW: Fixed inner iterations ─────────────────────────────────
@@ -329,8 +333,10 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
         export_data.setdefault("ablation_fixed_inner", []).extend(
             flatten_ablation_rows(fixed_inner_rows),
         )
-    except TypeError:
-        print("    [skip] solver does not support fixed_inner_iters yet")
+    except TypeError as e:
+        if "unexpected keyword argument" not in str(e):
+            raise
+        print(f"    [skip] solver does not support the requested ablation yet: {e}")
     print()
 
 

@@ -153,7 +153,7 @@ def aipe_restart_lazy(
         Total proximal oracle invocations (≈ S × (T + 1)).
     """
     z = z0
-    total_stats = jnp.zeros(2, dtype=jnp.int32)
+    total_stats = jnp.zeros(3, dtype=jnp.int32)
     for s in range(S):
         prox = prox_oracle_factory(z)
             

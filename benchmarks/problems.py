@@ -168,15 +168,18 @@ def get_all_problems(
         if names is not None and reg_name not in names:
             continue
         target_dims = dims if dims is not None else default_dims
+        prob_seed = None
+        if seed is not None:
+            prob_seed = seed + idx
+            idx += 1
         for dim in target_dims:
             if dim not in default_dims and len(default_dims) == 1:
                 continue
             try:
                 kw = {}
-                if seed is not None:
-                    kw["seed"] = seed + idx
+                if prob_seed is not None:
+                    kw["seed"] = prob_seed
                 
-                # --- Updated Logic ---
                 prob = constructor(dim=dim, **kw)
                 
                 results.append(
@@ -189,7 +192,6 @@ def get_all_problems(
                 )
             except Exception as e:
                 warnings.warn(f"  [skip] {reg_name} dim={dim}: {e}", RuntimeWarning)
-            idx += 1
     return results
 
 def list_problems() -> list[tuple[str, list[int]]]:

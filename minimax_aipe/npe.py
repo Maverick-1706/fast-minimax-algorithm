@@ -158,7 +158,7 @@ def _npe_impl(
     two_gamma = jnp.asarray(2.0 * gamma, dtype=dtype)
     max_eta = jnp.asarray(_MAX_ETA, dtype=dtype)
 
-    stats_zero = jnp.zeros(2, dtype=jnp.int32)
+    stats_zero = jnp.zeros(3, dtype=jnp.int32)
     init = NPEState(
         z=z0,
         weighted_sum=jnp.zeros_like(z0),
@@ -187,11 +187,12 @@ def _npe_impl(
             z_new = project(z_new)
 
         # Line 6: accumulate for η-weighted average
+        grad_call = jnp.array([jnp.int32(0), jnp.int32(0), jnp.int32(1)], dtype=jnp.int32)
         new_carry = NPEState(
             z=z_new,
             weighted_sum=s.weighted_sum + eta * z_half,
             eta_sum=s.eta_sum + eta,
-            stats=s.stats + oracle_stats,
+            stats=s.stats + oracle_stats + grad_call,
         )
         return new_carry, (z_half, z_new)
 
@@ -281,7 +282,7 @@ def npe_restart(
         ``[crn_calls, linear_solves]`` accumulated over all ``S`` epochs.
     """
     z = z0
-    total_stats = jnp.zeros(2, dtype=jnp.int32)
+    total_stats = jnp.zeros(3, dtype=jnp.int32)
 
     for _ in range(S):
         z, epoch_stats = _npe_impl(oracle, F_fn, z, T, gamma, project=project, fn=fn)

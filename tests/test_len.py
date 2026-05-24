@@ -624,7 +624,7 @@ class TestNumericalHardening:
             call_count[0] += 1
             if call_count[0] == 3:
                 nan = jnp.array([jnp.nan, jnp.nan, jnp.nan, jnp.nan])
-                nan_stats = jnp.zeros(2, dtype=jnp.int32)
+                nan_stats = jnp.zeros(3, dtype=jnp.int32)
                 return nan, nan, nan_stats
             return crn_oracle(problem, z_snapshot, gamma, n_iters=10)
 
@@ -801,7 +801,7 @@ class TestOracleEquivalence:
         z_half, u, F_half, stats = result
         assert z_half.shape == z_bar.shape
         assert F_half.shape == z_bar.shape
-        assert stats.shape == (2,)
+        assert stats.shape == (3,)
         # F_half should match direct computation.
         F_direct = problem.operator_F(z_half)
         assert jnp.allclose(F_half, F_direct, atol=1e-4)

@@ -143,7 +143,7 @@ def aipe(
     one = jnp.asarray(1.0, dtype=dtype)
     max_a = jnp.asarray(_MAX_A_PRIME, dtype=dtype)
     lam_tol = jnp.asarray(_REG_MIN_AIPE, dtype=dtype)
-    int_zero = jnp.zeros(2, dtype=jnp.int32)
+    int_zero = jnp.zeros(3, dtype=jnp.int32)
 
     _has_warm = warm_init is not None
 
@@ -219,8 +219,8 @@ def aipe(
                     a_r = gamma_t * a_prime
                     A_r = s.A + a_r
                     z_r = (
-                        (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
-                        + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
+                        s.A / jnp.maximum(A_r, tiny) * s.z
+                        + a_r / jnp.maximum(A_r, tiny) * z_tilde
                     )
                     return (
                         A_r,
@@ -303,8 +303,8 @@ def aipe(
                     a_r = gamma_t * a_prime
                     A_r = s.A + a_r
                     z_r = (
-                        (one - gamma_t) * s.A / jnp.maximum(A_r, tiny) * s.z
-                        + gamma_t * A_prime / jnp.maximum(A_r, tiny) * z_tilde
+                        s.A / jnp.maximum(A_r, tiny) * s.z
+                        + a_r / jnp.maximum(A_r, tiny) * z_tilde
                     )
                     return (
                         A_r,

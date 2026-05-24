@@ -257,7 +257,7 @@ def crn_oracle(
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    stats = jnp.stack([jnp.int32(1), n_secular])
+    stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
     return CRNResult(z, u, stats)
 
 def crn_oracle_minimization(
@@ -314,7 +314,7 @@ def crn_oracle_minimization(
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    stats = jnp.stack([jnp.int32(1), n_secular])
+    stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
     return CRNResult(z, u, stats)
 
 def lazy_crn_oracle(
@@ -372,7 +372,7 @@ def lazy_crn_oracle(
 
     d_eff = z - z_bar
     u = _residual(g, H, d_eff, lam, dtype)
-    stats = jnp.stack([jnp.int32(1), n_secular])
+    stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
     return CRNResult(z, u, stats)
 
 
