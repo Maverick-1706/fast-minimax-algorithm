@@ -365,9 +365,13 @@ def scale_sparsity(
 
 
 def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> str:
-    """Format scaling results as a text table."""
+    """Format scaling results as a text table.
+
+    Cost columns show normalized_cost(d) (gradient-equivalent FLOP units)
+    for fair comparison across CRN and gradient-based solvers.
+    """
     lines = []
-    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE orc':>10}  {'LEN (s)':>10}  {'LEN orc':>10}  {'JIT-EG (s)':>10}  {'EG orc':>10}"
+    header = f"{key_col:>8}  {'NPE (s)':>10}  {'NPE cost':>11}  {'LEN (s)':>10}  {'LEN cost':>11}  {'JIT-EG (s)':>10}  {'EG cost':>11}"
     lines.append(header)
     lines.append("─" * len(header))
 
@@ -392,16 +396,16 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
         eg = next((r for r in group_list if r.solver == "eg"), None)
 
         npe_time = npe.wall_time_mean if npe else 0.0
-        npe_cost = npe.oracle_stats.oracle_calls if npe else 0.0
+        npe_cost = float(npe.oracle_stats.normalized_cost(npe.dim * 2)) if npe and npe.oracle_stats else 0.0
         len_time = lnn.wall_time_mean if lnn else 0.0
-        len_cost = lnn.oracle_stats.oracle_calls if lnn else 0.0
+        len_cost = float(lnn.oracle_stats.normalized_cost(lnn.dim * 2)) if lnn and lnn.oracle_stats else 0.0
         eg_time = eg.wall_time_mean if eg else 0.0
-        eg_cost = eg.oracle_stats.oracle_calls if eg else 0.0
+        eg_cost = float(eg.oracle_stats.normalized_cost(eg.dim * 2)) if eg and eg.oracle_stats else 0.0
 
         lines.append(
-            f"{kv:>8.6g}  {npe_time:>10.4f}  {npe_cost:>10.2e}  "
-            f"{len_time:>10.4f}  {len_cost:>10.2e}  "
-            f"{eg_time:>10.4f}  {eg_cost:>10.2e}"
+            f"{kv:>8.6g}  {npe_time:>10.4f}  {npe_cost:>11.2e}  "
+            f"{len_time:>10.4f}  {len_cost:>11.2e}  "
+            f"{eg_time:>10.4f}  {eg_cost:>11.2e}"
         )
 
     return "\n".join(lines)

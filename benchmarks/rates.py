@@ -1,8 +1,11 @@
 """Convergence-rate estimation from ε-sweep benchmark data.
 
-Fits log-log slopes to (1/ε, oracle_calls) data and compares empirical
+Fits log-log slopes to (1/ε, normalized_cost) data and compares empirical
 convergence rates against theoretical predictions.  Fully self-contained —
 reads ``BenchmarkResult`` objects produced by :mod:`benchmarks.convergence`.
+
+All cost values use :meth:`OracleStats.normalized_cost` (gradient-equivalent
+FLOP units) so that CRN and gradient-based solvers are commensurable.
 
 Usage::
 
@@ -186,8 +189,14 @@ def fit_loglog_slope(
     
     Parameters
     ----------
+    epsilons : list[float]
+        Target duality gaps.
     oracle_calls : list[float]
-        Normalized cost (e.g., gradient equivalents) or raw oracle calls.
+        Normalized cost values (gradient-equivalent FLOP units from
+        ``normalized_cost(d)``) or raw oracle calls.  The name is kept
+        for backward compatibility with existing call sites.
+    solver, problem, dim :标签
+        Metadata attached to the returned :class:`RateFit`.
     """
     # Filter out degenerate cases where the solver took <= 1 cost unit
     valid_indices = [i for i, c in enumerate(oracle_calls) if c > 1.0]
@@ -264,33 +273,20 @@ def fit_from_convergence_rows(
 
         epsilons = [r.epsilon for r in valid_rows]
         
-        # Normalize oracle calls to "gradient equivalents" so that CRN calls 
-        # (which include Hessian + linear solve) are commensurable with plain 
-        # gradient calls. This fixes the apples-to-oranges comparison.
+        # Use normalized_cost(d) for all cost computations.
+        # This produces gradient-equivalent FLOP units that are
+        # commensurable across CRN and gradient-based solvers.
         calls = []
         for r in valid_rows:
             stats = r.oracle_stats
             if stats is None:
                 calls.append(0.0)
                 continue
-            
-            if hasattr(stats, 'normalized_cost'):
-                try:
-                    # r.dim is typically dim_x; pass it to normalized_cost
-                    d = r.dim if r.dim else 1
-                    cost = float(stats.normalized_cost(d))
-                except Exception:
-                    # Fallback if signature differs or method fails
-                    cost = float(getattr(stats, 'oracle_calls', 0))
-            else:
-                # Manual fallback: scale CRN calls by dimension to approximate
-                # the O(d) or O(d^2) overhead of Hessian/solves vs gradients.
-                call_type = getattr(stats, 'call_type', 'gradient')
-                base_calls = float(getattr(stats, 'oracle_calls', 0))
-                if call_type == 'crn':
-                    cost = base_calls * max(r.dim, 1)
-                else:
-                    cost = base_calls
+            d = (r.dim or 1) * 2
+            try:
+                cost = float(stats.normalized_cost(d))
+            except Exception:
+                cost = 0.0
             calls.append(cost)
 
         fit = fit_loglog_slope(

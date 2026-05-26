@@ -109,7 +109,7 @@ class LENState(NamedTuple):
 
 #: Hard clamp on step-size η.  Serves as a last-resort safety net;
 #: the primary stabilisation is ``eta_floor`` (see :func:`len_loop`).
-_MAX_ETA: float = 1e12
+_MAX_ETA: float = 100.0
 
 #: Default floor on ‖z − z_{t+1/2}‖ to keep η bounded.
 _DEFAULT_ETA_FLOOR: float = 1e-8

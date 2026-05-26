@@ -352,8 +352,9 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
 
         def _format_cost(r: BenchmarkResult | None) -> str:
             if r is None or getattr(r, "oracle_stats", None) is None:
-                return "      --- "
-            return f"{r.oracle_stats.oracle_calls:.2e}"
+                return "         --- "
+            d = (r.dim or 1) * 2
+            return f"{r.oracle_stats.normalized_cost(d):.2e}"
 
         npe_str = f"{_fmt(npe)} | {_format_cost(npe)}"
         lnn_str = f"{_fmt(lnn)} | {_format_cost(lnn)}"

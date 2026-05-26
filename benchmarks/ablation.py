@@ -475,33 +475,31 @@ def ablation_init_comparison(
 
 def format_ablation_m_table(rows: list[BenchmarkResult]) -> str:
     """Format m_lazy ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'m_lazy':>6}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
+    header = f"{'Problem':<18} {'Dim':>4}  {'m_lazy':>6}  {'Time (s)':>24}  {'Cost':>11}  {'Gap':>10}"
     sep = "─" * len(header)
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        # FIX: Cross-query both metric names to ensure accurate counters regardless of solver mode
-        calls = getattr(r.oracle_stats, "crn_calls", 0) or getattr(r.oracle_stats, "oracle_calls", 0)
+        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.problem:<18} {r.dim:>4}  {r.m_lazy:>6}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {calls:>6}  {r.final_gap:>10.6f}"
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
 
 
 def format_ablation_t_table(rows: list[BenchmarkResult]) -> str:
     """Format npe_T_factor ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'T_factor':>8}  {'Time (s)':>24}  {'Calls':>6}  {'Gap':>10}"
+    header = f"{'Problem':<18} {'Dim':>4}  {'T_factor':>8}  {'Time (s)':>24}  {'Cost':>11}  {'Gap':>10}"
     sep = "─" * len(header)
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
         tf = r.npe_T_factor or 0.0
-        # FIX: Robust fallback for common random number/oracle call name splitting
-        calls = getattr(r.oracle_stats, "crn_calls", 0) or getattr(r.oracle_stats, "oracle_calls", 0)
+        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.problem:<18} {r.dim:>4}  {tf:>8.1f}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {calls:>6}  {r.final_gap:>10.6f}"
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
 
@@ -513,17 +511,17 @@ def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
 
     header = (
         f"{'Solver':<22} {'Problem':<18} {'Dim':>4}  "
-        f"{'Time (s)':>24}  {'Calls':>6}  {'Iters':>6}  {'Gap':>10}"
+        f"{'Time (s)':>24}  {'Cost':>11}  {'Iters':>6}  {'Gap':>10}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
+        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.solver:<22} {r.problem:<18} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{calls:>6}  {r.iterations:>6}  "
+            f"{cost:>11.2e}  {r.iterations:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
@@ -536,17 +534,17 @@ def format_ablation_init_table(rows: list[BenchmarkResult]) -> str:
 
     header = (
         f"{'Variant':<30} {'Solver':<22} {'Dim':>4}  "
-        f"{'Time (s)':>24}  {'Calls':>6}  {'Iters':>6}  {'Gap':>10}"
+        f"{'Time (s)':>24}  {'Cost':>11}  {'Iters':>6}  {'Gap':>10}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
+        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.problem:<30} {r.solver:<22} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{calls:>6}  {r.iterations:>6}  "
+            f"{cost:>11.2e}  {r.iterations:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)
@@ -559,24 +557,21 @@ def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
 
     header = (
         f"{'Problem':<18} {'Dim':>4}  {'Inner':>6}  "
-        f"{'Time (s)':>24}  {'Calls':>6}  {'Outer':>6}  {'Gap':>10}"
+        f"{'Time (s)':>24}  {'Cost':>11}  {'Outer':>6}  {'Gap':>10}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
     for r in rows:
         ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
         
-        # FIX: Correct column logic mapping. 
-        # "Inner" pulls the budget allocated to the 'fixed_inner_iters' property via the generator.
-        # "Outer" pulls the actual outer execution loop step counter.
         inner_val = getattr(r, "fixed_inner_iters", 0)
         outer_val = getattr(r, "iterations", 0)
-        calls = getattr(r.oracle_stats, "oracle_calls", 0) or getattr(r.oracle_stats, "crn_calls", 0)
+        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         
         lines.append(
             f"{r.problem:<18} {r.dim:>4}  {inner_val:>6}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{calls:>6}  {outer_val:>6}  "
+            f"{cost:>11.2e}  {outer_val:>6}  "
             f"{r.final_gap:>10.6f}"
         )
     return "\n".join(lines)

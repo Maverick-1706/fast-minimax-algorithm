@@ -7,7 +7,7 @@ this type directly.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Optional
 
 from minimax_aipe import OracleStats
@@ -59,8 +59,8 @@ class BenchmarkResult:
     # ── Independent Convergence Endpoints (Experiment 5) ──────────────
     gap_endpoints: Optional[list[float]] = None
     """Duality gap at different epsilon targets.  Length = len(epsilons)."""
-    oracle_endpoints: Optional[list[int]] = None
-    """Independent cold-start oracle calls for each target epsilon solve."""
+    oracle_endpoints: Optional[list[float]] = None
+    """Independent cold-start normalized cost for each target epsilon solve."""
     outer_iterations: Optional[int] = None
     """Number of outer iterations completed."""
 
@@ -88,7 +88,6 @@ class BenchmarkResult:
         elif hasattr(stats_obj, "to_dict"):
             stats = stats_obj.to_dict()
         else:
-            from dataclasses import asdict, is_dataclass
             stats = asdict(stats_obj) if is_dataclass(stats_obj) else dict(stats_obj)
             
         for k, v in stats.items():
@@ -107,6 +106,14 @@ class BenchmarkResult:
         
         # Explicitly label the call type for the unified metric
         d["oracle_call_type"] = stats.get("call_type", "crn")
+        d["oracle_type"] = stats.get("call_type", "crn")
+        
+        # Export normalized_cost (gradient-equivalent FLOP units) for
+        # cross-solver comparison in downstream analysis.
+        if self.dim:
+            d["normalized_cost"] = float(
+                self.oracle_stats.normalized_cost(self.dim * 2)
+            ) if self.oracle_stats else 0.0
         
         # Endpoints — keep as lists (JSON-serializable)
         d["gap_endpoints"] = self.gap_endpoints

@@ -57,7 +57,7 @@ class NPEState(NamedTuple):
 # the current iterate (dist ≤ 1e-7).  This cap prevents overflow in the
 # subsequent z-update ``z − η·F`` while being large enough that it does not
 # affect convergence on well-conditioned problems.
-_MAX_ETA = 1e12
+_MAX_ETA = 100.0
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

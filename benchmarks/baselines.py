@@ -7,6 +7,7 @@ timing-critical paths.
 
 from __future__ import annotations
 
+import functools
 import time
 from dataclasses import dataclass
 
@@ -48,25 +49,10 @@ from minimax_aipe.gap import estimate_gap
 # ── JIT-compiled extragradient ───────────────────────────────────────────
 
 
-def run_eg_jit(
-    problem: MinimaxProblem,
-    max_iters: int = 100_000,
-    z0: Array | None = None,
-    tol: float = 0.0,
-) -> tuple[Array, float, float, int]:
-    """JIT-compiled extragradient via jax.lax.while_loop."""
+@functools.lru_cache(maxsize=None)
+def _get_eg_loop(problem: MinimaxProblem, max_iters: int, tol: float):
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     eta = 1.0 / (2.0 * ell)
-
-    if z0 is None:
-        x0 = problem.project_x(jnp.zeros(problem.dim_x))
-        y0 = problem.project_y(jnp.zeros(problem.dim_y))
-        z_start = jnp.concatenate([x0, y0])
-    else:
-        z0_arr = jnp.asarray(z0)
-        x0 = problem.project_x(z0_arr[: problem.dim_x])
-        y0 = problem.project_y(z0_arr[problem.dim_x :])
-        z_start = jnp.concatenate([x0, y0])
 
     proj = lambda z: jnp.concatenate([
         problem.project_x(z[: problem.dim_x]),
@@ -104,6 +90,27 @@ def run_eg_jit(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
         return chunks_out * eval_freq, z_out
+
+    return eg_loop
+
+def run_eg_jit(
+    problem: MinimaxProblem,
+    max_iters: int = 100_000,
+    z0: Array | None = None,
+    tol: float = 0.0,
+) -> tuple[Array, float, float, int]:
+    """JIT-compiled extragradient via jax.lax.while_loop."""
+    if z0 is None:
+        x0 = problem.project_x(jnp.zeros(problem.dim_x))
+        y0 = problem.project_y(jnp.zeros(problem.dim_y))
+        z_start = jnp.concatenate([x0, y0])
+    else:
+        z0_arr = jnp.asarray(z0)
+        x0 = problem.project_x(z0_arr[: problem.dim_x])
+        y0 = problem.project_y(z0_arr[problem.dim_x :])
+        z_start = jnp.concatenate([x0, y0])
+
+    eg_loop = _get_eg_loop(problem, max_iters, tol)
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
@@ -152,26 +159,10 @@ def run_eg_jit_benchmark(
 # ── JIT-compiled GDA ─────────────────────────────────────────────────────
 
 
-def run_gda_jit(
-    problem: MinimaxProblem,
-    max_iters: int = 200_000,
-    z0: Array | None = None,
-    tol: float = 0.0,
-) -> tuple[Array, float, float, int]:
-    """JIT-compiled gradient descent-ascent via jax.lax.while_loop."""
+@functools.lru_cache(maxsize=None)
+def _get_gda_loop(problem: MinimaxProblem, max_iters: int, tol: float):
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     eta = 0.5 / ell
-
-    if z0 is None:
-        x0 = problem.project_x(jnp.zeros(problem.dim_x))
-        y0 = problem.project_y(jnp.zeros(problem.dim_y))
-        z_start = jnp.concatenate([x0, y0])
-    else:
-        z0_arr = jnp.asarray(z0)
-        x0 = problem.project_x(z0_arr[: problem.dim_x])
-        y0 = problem.project_y(z0_arr[problem.dim_x :])
-        z_start = jnp.concatenate([x0, y0])
-
     F_op = problem.operator_F
 
     @jax.jit
@@ -207,6 +198,28 @@ def run_gda_jit(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
         return chunks_out * eval_freq, z_out
+
+    return gda_loop
+
+
+def run_gda_jit(
+    problem: MinimaxProblem,
+    max_iters: int = 200_000,
+    z0: Array | None = None,
+    tol: float = 0.0,
+) -> tuple[Array, float, float, int]:
+    """JIT-compiled gradient descent-ascent via jax.lax.while_loop."""
+    if z0 is None:
+        x0 = problem.project_x(jnp.zeros(problem.dim_x))
+        y0 = problem.project_y(jnp.zeros(problem.dim_y))
+        z_start = jnp.concatenate([x0, y0])
+    else:
+        z0_arr = jnp.asarray(z0)
+        x0 = problem.project_x(z0_arr[: problem.dim_x])
+        y0 = problem.project_y(z0_arr[problem.dim_x :])
+        z_start = jnp.concatenate([x0, y0])
+
+    gda_loop = _get_gda_loop(problem, max_iters, tol)
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
@@ -254,13 +267,8 @@ def run_gda_jit_benchmark(
 
 from minimax_aipe.npe import npe, make_crn_npe_oracle
 
-def run_npe_restart_jit(
-    problem: MinimaxProblem,
-    max_iters: int = 100_000,
-    z0: Array | None = None,
-    tol: float = 0.0,
-) -> tuple[Array, float, float, int]:
-    """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs."""
+@functools.lru_cache(maxsize=None)
+def _get_npe_epoch_loop(problem: MinimaxProblem, max_iters: int, tol: float):
     actual_rho = float(problem.rho) if problem.rho is not None else 0.0
     ell = max(float(problem.ell) if problem.ell else 1.0, 1e-8)
     
@@ -274,16 +282,6 @@ def run_npe_restart_jit(
         rho = max(actual_rho, 1e-6)
         gamma = 2.0 * rho
         T = min(max_iters, max(10, int((ell / rho) ** (2.0 / 3.0))))
-
-    if z0 is None:
-        x0 = problem.project_x(jnp.zeros(problem.dim_x))
-        y0 = problem.project_y(jnp.zeros(problem.dim_y))
-        z_start = jnp.concatenate([x0, y0])
-    else:
-        z0_arr = jnp.asarray(z0)
-        x0 = problem.project_x(z0_arr[: problem.dim_x])
-        y0 = problem.project_y(z0_arr[problem.dim_x :])
-        z_start = jnp.concatenate([x0, y0])
 
     proj = lambda z: jnp.concatenate([
         problem.project_x(z[: problem.dim_x]),
@@ -318,6 +316,28 @@ def run_npe_restart_jit(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
         return epochs_out, z_out
+
+    return npe_epoch_loop, T
+
+
+def run_npe_restart_jit(
+    problem: MinimaxProblem,
+    max_iters: int = 100_000,
+    z0: Array | None = None,
+    tol: float = 0.0,
+) -> tuple[Array, float, float, int]:
+    """JIT-compiled standalone NPE-restart via jax.lax.while_loop over epochs."""
+    if z0 is None:
+        x0 = problem.project_x(jnp.zeros(problem.dim_x))
+        y0 = problem.project_y(jnp.zeros(problem.dim_y))
+        z_start = jnp.concatenate([x0, y0])
+    else:
+        z0_arr = jnp.asarray(z0)
+        x0 = problem.project_x(z0_arr[: problem.dim_x])
+        y0 = problem.project_y(z0_arr[problem.dim_x :])
+        z_start = jnp.concatenate([x0, y0])
+
+    npe_epoch_loop, T = _get_npe_epoch_loop(problem, max_iters, tol)
 
     z_start.block_until_ready()
     t0 = time.perf_counter()

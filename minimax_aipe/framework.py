@@ -149,6 +149,9 @@ class _CachedPipeline:
         return x_out, calls, warm_y_new, inner_calls
 
 
+import functools
+
+@functools.lru_cache(maxsize=1)
 def _get_pipeline(problem, gamma, params, M_saddle):
     """Retrieve or create a cached :class:`_CachedPipeline`."""
     return _CachedPipeline(problem, gamma, params, M_saddle)
@@ -1062,7 +1065,7 @@ def solve(
 
     final_eg_proj = 2
 
-    total_oracle_calls = inner_crn + outer_grad + int(final_y_calls[0].item())
+    total_oracle_calls = inner_crn + int(final_y_calls[0].item())
 
     oracle_stats = OracleStats(
         grad_calls=inner_grad + total_hidden_grad + final_eg_grad,
@@ -1072,6 +1075,7 @@ def solve(
         projection_calls=inner_proj + final_eg_proj + total_hidden_proj,
         linear_solves=inner_linear + int(final_y_calls[1].item()),
         oracle_calls=total_oracle_calls,
+        call_type="crn",
         fn_evals=0,
     )
 
@@ -1454,6 +1458,9 @@ def _compute_loop_params(
         T_inner = max(1, fixed_inner_iters)
         S_inner_default = 1
 
+    if no_restart:
+        S_inner_default = 1
+
     # ── Adaptive m_lazy heuristic ─────────────────────────────────────
     if m_lazy <= 0:
         dim_total = problem.dim_x + problem.dim_y
@@ -1467,7 +1474,7 @@ def _compute_loop_params(
         T_outer=T_outer,
         S_outer=S,
         T_middle=T_middle,
-        S_middle=max(1, min(S, _S_CAP)),
+        S_middle=1 if no_restart else max(1, min(S, _S_CAP)),
         T_inner=T_inner,
         S_inner=S_inner_default,
         zeta_1=zeta_1,

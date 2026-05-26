@@ -22,9 +22,18 @@ from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
 class OracleStats:
     """Standardized oracle call accounting for complexity validation.
 
-    Tracks all second-order oracle operations.  The paper's primary
-    metric is second-order oracle complexity — the number of Hessian
-    evaluations and CRN subproblem solves.
+    Tracks all oracle operations with a clear separation between
+    first-order (gradient) and second-order (CRN/Hessian) calls.
+
+    ``oracle_calls`` is the **primary-type count** — it reports only
+    the dominant oracle for a given solver:
+      - CRN-based solvers (AIPE-NPE, AIPE-LEN, NPE-restart):
+        ``oracle_calls == crn_calls``
+      - Gradient-based solvers (EG, GDA):
+        ``oracle_calls == grad_calls``
+
+    ``call_type`` (alias: ``oracle_type``) labels which kind.
+    For cross-solver cost comparison, use :meth:`normalized_cost`.
 
     Attributes
     ----------
@@ -40,6 +49,13 @@ class OracleStats:
         Feasible-set projections.
     linear_solves : int
         Linear system solves (inside CRN secular equation).
+    oracle_calls : int
+        Primary-type oracle count.  Equals ``crn_calls`` when
+        ``call_type == "crn"``, ``grad_calls`` when
+        ``call_type == "gradient"``.  Use :meth:`normalized_cost`
+        for cross-solver comparison.
+    call_type : str
+        Labels what ``oracle_calls`` counts: ``"crn"`` or ``"gradient"``.
     fn_evals : int
         Output-selection ``vmap(fn)`` evaluations.  Each evaluation may
         involve an inner first-order solve (e.g. gradient ascent for
@@ -52,9 +68,14 @@ class OracleStats:
     crn_calls: int = 0
     projection_calls: int = 0
     linear_solves: int = 0
-    oracle_calls: int = 0  # Unified metric: CRN for 2nd order, grad for 1st order
-    call_type: str = "crn" # Type of the primary metric (crn, gradient, etc)
-    fn_evals: int = 0      # Output-selection vmap(fn) evaluations
+    oracle_calls: int = 0
+    call_type: str = "crn"
+    fn_evals: int = 0
+
+    @property
+    def oracle_type(self) -> str:
+        """Alias for ``call_type`` — labels what ``oracle_calls`` counts."""
+        return self.call_type
 
     def normalized_cost(self, dim: int) -> float:
         """FLOP-equivalent work units.
@@ -106,6 +127,7 @@ class OracleStats:
             "linear_solves": self.linear_solves,
             "oracle_calls": self.oracle_calls,
             "call_type": self.call_type,
+            "oracle_type": self.call_type,
             "fn_evals": self.fn_evals,
         }
 
@@ -114,7 +136,8 @@ class OracleStats:
             f"OracleStats(grad={self.grad_calls}, hessian={self.hessian_calls}, "
             f"hvp={self.hvp_calls}, crn={self.crn_calls}, "
             f"proj={self.projection_calls}, linear={self.linear_solves}, "
-            f"oracle_calls={self.oracle_calls}, fn_evals={self.fn_evals})"
+            f"oracle_calls={self.oracle_calls} [{self.call_type}], "
+            f"fn_evals={self.fn_evals})"
         )
 
 
@@ -391,9 +414,14 @@ class SolverResult(NamedTuple):
     iterations : int
         Total number of outer-loop iterations.
     oracle_calls : int
-        Total number of second-order (CRN) oracle calls.
+        Primary-type oracle count.  For CRN-based solvers this equals
+        the number of CRN subproblem solves; for gradient-based
+        solvers it equals gradient evaluations.  The type is labelled
+        by ``oracle_stats.call_type``.  Use
+        ``oracle_stats.normalized_cost(d)`` for cross-solver comparison.
     oracle_stats : OracleStats
-        Detailed per-type oracle call counts.
+        Detailed per-type oracle call counts.  ``oracle_stats.oracle_type``
+        labels what ``oracle_calls`` represents.
     converged : bool
         Whether the solver converged to the requested tolerance.
     history : dict

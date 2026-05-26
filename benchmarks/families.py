@@ -372,7 +372,7 @@ def make_nonzero_rho_quadratic(
     problem = MinimaxProblem(
         f=f, dim_x=dim, dim_y=dim, D_x=D, D_y=D,
         grad_f=grad_f, hessian_f=hessian_f,
-        rho=2 * rho, ell=ell + rho * D,
+        rho=2 * rho, ell=ell + 2 * rho * D,
     )
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
@@ -689,7 +689,7 @@ def make_random_cubic_quadratic(
     KKT = jnp.block([[Q, B], [B.T, -R]])
     ell_quad = float(jnp.linalg.norm(KKT, ord=2))
     D = 4.0
-    ell = ell_quad + rho * D * float(jnp.max(c))
+    ell = ell_quad + 2 * rho * D * float(jnp.max(c))
 
     def f(x, y):
         quad = 0.5 * x @ Q @ x + x @ B @ y - 0.5 * y @ R @ y
@@ -1141,7 +1141,7 @@ def make_diagonal_saddle(
     ell_quad = float(jnp.max(jnp.concatenate([lam + jnp.abs(sigma),
                                                mu + jnp.abs(sigma)])))
     D = 4.0
-    ell = ell_quad + rho * D if rho > 0 else ell_quad
+    ell = ell_quad + 2 * rho * D if rho > 0 else ell_quad
 
     # ── Problem definition ────────────────────────────────────────────
 

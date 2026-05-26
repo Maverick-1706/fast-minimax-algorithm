@@ -141,13 +141,14 @@ def sweep_epsilon_endpoints(
         ]
 
         gap_endpoints: list[float] = []
-        oracle_endpoints: list[int] = []
+        oracle_endpoints: list[float] = []
 
         # Run intermediate coarser resolutions from a cold start to collect data points
         for trace_eps in eps_schedule[:-1]:
             res_trace = solve(prob.problem, epsilon=trace_eps, z0=prob.z0)
             gap_endpoints.append(float(res_trace.gap))
-            oracle_endpoints.append(int(res_trace.oracle_stats.oracle_calls))
+            d = prob.problem.dim_x + prob.problem.dim_y
+            oracle_endpoints.append(float(res_trace.oracle_stats.normalized_cost(d)))
 
         # Force device synchronization before starting the timer for the definitive target solve
         _ = jnp.zeros(1).block_until_ready()
@@ -160,7 +161,8 @@ def sweep_epsilon_endpoints(
 
         # Append final target metrics to complete the endpoints arrays
         gap_endpoints.append(float(res.gap))
-        oracle_endpoints.append(int(res.oracle_stats.oracle_calls))
+        d = prob.problem.dim_x + prob.problem.dim_y
+        oracle_endpoints.append(float(res.oracle_stats.normalized_cost(d)))
 
         row = BenchmarkResult(
             solver="minimax_aipe",
@@ -185,15 +187,16 @@ def sweep_epsilon_endpoints(
 def format_convergence_table(rows: list[BenchmarkResult]) -> str:
     """Format convergence sweep results as a text table.
 
-    Columns show duality gap for NPE/LEN/EG variants along with primary oracle
-    calls (oracle_calls).  ``ok`` indicates whether the termination threshold was met.
+    Columns show duality gap and normalized cost (gradient-equivalent
+    FLOP units via ``normalized_cost(d)``) for each solver variant.
+    ``ok`` indicates whether the termination threshold was met.
     """
     header = (
         f"{'Problem':<18} {'Dim':>4}  {'ε':>8}  "
-        f"{'A-NPE gap':>10} {'A-NPE orc':>10} {'ok':>3}  "
-        f"{'S-NPE gap':>10} {'S-NPE orc':>10} {'ok':>3}  "
-        f"{'LEN gap':>10} {'LEN orc':>10} {'ok':>3}  "
-        f"{'EG gap':>10} {'EG orc':>10} {'ok':>3}"
+        f"{'A-NPE gap':>10} {'A-NPE cost':>11} {'ok':>3}  "
+        f"{'S-NPE gap':>10} {'S-NPE cost':>11} {'ok':>3}  "
+        f"{'LEN gap':>10} {'LEN cost':>11} {'ok':>3}  "
+        f"{'EG gap':>10} {'EG cost':>11} {'ok':>3}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
@@ -208,26 +211,32 @@ def format_convergence_table(rows: list[BenchmarkResult]) -> str:
         lnn = next((r for r in group_list if r.solver == "aipe_len"), None)
         eg = next((r for r in group_list if r.solver == "eg"), None)
 
+        def _cost(r: BenchmarkResult | None) -> float:
+            if r is None or r.oracle_stats is None:
+                return 0.0
+            d = (r.dim or 1) * 2
+            return float(r.oracle_stats.normalized_cost(d))
+
         npe_gap = npe.final_gap if npe else 0.0
-        npe_cost = npe.oracle_stats.oracle_calls if npe else 0.0
+        npe_cost = _cost(npe)
         npe_ok = "Y" if (npe and npe.gap_achieved) else "N"
         snpe_gap = s_npe.final_gap if s_npe else 0.0
-        snpe_cost = s_npe.oracle_stats.oracle_calls if s_npe else 0.0
+        snpe_cost = _cost(s_npe)
         snpe_ok = "Y" if (s_npe and s_npe.gap_achieved) else "N"
         len_gap = lnn.final_gap if lnn else 0.0
-        len_cost = lnn.oracle_stats.oracle_calls if lnn else 0.0
+        len_cost = _cost(lnn)
         len_ok = "Y" if (lnn and lnn.gap_achieved) else "N"
         
         eg_residual = eg.final_gap if eg else 0.0
-        eg_cost = eg.oracle_stats.oracle_calls if eg else 0.0
+        eg_cost = _cost(eg)
         eg_ok = "Y" if (eg and eg.gap_achieved) else "N"
 
         lines.append(
             f"{prob_name:<18} {dim:>4}  {eps:>8.4f}  "
-            f"{npe_gap:>10.6f} {npe_cost:>10.2e} {npe_ok:>3}  "
-            f"{snpe_gap:>10.6f} {snpe_cost:>10.2e} {snpe_ok:>3}  "
-            f"{len_gap:>10.6f} {len_cost:>10.2e} {len_ok:>3}  "
-            f"{eg_residual:>10.6f} {eg_cost:>10.2e} {eg_ok:>3}"
+            f"{npe_gap:>10.6f} {npe_cost:>11.2e} {npe_ok:>3}  "
+            f"{snpe_gap:>10.6f} {snpe_cost:>11.2e} {snpe_ok:>3}  "
+            f"{len_gap:>10.6f} {len_cost:>11.2e} {len_ok:>3}  "
+            f"{eg_residual:>10.6f} {eg_cost:>11.2e} {eg_ok:>3}"
         )
 
     return "\n".join(lines)
@@ -243,9 +252,9 @@ def format_endpoints_table(results: list[BenchmarkResult]) -> str:
         return "(no data — solver did not return gap_endpoints)"
     
     r = endpoints[0]
-    header = f"{'Outer':>5}  {'Gap':>12}  {'Oracle calls':>14}"
+    header = f"{'Outer':>5}  {'Gap':>12}  {'Norm. cost':>14}"
     sep = "─" * len(header)
     lines = [header, sep]
-    for i, (gap, calls) in enumerate(zip(r.gap_endpoints, r.oracle_endpoints or [])):
-        lines.append(f"{i+1:>5}  {gap:>12.6e}  {calls:>14}")
+    for i, (gap, cost) in enumerate(zip(r.gap_endpoints, r.oracle_endpoints or [])):
+        lines.append(f"{i+1:>5}  {gap:>12.6e}  {cost:>14.2e}")
     return "\n".join(lines)

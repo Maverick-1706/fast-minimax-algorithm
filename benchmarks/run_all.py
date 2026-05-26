@@ -131,12 +131,13 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     rho_rows = scale_rho([0.1, 0.5, 1.0, 5.0, 10.0], dim=10, epsilon=epsilon,
                          n_repeats=max(1, n_repeats // 2), seed=seed)
     npe_rows = [r for r in rho_rows if r.solver == "aipe_npe"]
-    header = f"{'ρ':>8}  {'NPE (s)':>10}  {'NPE calls':>10}"
+    header = f"{'ρ':>8}  {'NPE (s)':>10}  {'NPE cost':>11}"
     print(header)
     print("─" * len(header))
     for r in npe_rows:
-        # BUG FIX: Tracking parameter assignment allows r.rho to exist properly now
-        print(f"{getattr(r, 'rho', 0.0):>8.1f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+        d = r.dim * 2
+        cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
+        print(f"{getattr(r, 'rho', 0.0):>8.1f}  {r.wall_time_mean:>10.4f}  {cost:>11.2e}")
     export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
     print()
 
@@ -145,12 +146,13 @@ def _run_scaling(epsilon, n_repeats, seed, export_data):
     sparsity_rows = scale_sparsity([0.0, 0.3, 0.6, 0.9], dim=100, kappa=1e4, epsilon=epsilon,
                                    n_repeats=max(1, n_repeats // 2), seed=seed)
     npe_rows = [r for r in sparsity_rows if r.solver == "aipe_npe"]
-    header = f"{'sparsity':>8}  {'NPE (s)':>10}  {'NPE calls':>10}"
+    header = f"{'sparsity':>8}  {'NPE (s)':>10}  {'NPE cost':>11}"
     print(header)
     print("─" * len(header))
     for r in npe_rows:
-        # BUG FIX: Tracking parameter assignment allows r.sparsity to evaluate correctly
-        print(f"{getattr(r, 'sparsity', 0.0):>8.2f}  {r.wall_time_mean:>10.4f}  {r.oracle_stats.oracle_calls:>10}")
+        d = r.dim * 2
+        cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
+        print(f"{getattr(r, 'sparsity', 0.0):>8.2f}  {r.wall_time_mean:>10.4f}  {cost:>11.2e}")
     export_data.setdefault("scaling_sparsity", []).extend(flatten_scaling_rows(sparsity_rows))
     print()
     
@@ -172,7 +174,7 @@ def _run_convergence(problems, epsilon, export_data):
     all_convergence_rows = []
     all_trace_rows = []
     
-    for prob in problems[:6]:
+    for prob in problems:
         name = prob.name or "?"
         dim = prob.dim or prob.problem.dim_x
         print(f"  {name} dim={dim}:")
@@ -227,7 +229,7 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
 
     # ── NPE vs LEN head-to-head ─────────────────────────────────────
     print("  NPE vs LEN head-to-head:")
-    for prob in problems[:3]:
+    for prob in problems:
         results = ablation_npe_vs_len(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
         npe = next((r for r in results if r.solver == "aipe_npe"), None)
         lnn = next((r for r in results if r.solver == "aipe_len"), None)
@@ -290,8 +292,10 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
             prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
         )
         for r in no_restart_rows:
+            d = r.dim * 2
+            cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
             print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
-                  f"calls={r.oracle_stats.oracle_calls}  "
+                  f"cost={cost:.2e}  "
                   f"time={r.wall_time_mean:.4f}s")
         export_data.setdefault("ablation_no_restart", []).extend(
             flatten_ablation_rows(no_restart_rows),
@@ -310,8 +314,10 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
             prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
         )
         for r in no_accel_rows:
+            d = r.dim * 2
+            cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
             print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
-                  f"calls={r.oracle_stats.oracle_calls}  "
+                  f"cost={cost:.2e}  "
                   f"time={r.wall_time_mean:.4f}s")
         export_data.setdefault("ablation_no_accel", []).extend(
             flatten_ablation_rows(no_accel_rows),
