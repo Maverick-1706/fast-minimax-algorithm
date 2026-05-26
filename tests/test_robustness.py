@@ -19,6 +19,7 @@ from minimax_aipe import (
     make_crn_npe_oracle,
     make_crn_prox_oracle,
 )
+from tests._solve_cache import cached_solve
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -31,13 +32,13 @@ class TestIllConditionedBilinear:
     def test_solver_runs_without_error(self, ill_conditioned_bilinear):
         """Solver completes without raising an exception."""
         p = ill_conditioned_bilinear
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result is not None
 
     def test_no_nans_in_output(self, ill_conditioned_bilinear):
         """x, y, and gap contain no NaN or Inf values."""
         p = ill_conditioned_bilinear
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x)), "NaN/Inf in x"
         assert jnp.all(jnp.isfinite(result.y)), "NaN/Inf in y"
         assert jnp.isfinite(jnp.asarray(result.gap)), "NaN/Inf in gap"
@@ -45,13 +46,13 @@ class TestIllConditionedBilinear:
     def test_gap_is_nonnegative(self, ill_conditioned_bilinear):
         """Gap is always ≥ 0 by definition."""
         p = ill_conditioned_bilinear
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6, f"gap={result.gap:.4e} < 0"
 
     def test_solution_is_feasible(self, ill_conditioned_bilinear):
         """x and y stay inside the feasible ball."""
         p = ill_conditioned_bilinear
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         D_x = p.problem.D_x
         D_y = p.problem.D_y
         assert float(jnp.linalg.norm(result.x)) <= D_x / 2 + 1e-4
@@ -72,16 +73,16 @@ class TestIllConditionedQuadratic:
     """Quadratic minimax with κ(Q) = 10^4."""
 
     def test_solver_runs(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(ill_conditioned_quadratic, epsilon=0.1, verbose=False)
         assert result is not None
 
     def test_no_nans(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(ill_conditioned_quadratic, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
 
     def test_gap_nonnegative(self, ill_conditioned_quadratic):
-        result = solve(ill_conditioned_quadratic.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(ill_conditioned_quadratic, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6
 
 
@@ -92,7 +93,7 @@ class TestExtremeConditioning:
     def test_bilinear_kappa_1e6_no_nans(self):
         from tests.conftest import make_ill_conditioned_bilinear
         p = make_ill_conditioned_bilinear(dim=3, kappa=1e6, seed=42)
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x)), "NaN at κ=1e6"
         assert jnp.all(jnp.isfinite(result.y)), "NaN at κ=1e6"
 
@@ -297,9 +298,9 @@ class TestBadEpsilon:
     def test_very_small_epsilon_doesnt_crash(self):
         """epsilon = 1e-10 should not crash (may not converge, but no exception)."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42).problem
+        p = make_bilinear_problem(dim=3, seed=42)
         # Should complete without raising, even if it doesn't converge
-        result = solve(p, epsilon=1e-10, verbose=False)
+        result = cached_solve(p, epsilon=1e-10, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
 
@@ -404,7 +405,7 @@ class TestEdgeCaseInputs:
         """Minimum dimensions: dim_x=1, dim_y=1."""
         from tests.conftest import make_1d_bilinear
         p = make_1d_bilinear()
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= -1e-6
 
     def test_asymmetric_dimensions(self):
@@ -430,15 +431,15 @@ class TestEdgeCaseInputs:
     def test_gamma_override(self):
         """User-supplied gamma should be accepted without error."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42).problem
-        result = solve(p, epsilon=0.1, gamma=5.0, verbose=False)
+        p = make_bilinear_problem(dim=3, seed=42)
+        result = cached_solve(p, epsilon=0.1, gamma=5.0, verbose=False)
         assert result.history["gamma"] == 5.0
 
     def test_len_mode_runs(self):
         """M_saddle='len' should produce valid output on a simple problem."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=3, seed=42).problem
-        result = solve(p, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
+        p = make_bilinear_problem(dim=3, seed=42)
+        result = cached_solve(p, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
         assert result.gap >= -1e-6

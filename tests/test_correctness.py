@@ -11,6 +11,7 @@ import pytest
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from tests._solve_cache import cached_solve
 from tests.conftest import grid_gap
 
 # ── Tolerance fixtures ────────────────────────────────────────────────────
@@ -27,14 +28,14 @@ class TestBilinearCorrectness:
     def test_solver_runs(self, bilinear_problem):
         """solve() returns a finite gap for a bilinear problem."""
         p = bilinear_problem
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= 0.0
         assert jnp.isfinite(jnp.asarray(result.gap))
 
     def test_solution_is_feasible(self, bilinear_problem):
         """x and y stay inside the feasible ball."""
         p = bilinear_problem
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         D_x = p.problem.D_x
         D_y = p.problem.D_y
         assert float(jnp.linalg.norm(result.x)) <= D_x / 2 + 1e-6
@@ -43,15 +44,15 @@ class TestBilinearCorrectness:
     def test_gap_decreases_with_epsilon(self, bilinear_problem):
         """Tighter requested tolerance → smaller or equal achieved gap."""
         p = bilinear_problem
-        r1 = solve(p.problem, epsilon=0.1, verbose=False)
-        r2 = solve(p.problem, epsilon=0.05, verbose=False)
+        r1 = cached_solve(p, epsilon=0.1, verbose=False)
+        r2 = cached_solve(p, epsilon=0.05, verbose=False)
         # Allow small tolerance for numerical noise
         assert r2.gap <= r1.gap + 1e-4
 
     def test_solution_accuracy(self, bilinear_problem, epsilon):
         """Solution converges toward the known saddle point."""
         p = bilinear_problem
-        result = solve(p.problem, epsilon=epsilon, verbose=False)
+        result = cached_solve(p, epsilon=epsilon, verbose=False)
         err_x = float(jnp.linalg.norm(result.x - p.x_star))
         err_y = float(jnp.linalg.norm(result.y - p.y_star))
         # Accept moderate accuracy — the solver is approximate
@@ -63,9 +64,7 @@ class TestBilinearCorrectness:
     def test_both_inner_solvers(self, bilinear_problem, M_saddle):
         """Both NPE and LEN modes produce valid results."""
         p = bilinear_problem
-        result = solve(
-            p.problem, epsilon=0.1, M_saddle=M_saddle, verbose=False,
-        )
+        result = cached_solve(p, epsilon=0.1, M_saddle=M_saddle, verbose=False)
         assert result.gap >= 0.0
         assert jnp.isfinite(jnp.asarray(result.gap))
 
@@ -76,13 +75,13 @@ class TestQuadraticCorrectness:
 
     def test_solver_runs(self, quadratic_problem):
         p = quadratic_problem
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= 0.0
         assert jnp.isfinite(jnp.asarray(result.gap))
 
     def test_solution_is_feasible(self, quadratic_problem):
         p = quadratic_problem
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert float(jnp.linalg.norm(result.x)) <= p.problem.D_x / 2 + 1e-6
         assert float(jnp.linalg.norm(result.y)) <= p.problem.D_y / 2 + 1e-6
 
@@ -106,7 +105,7 @@ class TestQuadraticCorrectness:
     def test_convergence_to_saddle(self, quadratic_problem, epsilon):
         """Solution error decreases with epsilon."""
         p = quadratic_problem
-        result = solve(p.problem, epsilon=epsilon, verbose=False)
+        result = cached_solve(p, epsilon=epsilon, verbose=False)
         err = float(
             jnp.linalg.norm(result.x - p.x_star)
             + jnp.linalg.norm(result.y - p.y_star)
@@ -120,12 +119,12 @@ class Test1DCorrectness:
 
     def test_solver_runs(self, problem_1d):
         p = problem_1d
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= 0.0
 
     def test_convergence(self, problem_1d, epsilon):
         p = problem_1d
-        result = solve(p.problem, epsilon=epsilon, verbose=False)
+        result = cached_solve(p, epsilon=epsilon, verbose=False)
         assert float(jnp.abs(result.x[0])) < epsilon * 2.0
         assert float(jnp.abs(result.y[0])) < epsilon * 2.0
 
@@ -142,7 +141,7 @@ class TestSeparableCorrectness:
 
     def test_solver_runs(self, separable_problem):
         p = separable_problem
-        result = solve(p.problem, epsilon=0.1, verbose=False)
+        result = cached_solve(p, epsilon=0.1, verbose=False)
         assert result.gap >= 0.0
 
     def test_gradient_structure(self, separable_problem):
@@ -157,7 +156,7 @@ class TestSeparableCorrectness:
 
     def test_convergence(self, separable_problem, epsilon):
         p = separable_problem
-        result = solve(p.problem, epsilon=epsilon, verbose=False)
+        result = cached_solve(p, epsilon=epsilon, verbose=False)
         err = float(
             jnp.linalg.norm(result.x - p.x_star)
             + jnp.linalg.norm(result.y - p.y_star)
@@ -171,7 +170,7 @@ class TestSolverResult:
 
     def test_has_all_fields(self, bilinear_problem):
         """SolverResult contains every documented field."""
-        result = solve(bilinear_problem.problem, epsilon=0.1)
+        result = cached_solve(bilinear_problem, epsilon=0.1)
         assert hasattr(result, "x")
         assert hasattr(result, "y")
         assert hasattr(result, "gap")
@@ -182,10 +181,10 @@ class TestSolverResult:
 
     def test_history_contains_loop_params(self, bilinear_problem):
         """History dict records the three-loop scheduling parameters."""
-        result = solve(bilinear_problem.problem, epsilon=0.1)
+        result = cached_solve(bilinear_problem, epsilon=0.1)
         for key in ["T_outer", "S_outer", "T_middle", "T_inner", "zeta_1"]:
             assert key in result.history, f"missing key '{key}' in history"
 
     def test_oracle_calls_positive(self, bilinear_problem):
-        result = solve(bilinear_problem.problem, epsilon=0.1)
+        result = cached_solve(bilinear_problem, epsilon=0.1)
         assert result.oracle_calls >= 1

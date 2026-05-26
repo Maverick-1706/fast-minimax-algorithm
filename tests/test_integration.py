@@ -22,6 +22,7 @@ from minimax_aipe import (
     make_crn_npe_oracle,
 )
 from minimax_aipe.framework import _compute_loop_params
+from tests._solve_cache import cached_solve
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Section 1 — Three-Loop Interaction
@@ -89,7 +90,7 @@ class TestThreeLoopParameters:
             assert params.S_inner <= 12
     def test_history_contains_all_loop_params(self, bilinear_3d):
         """solve() history dict records every scheduling parameter."""
-        result = solve(bilinear_3d.problem, epsilon=0.05)
+        result = cached_solve(bilinear_3d, epsilon=0.05)
         required_keys = [
             "gamma", "mu_x", "mu_y",
             "zeta_1", "zeta_2", "zeta_3",
@@ -108,7 +109,7 @@ class TestThreeLoopOnHarderProblems:
     def test_offset_quadratic_solved(self, offset_quadratic):
         """Nonzero saddle point: solver should still converge."""
         p = offset_quadratic
-        result = solve(p.problem, epsilon=0.05, verbose=False)
+        result = cached_solve(p, epsilon=0.05, verbose=False)
         assert result.gap >= -1e-6
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
@@ -116,7 +117,7 @@ class TestThreeLoopOnHarderProblems:
     def test_offset_quadratic_close_to_saddle(self, offset_quadratic):
         """Solution should be near the known nonzero saddle point."""
         p = offset_quadratic
-        result = solve(p.problem, epsilon=0.05, verbose=False)
+        result = cached_solve(p, epsilon=0.05, verbose=False)
         err_x = float(jnp.linalg.norm(result.x - p.x_star))
         err_y = float(jnp.linalg.norm(result.y - p.y_star))
         assert err_x < 1.0, f"x error {err_x:.4e} too large"
@@ -125,7 +126,7 @@ class TestThreeLoopOnHarderProblems:
     def test_10d_quadratic_converges(self, large_quadratic_10d):
         """10D quadratic: solver must produce finite output."""
         p = large_quadratic_10d.problem
-        result = solve(p, epsilon=0.1, verbose=False)
+        result = cached_solve(large_quadratic_10d, epsilon=0.1, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
         assert result.x.shape == (5,)
@@ -135,13 +136,13 @@ class TestThreeLoopOnHarderProblems:
     def test_10d_quadratic_gap_small(self, large_quadratic_10d):
         """10D quadratic: achieved gap should be bounded."""
         p = large_quadratic_10d.problem
-        result = solve(p, epsilon=0.05, verbose=False)
+        result = cached_solve(large_quadratic_10d, epsilon=0.05, verbose=False)
         assert result.gap < 1.0, f"gap={result.gap:.4e} too large for 10D quad"
 
     def test_len_mode_on_harder_problem(self, offset_quadratic):
         """M_saddle='len' on a nontrivial problem should produce valid output."""
         p = offset_quadratic.problem
-        result = solve(p, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
+        result = cached_solve(offset_quadratic, epsilon=0.1, M_saddle="len", m_lazy=3, verbose=False)
         assert jnp.all(jnp.isfinite(result.x))
         assert jnp.all(jnp.isfinite(result.y))
         assert result.gap >= -1e-6
@@ -158,7 +159,7 @@ class TestOracleCallTracking:
     def test_solve_reports_positive_oracle_calls(self, bilinear_3d):
         """The solver should report a positive oracle_calls count."""
         p = bilinear_3d
-        result = solve(p.problem, epsilon=0.5)
+        result = cached_solve(p, epsilon=0.5)
         assert result.oracle_calls > 0, (
             f"oracle_calls should be positive, got {result.oracle_calls}"
         )
@@ -166,7 +167,7 @@ class TestOracleCallTracking:
     def test_oracle_calls_is_integer(self, bilinear_3d):
         """oracle_calls should be a plain Python int, not a JAX array."""
         p = bilinear_3d
-        result = solve(p.problem, epsilon=0.5)
+        result = cached_solve(p, epsilon=0.5)
         assert isinstance(result.oracle_calls, int)
 
 
@@ -304,7 +305,7 @@ class TestGapEstimatorMonotonicity:
 
     def test_gap_at_solver_output_is_small(self, bilinear_3d):
         """The solver's own gap estimate should be small for a zero-gap problem."""
-        result = solve(bilinear_3d.problem, epsilon=0.05, verbose=False)
+        result = cached_solve(bilinear_3d, epsilon=0.05, verbose=False)
         assert result.gap < 0.5, (
             f"Solver's own gap={result.gap:.4e} too large for zero-gap problem"
         )
@@ -449,7 +450,7 @@ class TestStronglyConvexConcave:
     def test_offset_quadratic_convergence(self, offset_quadratic):
         """Nonzero saddle: verify convergence in both coordinates."""
         p = offset_quadratic
-        result = solve(p.problem, epsilon=0.05, verbose=False)
+        result = cached_solve(p, epsilon=0.05, verbose=False)
         err_x = float(jnp.linalg.norm(result.x - p.x_star))
         err_y = float(jnp.linalg.norm(result.y - p.y_star))
         assert err_x < 0.5, f"x error {err_x:.4e}"
@@ -458,7 +459,7 @@ class TestStronglyConvexConcave:
     def test_offset_gap_at_output(self, offset_quadratic):
         """Gap at solver output should be small for a zero-gap problem."""
         p = offset_quadratic
-        result = solve(p.problem, epsilon=0.05, verbose=False)
+        result = cached_solve(p, epsilon=0.05, verbose=False)
         # Use estimate_gap for independent verification
         gap_check = estimate_gap(
             p.problem, result.x, result.y,
@@ -472,8 +473,8 @@ class TestStronglyConvexConcave:
         """10D problem should work with both NPE and LEN inner solvers."""
         p = large_quadratic_10d.problem
         for mode in ["npe", "len"]:
-            result = solve(
-                p, epsilon=0.1, M_saddle=mode,
+            result = cached_solve(
+                large_quadratic_10d, epsilon=0.1, M_saddle=mode,
                 m_lazy=3, verbose=False,
             )
             assert jnp.all(jnp.isfinite(result.x)), f"NaN in x ({mode})"
@@ -489,7 +490,7 @@ class TestGapDecreasesWithTighterEpsilon:
         epsilons = [0.1, 0.05, 0.02]
         gaps = []
         for eps in epsilons:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(bilinear_3d, epsilon=eps, verbose=False)
             gaps.append(result.gap)
 
         for i in range(len(gaps) - 1):
@@ -502,7 +503,7 @@ class TestGapDecreasesWithTighterEpsilon:
         epsilons = [0.1, 0.05, 0.02]
         gaps = []
         for eps in epsilons:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(quadratic_3d, epsilon=eps, verbose=False)
             gaps.append(result.gap)
 
         for i in range(len(gaps) - 1):

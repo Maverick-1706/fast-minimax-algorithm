@@ -13,6 +13,7 @@ import pytest
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from tests._solve_cache import cached_solve
 from tests.test_correctness import epsilon
 
 
@@ -52,10 +53,9 @@ class TestBilinearRate:
 
     def test_oracle_calls_increasing(self, bilinear_3d):
         """Oracle calls should increase (or stay flat) as ε decreases."""
-        p = bilinear_3d.problem
         calls = []
         for eps in [0.1, 0.05, 0.01, 0.005]:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(bilinear_3d, epsilon=eps, verbose=False)
             calls.append(result.oracle_calls)
 
         for i in range(len(calls) - 1):
@@ -71,13 +71,12 @@ class TestBilinearRate:
         small sample sizes, and implementation constants, we accept
         0.2 ≤ p ≤ 1.5.
         """
-        p = bilinear_3d.problem
         epsilons = [0.1, 0.05, 0.02, 0.01, 0.005]
         calls = []
         valid_eps = []
 
         for eps in epsilons:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(bilinear_3d, epsilon=eps, verbose=False)
             if result.oracle_calls > 0:
                 calls.append(result.oracle_calls)
                 valid_eps.append(eps)
@@ -99,12 +98,12 @@ class TestBilinearRate:
     def test_rate_across_seeds(self, seed):
         """Rate is stable across different random matrix seeds."""
         from tests.conftest import make_bilinear_problem
-        p = make_bilinear_problem(dim=4, seed=seed).problem
+        p = make_bilinear_problem(dim=4, seed=seed)
 
         epsilons = [0.1, 0.05, 0.02, 0.01]
         calls = []
         for eps in epsilons:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(p, epsilon=eps, verbose=False)
             calls.append(result.oracle_calls)
 
         if all(c > 0 for c in calls):
@@ -121,23 +120,21 @@ class TestBilinearRate:
 class TestQuadraticRate:
 
     def test_oracle_calls_increasing(self, quadratic_3d):
-        p = quadratic_3d.problem
         calls = []
         for eps in [0.1, 0.05, 0.02, 0.01]:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(quadratic_3d, epsilon=eps, verbose=False)
             calls.append(result.oracle_calls)
 
         for i in range(len(calls) - 1):
             assert calls[i + 1] >= calls[i] - 1
 
     def test_power_law_exponent_bounded(self, quadratic_3d):
-        p = quadratic_3d.problem
         epsilons = [0.1, 0.05, 0.02, 0.01, 0.005]
         calls = []
         valid_eps = []
 
         for eps in epsilons:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(quadratic_3d, epsilon=eps, verbose=False)
             if result.oracle_calls > 0:
                 calls.append(result.oracle_calls)
                 valid_eps.append(eps)
@@ -223,16 +220,14 @@ class TestGapConvergence:
 
     def test_gap_below_epsilon(self, bilinear_3d, epsilon):
         """For a zero-gap problem, achieved gap should be small."""
-        p = bilinear_3d.problem
-        result = solve(p, epsilon=epsilon, verbose=False)
+        result = cached_solve(bilinear_3d, epsilon=epsilon, verbose=False)
         assert result.gap <= epsilon * 1.5, f"Solver failed to reach epsilon. Gap: {result.gap}, Eps: {epsilon}" 
 
     def test_gap_decreasing_sequence(self, bilinear_3d):
         """Gaps form a non-increasing sequence as ε tightens."""
-        p = bilinear_3d.problem
         gaps = []
         for eps in [0.1, 0.05, 0.02, 0.01]:
-            result = solve(p, epsilon=eps, verbose=False)
+            result = cached_solve(bilinear_3d, epsilon=eps, verbose=False)
             gaps.append(result.gap)
 
         for i in range(len(gaps) - 1):

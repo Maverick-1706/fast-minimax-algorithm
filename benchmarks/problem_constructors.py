@@ -13,6 +13,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from minimax_aipe import MinimaxProblem
 from minimax_aipe.problem import BenchmarkProblem, build_benchmark_meta
@@ -25,6 +26,81 @@ def _log_spaced_eigenvalues(dim: int, kappa: float) -> jnp.ndarray:
     if kappa == 1.0:
         return jnp.ones(dim)
     return jnp.logspace(0.0, jnp.log10(kappa), dim)
+
+
+def _attach_duality_gap(problem: MinimaxProblem, duality_gap_fn) -> MinimaxProblem:
+    """Install an exact duality-gap routine on a benchmark problem."""
+    problem.duality_gap = duality_gap_fn
+    return problem
+
+
+def _solve_ball_quadratic_spd(M: jnp.ndarray, q: jnp.ndarray, radius: float) -> tuple[jnp.ndarray, float]:
+    """Solve min 0.5 z^T M z + q^T z subject to ||z|| <= radius exactly."""
+    M_np = np.asarray(M, dtype=float)
+    q_np = np.asarray(q, dtype=float)
+    radius = float(radius)
+    if radius <= 0:
+        z_np = np.zeros_like(q_np)
+        return jnp.asarray(z_np), float(0.0)
+
+    eye = np.eye(M_np.shape[0], dtype=float)
+
+    def solve_shift(shift: float) -> np.ndarray:
+        return -np.linalg.solve(M_np + shift * eye, q_np)
+
+    z_unc = solve_shift(0.0)
+    if float(np.linalg.norm(z_unc)) <= radius + 1e-10:
+        z = z_unc
+    else:
+        hi = 1.0
+        z_hi = solve_shift(hi)
+        while float(np.linalg.norm(z_hi)) > radius:
+            hi *= 2.0
+            z_hi = solve_shift(hi)
+
+        lo = 0.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            z_mid = solve_shift(mid)
+            if float(np.linalg.norm(z_mid)) > radius:
+                lo = mid
+            else:
+                hi = mid
+                z_hi = z_mid
+        z = z_hi
+
+    obj = 0.5 * z @ M_np @ z + q_np @ z
+    return jnp.asarray(z), float(obj)
+
+
+def _bilinear_duality_gap(A: jnp.ndarray, radius_x: float, radius_y: float):
+    def duality_gap(x, y) -> float:
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        A_np = np.asarray(A, dtype=float)
+        max_term = radius_y * np.linalg.norm(A_np.T @ x)
+        min_term = -radius_x * np.linalg.norm(A_np @ y)
+        return float(max_term - min_term)
+
+    return duality_gap
+
+
+def _quadratic_duality_gap(Q: jnp.ndarray, B: jnp.ndarray, R: jnp.ndarray, radius_x: float, radius_y: float):
+    def duality_gap(x, y) -> float:
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        B_np = np.asarray(B, dtype=float)
+        R_np = np.asarray(R, dtype=float)
+        qx = B_np.T @ x
+        qy = B_np @ y
+        y_star, y_obj = _solve_ball_quadratic_spd(R, -qx, radius_y)
+        x_star, x_obj = _solve_ball_quadratic_spd(Q, qy, radius_x)
+        max_val = float(x @ qx) - y_obj
+        min_val = x_obj - 0.5 * float(y @ R_np @ y)
+        del y_star, x_star
+        return max(0.0, max_val - min_val)
+
+    return duality_gap
 
 
 def make_bilinear_problem(dim: int = 3, kappa: float = 1.0, seed: int = 42) -> BenchmarkProblem:
@@ -70,6 +146,7 @@ def make_bilinear_problem(dim: int = 3, kappa: float = 1.0, seed: int = 42) -> B
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
+    _attach_duality_gap(problem, _bilinear_duality_gap(A, D / 2.0, D / 2.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
@@ -130,6 +207,7 @@ def make_quadratic_saddle_problem(
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=float(jnp.linalg.norm(KKT, ord=2)),
     )
+    _attach_duality_gap(problem, _quadratic_duality_gap(Q, B, R, D / 2.0, D / 2.0))
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
     return BenchmarkProblem(
@@ -155,6 +233,7 @@ def make_1d_bilinear() -> BenchmarkProblem:
         f=f, dim_x=1, dim_y=1, D_x=2.0, D_y=2.0,
         rho=0.0, ell=0.0,
     )
+    _attach_duality_gap(problem, _bilinear_duality_gap(jnp.ones((1, 1)), 1.0, 1.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.array([0.0]),
@@ -192,6 +271,10 @@ def make_separable_problem() -> BenchmarkProblem:
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=3.0,
     )
+    H_x = jnp.diag(jnp.array([3.0, 1.0]))
+    H_y = jnp.diag(jnp.array([1.0, 2.0]))
+    zeros = jnp.zeros((2, 2))
+    _attach_duality_gap(problem, _quadratic_duality_gap(H_x, zeros, H_y, 2.0, 2.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(2),
@@ -256,6 +339,7 @@ def make_ill_conditioned_bilinear(dim: int = 4, kappa: float = 1e4, seed: int = 
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
+    _attach_duality_gap(problem, _bilinear_duality_gap(A, D / 2.0, D / 2.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
@@ -324,6 +408,7 @@ def make_ill_conditioned_quadratic(dim: int = 4, kappa: float = 1e4, seed: int =
         grad_f=grad_f, hessian_f=hessian_f,
         rho=0.0, ell=ell,
     )
+    _attach_duality_gap(problem, _quadratic_duality_gap(Q, B, R, D / 2.0, D / 2.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
@@ -376,6 +461,16 @@ def make_offset_quadratic() -> BenchmarkProblem:
         hessian_f=hessian_f,
         rho=0.0,
         ell=float(4.0 + jnp.sqrt(jnp.array(5.0))),
+    )
+    _attach_duality_gap(
+        problem,
+        _quadratic_duality_gap(
+            jnp.array([[5.0]]),
+            jnp.array([[2.0]]),
+            jnp.array([[3.0]]),
+            2.0,
+            2.0,
+        ),
     )
     return BenchmarkProblem(
         problem=problem,
@@ -437,6 +532,7 @@ def make_10d_quadratic(dim: int = 5, kappa: float = 10.0, seed: int = 0) -> Benc
         rho=0.0,
         ell=ell,
     )
+    _attach_duality_gap(problem, _quadratic_duality_gap(Q, B, R, 2.0, 2.0))
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),
