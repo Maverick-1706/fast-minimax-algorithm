@@ -8,10 +8,10 @@ claim — wall-clock alone is insufficient.
 from __future__ import annotations
 
 import itertools
-import time
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from minimax_aipe.framework import solve_outer_trace
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_npe_restart_jit_benchmark
 from benchmarks.results import BenchmarkResult
@@ -103,13 +103,12 @@ def sweep_epsilon_endpoints(
     prob,
     epsilons: list[float],
 ) -> list[BenchmarkResult]:
-    """Like sweep_epsilon(), but captures independent gap-vs-oracle-call endpoints.
+    """Capture real gap-vs-oracle endpoints after each outer epoch.
 
-    Since the solver doesn't expose per-outer-iteration hooks, we build
-    the convergence curve by independently running ``solve()`` at geometrically-spaced
-    epsilon levels from coarse to target, cold-starting each run from the
-    initial point. This produces a valid gap-vs-oracle-calls
-    curve for computing convergence rates without modifying the algorithm internals.
+    This runs the outer restart loop eagerly, stopping between epochs to
+    recover the current saddle estimate and evaluate the gap.  The resulting
+    endpoints are an actual trajectory for the target epsilon, not independent
+    cold-start solves at different epsilon levels.
 
     Parameters
     ----------
@@ -125,53 +124,23 @@ def sweep_epsilon_endpoints(
         Empty endpoints are stored as empty lists (never None) so downstream
         code can always iterate safely.
     """
-    import jax.numpy as jnp
-    from minimax_aipe.framework import solve
-
-    N_TRACE_POINTS = 8  # Number of checkpoints in the convergence trace
-
     rows: list[BenchmarkResult] = []
 
     for eps in epsilons:
-        # ── Build epsilon schedule: log-spaced from coarse to target ──
-        coarse_eps = min(10.0 * eps, 0.5)
-        eps_schedule = [
-            coarse_eps * (eps / coarse_eps) ** (i / (N_TRACE_POINTS - 1))
-            for i in range(N_TRACE_POINTS)
-        ]
-
-        gap_endpoints: list[float] = []
-        oracle_endpoints: list[float] = []
-
-        # Run intermediate coarser resolutions from a cold start to collect data points
-        for trace_eps in eps_schedule[:-1]:
-            res_trace = solve(prob.problem, epsilon=trace_eps, z0=prob.z0)
-            gap_endpoints.append(float(res_trace.gap))
-            d = prob.problem.dim_x + prob.problem.dim_y
-            oracle_endpoints.append(float(res_trace.oracle_stats.normalized_cost(d)))
-
-        # Force device synchronization before starting the timer for the definitive target solve
         _ = jnp.zeros(1).block_until_ready()
-        t_start = time.perf_counter()
-        
-        # Run the definitive final target epsilon solve
-        res = solve(prob.problem, epsilon=eps, z0=prob.z0)
+        res = solve_outer_trace(prob.problem, epsilon=eps, z0=prob.z0)
         res.x.block_until_ready()
-        elapsed = time.perf_counter() - t_start
-
-        # Append final target metrics to complete the endpoints arrays
-        gap_endpoints.append(float(res.gap))
-        d = prob.problem.dim_x + prob.problem.dim_y
-        oracle_endpoints.append(float(res.oracle_stats.normalized_cost(d)))
+        gap_endpoints = list((res.history or {}).get("gap_endpoints", []))
+        oracle_endpoints = list((res.history or {}).get("oracle_endpoints", []))
 
         row = BenchmarkResult(
             solver="minimax_aipe",
             problem=prob.name,
             dim=prob.dim or prob.problem.dim_x,
             epsilon=eps,
-            wall_time_mean=elapsed,
+            wall_time_mean=0.0,
             wall_time_std=0.0,
-            ci=(elapsed, elapsed),
+            ci=(0.0, 0.0),
             oracle_stats=res.oracle_stats,
             converged=res.converged,
             gap_achieved=res.gap <= eps,

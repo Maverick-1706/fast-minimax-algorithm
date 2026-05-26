@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import os
 import random
+import sys
 
-# os.environ.setdefault("JAX_PLATFORMS", "cpu") # Removed to allow GPU acceleration
+# Apple Silicon defaults to Metal, but the benchmark suite is far more
+# stable on CPU. Respect any explicit override from the caller.
+if sys.platform == "darwin":
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 import numpy as np

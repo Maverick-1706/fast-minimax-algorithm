@@ -52,7 +52,7 @@ def _platform_info() -> str:
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Benchmark suite for Minimax-AIPE solver.")
-    parser.add_argument("--epsilon", type=float, default=config.EPSILON_DEFAULT, help=f"Target duality gap (default: {config.EPSILON_DEFAULT}).")
+    parser.add_argument("--epsilon", type=float, default=config.EPSILON_DEFAULT, help=f"Target duality gap (default: {config.EPSILON_DEFAULT}). Used as the minimum epsilon in convergence sweeps.")
     parser.add_argument("--dims", type=str, default=None, help="Comma-separated dimensions.")
     parser.add_argument("--quick", action="store_true", help="Reduced set: 1 problem, 1 repeat, dim=2.")
     parser.add_argument("--section", type=str, default="all",
@@ -64,6 +64,22 @@ def _parse_args():
     parser.add_argument("--output", type=str, default=None, metavar="FMT[:PATH]",
                         help="Export: 'csv', 'json', 'csv:out.csv', 'json:out.json'.")
     return parser.parse_args()
+
+
+def _convergence_epsilons(min_epsilon: float) -> list[float]:
+    """Return the configured ε grid truncated at *min_epsilon*.
+
+    The convergence section historically ignored ``--epsilon`` and always
+    swept down to the smallest configured value, which made hard families
+    unexpectedly expensive.  Use ``--epsilon`` as a floor while preserving
+    the coarser grid above it.
+    """
+    epsilons = [eps for eps in config.EPSILON_GRID if eps >= min_epsilon]
+    if all(abs(eps - min_epsilon) > 1e-15 for eps in epsilons):
+        epsilons.append(min_epsilon)
+    if not epsilons:
+        epsilons = [min_epsilon]
+    return sorted(set(epsilons), reverse=True)
 
 
 def _run_speed(problems, epsilon, n_repeats, export_data):
@@ -169,7 +185,7 @@ def _run_memory(problems, epsilon, export_data):
 def _run_convergence(problems, epsilon, export_data):
     from benchmarks.convergence import sweep_epsilon, format_convergence_table, sweep_epsilon_endpoints, format_endpoints_table
     print(_header("Convergence: ε-Sweep"))
-    epsilons = config.EPSILON_GRID
+    epsilons = _convergence_epsilons(epsilon)
     
     all_convergence_rows = []
     all_trace_rows = []
@@ -182,8 +198,15 @@ def _run_convergence(problems, epsilon, export_data):
         print(format_convergence_table(rows))
         print()
 
-        trace_rows = sweep_epsilon_endpoints(prob, [epsilons[-1]])
+        npe_successes = [
+            r.epsilon for r in rows
+            if r.solver == "aipe_npe" and r.gap_achieved
+        ]
+        trace_eps = min(npe_successes) if npe_successes else epsilons[0]
+        print(f"  Endpoint trace at ε={trace_eps:g}:")
+        trace_rows = sweep_epsilon_endpoints(prob, [trace_eps])
         print(format_endpoints_table(trace_rows))
+        print()
 
         all_convergence_rows.extend(flatten_convergence_rows(rows))
         all_trace_rows.extend(flatten_convergence_rows(trace_rows))

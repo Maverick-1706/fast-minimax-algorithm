@@ -37,7 +37,7 @@ N_REPEATS_QUICK: int = 1
 N_REPEATS_SCALING: int = 3
 """Timed repeats for scaling sweeps (lighter than full)."""
 
-N_WARMUP: int = 0
+N_WARMUP: int = 1
 """JIT warmup runs before timed iterations."""
 
 # ── Tolerances / ε ─────────────────────────────────────────────────────

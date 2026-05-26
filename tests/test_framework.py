@@ -22,6 +22,7 @@ from minimax_aipe.framework import (
     _make_phi_oracle,
     _make_psi_oracle,
     solve,
+    solve_outer_trace,
 )
 from minimax_aipe.problem import MinimaxProblem
 
@@ -221,6 +222,40 @@ def test_make_phi_oracle_shape_and_signature():
     assert grad.shape == x.shape, f"grad shape {grad.shape} != x shape {x.shape}"
     assert jnp.all(jnp.isfinite(val))
     assert jnp.all(jnp.isfinite(grad))
+
+
+def test_framework_re_exports_expected_symbols():
+    import minimax_aipe.framework as framework
+
+    expected = [
+        "solve",
+        "solve_outer_trace",
+        "RegularizedSubproblem",
+        "_compute_loop_params",
+        "_iProx_Phi",
+        "_iProx_Psi",
+        "_make_g_problem",
+        "_make_h_problem",
+        "_make_phi_oracle",
+        "_make_psi_oracle",
+        "_algorithm_3",
+    ]
+    for name in expected:
+        assert hasattr(framework, name), f"framework missing re-export: {name}"
+
+
+def test_internal_api_shares_setup_builder():
+    from minimax_aipe._framework import api
+
+    assert hasattr(api, "_build_solver_setup")
+    assert solve.__module__ == "minimax_aipe._framework.api"
+    assert solve_outer_trace.__module__ == "minimax_aipe._framework.api"
+
+
+def test_cached_pipeline_function_is_lru_wrapped():
+    from minimax_aipe._framework.pipeline import _get_pipeline
+
+    assert hasattr(_get_pipeline, "cache_info")
 
 def test_make_phi_oracle_at_origin():
     """For a quadratic problem centred at zero, max_y f(0, y) should be zero
@@ -597,3 +632,11 @@ def test_compute_loop_params_T_outer_ge_inner():
     assert params.T_outer >= params.T_inner
     assert params.S_outer >= params.S_middle
     assert params.S_outer >= params.S_inner
+
+
+def test_compute_loop_params_outer_tolerance_has_fp32_floor():
+    """zeta_1 should not underflow below a usable FP32 early-stop threshold."""
+    problem, _A = _quadratic_problem()
+    params = _compute_loop_params(problem, epsilon=0.01, gamma=1.0)
+
+    assert params.zeta_1 >= 1e-6

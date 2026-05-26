@@ -16,6 +16,12 @@ FP32 min normal       ≈ 1.2e-38
 from __future__ import annotations
 
 import os
+import sys
+
+# Apple Silicon defaults to the Metal backend, but the solver and benchmark
+# paths are more reliable on CPU unless the caller explicitly opts in.
+if sys.platform == "darwin":
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
 

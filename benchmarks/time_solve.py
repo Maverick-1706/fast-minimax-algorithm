@@ -18,7 +18,7 @@ from minimax_aipe import solve
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
 from benchmarks.results import BenchmarkResult
-from benchmarks.stats import summarise
+from benchmarks.stats import should_repeat, summarise
 from minimax_aipe.problem import BenchmarkProblem
 
 
@@ -56,6 +56,9 @@ def _time_callable(fn, n_warmup: int | None = None, n_repeats: int | None = None
     # ── Automated repeat policy (uniform tier count) ─────────────────
     if config.AUTO_REPEAT:
         for _ in range(config.AUTO_REPEAT_MAX_EXTRA):
+            decision = should_repeat(times)
+            if not decision.should_repeat:
+                break
             for _ in range(config.AUTO_REPEAT_N):
                 gc.collect()
                 _ = jnp.zeros(1).block_until_ready()
@@ -329,7 +332,7 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
         f"{'Problem':<22} {'Dim':>4}  "
         f"{'AIPE-NPE (Time | NrmCost)':>34}  {'AIPE-LEN (Time | NrmCost)':>34}  "
         f"{'JIT-EG (Time | NrmCost)':>34}  {'JIT-GDA (Time | NrmCost)':>34}  "
-        f"{'NPE gap':>8}  {'EG gap':>8}"
+        f"{'AIPE gap':>8}  {'EG gap':>8}  {'GDA gap':>8}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
@@ -363,11 +366,19 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
 
         npe_gap = npe.final_gap if npe else 0.0
         eg_gap = eg.final_gap if eg else 0.0
+        gda_gap = gda.final_gap if gda else 0.0
 
         lines.append(
             f"{prob_name:<22} {dim:>4}  {npe_str:>34}  {lnn_str:>34}  {eg_str:>34}  {gda_str:>34}  "
-            f"{npe_gap:>8.4f}  {eg_gap:>8.4f}"
+            f"{npe_gap:>8.4f}  {eg_gap:>8.4f}  {gda_gap:>8.4f}"
         )
+
+    lines.append("")
+    lines.append(
+        "Note: NormCost weights are grad=d, hess=d², crn=d³, proj=d, fn_eval=d.  "
+        "CRN-based costs are dominated by the d³ term while gradient-based costs "
+        "are O(d); cross-solver NormCost ratios do not reflect equal-quality work."
+    )
 
     return "\n".join(lines)
 
