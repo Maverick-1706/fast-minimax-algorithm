@@ -32,6 +32,117 @@ from minimax_aipe._framework.types import _stats_array
 logger = logging.getLogger(__name__)
 
 
+def _restart_inner_saddle_solver(
+    run_inner,
+    z0: Array,
+    *,
+    S_inner: int,
+    tolerance: float,
+) -> tuple[Array, Array]:
+    def _run_inner_warm(z: Array, _warm):
+        z_new, inner_stats = run_inner(z)
+        return z_new, inner_stats, None, inner_stats
+
+    z_hat, epochs, _, calls = _restart_jax(
+        _run_inner_warm, z0, S_inner,
+        step_tol=max(tolerance * 0.01, _ABS_TOL),
+        stats_init=jnp.zeros(3, dtype=jnp.int32),
+    )
+    del epochs
+    return z_hat, calls
+
+
+def _build_inner_saddle_runner(
+    *,
+    operator_F,
+    project,
+    merit,
+    inner_T: int,
+    npe_gamma: float,
+    M_saddle: str,
+    m_lazy: int,
+    tolerance: float,
+    make_npe_oracle,
+    make_len_oracle,
+    len_kwargs: Optional[dict[str, float]] = None,
+):
+    if M_saddle == "npe":
+        oracle = make_npe_oracle()
+
+        def _run_inner(z: Array) -> tuple[Array, int]:
+            return npe(oracle, operator_F, z, inner_T, npe_gamma, project=project, fn=merit)
+
+        return _run_inner
+
+    if M_saddle == "len":
+        oracle = make_len_oracle()
+        kwargs = len_kwargs or {}
+
+        def _run_inner(z: Array) -> tuple[Array, int]:
+            return len_loop(
+                oracle, operator_F, z, inner_T, npe_gamma,
+                m=m_lazy, project=project, fn=merit, **kwargs,
+            )
+
+        return _run_inner
+
+    raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
+
+
+def _make_kernel_lazy_crn_oracle(
+    kernel: RegularizedSubproblem,
+    x_bar: Array,
+    y_bar: Array,
+    npe_gamma: float,
+    *,
+    project,
+    tolerance: float,
+):
+    def _crn_with_cached_hessian(z_bar: Array, H_snapshot: Array) -> tuple[Array, Array, Array]:
+        g = kernel.operator_F_h(z_bar, x_bar, y_bar)
+        dtype_local = z_bar.dtype
+        tiny_local = jnp.asarray(_TINY, dtype=dtype_local)
+        tol_jax = jnp.asarray(tolerance, dtype=dtype_local)
+        lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype_local)
+        dim_x_local = kernel.dim_x
+        J_xx = H_snapshot[:dim_x_local, :dim_x_local]
+        J_xy = H_snapshot[:dim_x_local, dim_x_local:]
+        H_yx = -H_snapshot[dim_x_local:, :dim_x_local]
+        H_yy = -H_snapshot[dim_x_local:, dim_x_local:]
+        eye_x = jnp.eye(dim_x_local, dtype=dtype_local)
+        eye_y = jnp.eye(kernel.dim_y, dtype=dtype_local)
+
+        def cond(state):
+            lam, _z, i, prev_lam = state
+            change = jnp.abs(lam - prev_lam)
+            return (i < 50) & (change > jnp.maximum(tol_jax * lam, tiny_local))
+
+        def body(state):
+            lam, _z, i, _prev = state
+            delta = _block_chol_solve(g, J_xx, J_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny_local)
+            z_new = project(z_bar + delta)
+            d_eff = z_new - z_bar
+            lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
+            return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
+
+        lam, z_half, n_secular, _prev = jax.lax.while_loop(
+            cond, body,
+            (lam0, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype_local)),
+        )
+        d_eff = z_half - z_bar
+        u = -(g + H_snapshot @ d_eff + lam * d_eff)
+        stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
+        return z_half, u, stats
+
+    def _len_oracle(z_bar: Array, z_snapshot: Array) -> tuple[Array, Array, Array]:
+        xs = z_snapshot[: kernel.dim_x]
+        ys = z_snapshot[kernel.dim_x :]
+        H = kernel.jacobian_F_h(xs, ys, x_bar, y_bar)
+        return _crn_with_cached_hessian(z_bar, H)
+
+    return _len_oracle
+
+
 def _iProx_Phi(
     problem: MinimaxProblem,
     x_bar: Array,
@@ -134,77 +245,27 @@ def _iProx_Psi(
 
     proj = lambda z: jnp.concatenate([kernel.project_x(z[: kernel.dim_x]), kernel.project_y(z[kernel.dim_x :])])
     merit = lambda z: jnp.dot(_F_h(z), _F_h(z))
-
-    if M_saddle == "npe":
-        crn_oracle_fn = kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=zeta_3)
-
-        def _run_inner(z: Array) -> tuple[Array, int]:
-            return npe(crn_oracle_fn, _F_h, z, inner_T, npe_gamma, project=proj, fn=merit)
-
-    elif M_saddle == "len":
-        def _run_inner(z: Array) -> tuple[Array, int]:
-            def _crn_with_cached_hessian(z_bar: Array, H_snapshot: Array) -> tuple[Array, Array]:
-                g = _F_h(z_bar)
-                dtype_local = z_bar.dtype
-                tiny_local = jnp.asarray(_TINY, dtype=dtype_local)
-                tol_jax = jnp.asarray(zeta_3, dtype=dtype_local)
-                lam0 = jnp.asarray(npe_gamma / 2.0, dtype=dtype_local)
-                dim_x_local = kernel.dim_x
-                J_xx = H_snapshot[:dim_x_local, :dim_x_local]
-                J_xy = H_snapshot[:dim_x_local, dim_x_local:]
-                H_yx = -H_snapshot[dim_x_local:, :dim_x_local]
-                H_yy = -H_snapshot[dim_x_local:, dim_x_local:]
-                eye_x = jnp.eye(dim_x_local, dtype=dtype_local)
-                eye_y = jnp.eye(kernel.dim_y, dtype=dtype_local)
-
-                def cond(state):
-                    lam, _z, i, prev_lam = state
-                    change = jnp.abs(lam - prev_lam)
-                    return (i < 50) & (change > jnp.maximum(tol_jax * lam, tiny_local))
-
-                def body(state):
-                    lam, _z, i, _prev = state
-                    delta = _block_chol_solve(g, J_xx, J_xy, H_yx, H_yy, lam, eye_x, eye_y, tiny_local)
-                    z_new = proj(z_bar + delta)
-                    d_eff = z_new - z_bar
-                    lam_candidate = (npe_gamma / 2.0) * jnp.linalg.norm(d_eff)
-                    return (_stable_lam_update(lam, lam_candidate, i), z_new, i + 1, lam)
-
-                lam, z_half, n_secular, _prev = jax.lax.while_loop(
-                    cond, body,
-                    (lam0, z_bar, jnp.int32(0), jnp.asarray(-1.0, dtype=dtype_local)),
-                )
-                d_eff = z_half - z_bar
-                u = -(g + H_snapshot @ d_eff + lam * d_eff)
-                stats = jnp.stack([jnp.int32(1), n_secular, jnp.int32(1)])
-                return z_half, u, stats
-
-            def _len_oracle(z_bar: Array, z_snapshot: Array) -> tuple[Array, Array, Array]:
-                xs = z_snapshot[: kernel.dim_x]
-                ys = z_snapshot[kernel.dim_x :]
-                H = kernel.jacobian_F_h(xs, ys, x_bar, y_bar)
-                return _crn_with_cached_hessian(z_bar, H)
-
-            max_norm_val = 100.0 * max(D, 1.0)
-            z_out, epoch_stats = len_loop(
-                _len_oracle, _F_h, z, inner_T, npe_gamma,
-                m=params.m_lazy, project=proj, fn=merit,
-                eta_floor=float(_ABS_TOL), max_norm=float(max_norm_val),
-            )
-            return z_out, epoch_stats
-    else:
-        raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
-
-    def _run_inner_warm(z: Array, _warm):
-        z_new, inner_stats = _run_inner(z)
-        return z_new, inner_stats, None, inner_stats
-
-    z_hat, epochs, _, calls = _restart_jax(
-        _run_inner_warm, z0, params.S_inner,
-        step_tol=max(zeta_3 * 0.01, _ABS_TOL),
-        stats_init=jnp.zeros(3, dtype=jnp.int32),
+    run_inner = _build_inner_saddle_runner(
+        operator_F=_F_h,
+        project=proj,
+        merit=merit,
+        inner_T=inner_T,
+        npe_gamma=npe_gamma,
+        M_saddle=M_saddle,
+        m_lazy=params.m_lazy,
+        tolerance=zeta_3,
+        make_npe_oracle=lambda: kernel.make_crn_oracle(x_bar, y_bar, npe_gamma, tol=zeta_3),
+        make_len_oracle=lambda: _make_kernel_lazy_crn_oracle(
+            kernel, x_bar, y_bar, npe_gamma, project=proj, tolerance=zeta_3,
+        ),
+        len_kwargs={
+            "eta_floor": float(_ABS_TOL),
+            "max_norm": float(100.0 * max(D, 1.0)),
+        },
     )
-    del epochs
+    z_hat, calls = _restart_inner_saddle_solver(
+        run_inner, z0, S_inner=params.S_inner, tolerance=zeta_3,
+    )
 
     z_out = proj(z_hat)
     F_out = _F_h(z_out)
@@ -292,35 +353,21 @@ def _solve_saddle_subproblem(
     inner_T = min(inner_T, params.T_inner)
     proj = lambda z: project_z(problem, z)
     merit = lambda z: jnp.dot(problem.operator_F(z), problem.operator_F(z))
-
-    if M_saddle == "npe":
-        oracle = make_crn_npe_oracle(problem, npe_gamma, tol=tolerance)
-
-        def _run_inner(z: Array) -> tuple[Array, int]:
-            return npe(oracle, problem.operator_F, z, inner_T, npe_gamma, project=proj, fn=merit)
-
-    elif M_saddle == "len":
-        oracle = make_lazy_crn_npe_oracle(problem, npe_gamma, tol=tolerance)
-
-        def _run_inner(z: Array) -> tuple[Array, int]:
-            return len_loop(
-                oracle, problem.operator_F, z,
-                inner_T, npe_gamma, m=params.m_lazy,
-                project=proj, fn=merit,
-            )
-    else:
-        raise ValueError(f"Unknown M_saddle={M_saddle!r}; expected 'npe' or 'len'.")
-
-    def _run_inner_warm(z: Array, _warm):
-        z_new, calls = _run_inner(z)
-        return z_new, calls, None, calls
-
-    z_hat, epochs, _, calls = _restart_jax(
-        _run_inner_warm, z0, params.S_inner,
-        step_tol=max(tolerance * 0.01, _ABS_TOL),
-        stats_init=jnp.zeros(3, dtype=jnp.int32),
+    run_inner = _build_inner_saddle_runner(
+        operator_F=problem.operator_F,
+        project=proj,
+        merit=merit,
+        inner_T=inner_T,
+        npe_gamma=npe_gamma,
+        M_saddle=M_saddle,
+        m_lazy=params.m_lazy,
+        tolerance=tolerance,
+        make_npe_oracle=lambda: make_crn_npe_oracle(problem, npe_gamma, tol=tolerance),
+        make_len_oracle=lambda: make_lazy_crn_npe_oracle(problem, npe_gamma, tol=tolerance),
     )
-    del epochs
+    z_hat, calls = _restart_inner_saddle_solver(
+        run_inner, z0, S_inner=params.S_inner, tolerance=tolerance,
+    )
     return z_hat, calls
 
 

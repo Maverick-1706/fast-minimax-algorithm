@@ -77,7 +77,12 @@ class OracleStats:
         """Alias for ``call_type`` — labels what ``oracle_calls`` counts."""
         return self.call_type
 
-    def normalized_cost(self, dim: int) -> float:
+    def normalized_cost(
+        self,
+        dim: int,
+        *,
+        projection_weight: float | None = None,
+    ) -> float:
         """FLOP-equivalent work units.
 
         Costs: grad=d, hessian=d², hvp=d², crn=d³, projection=d,
@@ -87,13 +92,18 @@ class OracleStats:
         a sub-operation inside each CRN call; counting both
         ``crn_calls * d³`` and ``linear_solves * d³`` would double-count
         the dominant d³ term.
+
+        ``projection_weight`` overrides the default ``O(d)`` cost used for
+        each projection. Benchmark families with expensive inner projection
+        solvers can pass a larger family-specific weight.
         """
+        proj_cost = float(projection_weight) if projection_weight is not None else dim
         return (
             self.grad_calls * dim
             + self.hessian_calls * dim * dim
             + self.hvp_calls * dim * dim
             + self.crn_calls * dim * dim * dim
-            + self.projection_calls * dim
+            + self.projection_calls * proj_cost
             + self.fn_evals * dim
         )
 
@@ -315,6 +325,15 @@ class MinimaxProblem:
             "Override this method or use gap.estimate_gap()."
         )
 
+
+def has_exact_gap(problem: MinimaxProblem) -> bool:
+    """Return whether *problem* installs a concrete duality-gap routine."""
+    duality_gap = getattr(problem, "duality_gap", None)
+    if duality_gap is None:
+        return False
+    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
+    return duality_gap_fn is not MinimaxProblem.duality_gap
+
 @dataclass(frozen=True)
 class BenchmarkMeta:
     """Metadata describing a benchmark problem."""
@@ -444,4 +463,5 @@ __all__ = [
     "BenchmarkMeta",
     "BenchmarkProblem",
     "build_benchmark_meta",
+    "has_exact_gap",
 ]

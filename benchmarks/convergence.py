@@ -20,20 +20,13 @@ from minimax_aipe import OracleStats, solve
 from minimax_aipe.framework import solve_outer_trace
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_npe_restart_jit_benchmark
+from benchmarks.reporting import gap_source as benchmark_gap_source
 from benchmarks.results import BenchmarkResult
-from minimax_aipe.problem import BenchmarkProblem, MinimaxProblem
-
-
-def _has_exact_gap(problem: MinimaxProblem) -> bool:
-    duality_gap = getattr(problem, "duality_gap", None)
-    if duality_gap is None:
-        return False
-    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
-    return duality_gap_fn is not MinimaxProblem.duality_gap
+from minimax_aipe.problem import BenchmarkProblem
 
 
 def _gap_source(prob: BenchmarkProblem) -> str:
-    return "exact" if _has_exact_gap(prob.problem) else "estimated"
+    return benchmark_gap_source(prob)
 
 
 def _baseline_max_iters(problem, eps: float, d: int, *, base_cap: int) -> int:

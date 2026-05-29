@@ -5,7 +5,7 @@ Measures the isolated effect of individual solver components:
   - Lazy vs fresh Hessians (m_lazy sweep)
   - Warm-starting impact
   - Early stopping impact (npe_T_factor sweep)
-  - Cubic regularization (ρ=0 vs original)
+  - Cubic regularization (rho=0 vs original)
   - Restart schedule (single-shot vs iterative)
   - Nesterov acceleration (plain gradient vs accelerated)
   - Inner-iteration budget (fixed vs adaptive)
@@ -16,25 +16,103 @@ from __future__ import annotations
 
 import statistics
 import time
-from dataclasses import replace
+from dataclasses import dataclass
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
 
 from minimax_aipe import solve
-from minimax_aipe.problem import BenchmarkProblem, MinimaxProblem
 from benchmarks import config
+from benchmarks.reporting import (
+    gap_source as benchmark_gap_source,
+    normalized_cost,
+    row_normalized_cost,
+    sync_result,
+)
 from benchmarks.results import BenchmarkResult
 from benchmarks.stats import bootstrap_ci
 from benchmarks.problems import get_problem
+from minimax_aipe.problem import BenchmarkProblem
 
 
 def _gap_source(prob: BenchmarkProblem) -> str:
-    duality_gap = getattr(prob.problem, "duality_gap", None)
-    if duality_gap is None:
-        return "estimated"
-    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
-    return "exact" if duality_gap_fn is not MinimaxProblem.duality_gap else "estimated"
+    return benchmark_gap_source(prob)
+
+
+@dataclass(frozen=True)
+class _AblationContext:
+    benchmark: BenchmarkProblem
+    problem_obj: object
+    problem_name: str
+    dim: int
+    epsilon: float
+    n_repeats: int
+    gap_source: str
+
+
+@dataclass(frozen=True)
+class _AblationCase:
+    solver: str
+    kwargs: dict
+    extra: dict | None = None
+    problem_obj: object | None = None
+    problem_name: str | None = None
+
+
+@dataclass(frozen=True)
+class _TableColumn:
+    header: str
+    width: int
+    align: str
+    render: Callable[[BenchmarkResult], str]
+
+
+def _resolve_ablation_context(
+    prob,
+    *,
+    epsilon: float | None,
+    n_repeats: int | None,
+) -> _AblationContext:
+    if epsilon is None:
+        epsilon = config.EPSILON_DEFAULT
+    if n_repeats is None:
+        n_repeats = config.N_REPEATS_SCALING
+    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    problem = prob.problem
+    return _AblationContext(
+        benchmark=prob,
+        problem_obj=problem,
+        problem_name=prob.name or "?",
+        dim=prob.dim or problem.dim_x,
+        epsilon=epsilon,
+        n_repeats=n_repeats,
+        gap_source=_gap_source(prob),
+    )
+
+
+def _paired_saddle_cases(
+    *,
+    solver_suffix: str = "",
+    len_m_lazy: int = 5,
+    extra_kwargs: dict | None = None,
+    problem_obj=None,
+    problem_name: str | None = None,
+) -> list[_AblationCase]:
+    base_kwargs = dict(extra_kwargs or {})
+    cases: list[_AblationCase] = []
+    for M_saddle in ("npe", "len"):
+        kwargs = dict(base_kwargs)
+        kwargs["M_saddle"] = M_saddle
+        if M_saddle == "len":
+            kwargs["m_lazy"] = len_m_lazy
+        cases.append(_AblationCase(
+            solver=f"aipe_{M_saddle}{solver_suffix}",
+            kwargs=kwargs,
+            problem_obj=problem_obj,
+            problem_name=problem_name,
+        ))
+    return cases
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -48,39 +126,21 @@ def ablation_m_lazy(
     m_values: list[int] | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Measure solve time and oracle calls as m_lazy varies.
-
-    m=1 is equivalent to fresh Hessians (NPE).  Larger m reuses more.
-    """
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    """Measure solve time and oracle calls as m_lazy varies."""
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
     m_values = m_values or [1, 3, 5, 10, 20]
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
+    return _run_ablation_cases(
+        ctx,
+        [
+            _AblationCase(
+                solver="aipe_len",
+                kwargs={"M_saddle": "len", "m_lazy": m},
+                extra={"m_lazy": m},
+            )
+            for m in m_values
+        ],
+    )
 
-    rows = []
-    for m in m_values:
-        kwargs = {"epsilon": epsilon, "M_saddle": "len", "m_lazy": m, "z0": prob.z0}
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        rows.append(_build_result(
-            solver="aipe_len",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            extra={"m_lazy": m},
-            gap_source=gap_source,
-        ))
-
-    return rows
 
 def ablation_npe_t_factor(
     prob,
@@ -89,40 +149,19 @@ def ablation_npe_t_factor(
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Measure solve time and oracle calls as npe_T_factor varies."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
     t_factors = t_factors or [0.5, 1.0, 1.5, 2.0, 3.0]
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
-
-    rows = []
-    for tf in t_factors:
-        kwargs = {
-            "epsilon": epsilon,
-            "M_saddle": "npe",
-            "npe_T_factor": tf,
-            "z0": prob.z0,
-        }
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        rows.append(_build_result(
-            solver="aipe_npe",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            extra={"npe_T_factor": tf},
-            gap_source=gap_source,
-        ))
-
-    return rows
+    return _run_ablation_cases(
+        ctx,
+        [
+            _AblationCase(
+                solver="aipe_npe",
+                kwargs={"M_saddle": "npe", "npe_T_factor": tf},
+                extra={"npe_T_factor": tf},
+            )
+            for tf in t_factors
+        ],
+    )
 
 
 def ablation_npe_vs_len(
@@ -131,35 +170,8 @@ def ablation_npe_vs_len(
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Head-to-head NPE vs LEN on a single problem."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
-
-    results = []
-    for M_saddle in ("npe", "len"):
-        kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
-        if M_saddle == "len":
-            kwargs["m_lazy"] = 5
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        results.append(_build_result(
-            solver=f"aipe_{M_saddle}",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            gap_source=gap_source,
-        ))
-
-    return results
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    return _run_ablation_cases(ctx, _paired_saddle_cases())
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -169,14 +181,7 @@ def ablation_npe_vs_len(
 
 def _sync_result(result) -> None:
     """Force synchronization on JAX arrays inside result."""
-    if result is None:
-        return
-    if hasattr(result, "x") and hasattr(result.x, "block_until_ready"):
-        result.x.block_until_ready()
-    if hasattr(result, "y") and hasattr(result.y, "block_until_ready"):
-        result.y.block_until_ready()
-    if hasattr(result, "gap") and hasattr(result.gap, "block_until_ready"):
-        result.gap.block_until_ready()
+    sync_result(result)
 
 
 def _time_solve_loop(
@@ -186,16 +191,16 @@ def _time_solve_loop(
 ) -> tuple[list[float], object]:
     """Run ``solve(problem, **kwargs)`` with warmup + n_repeats timed calls."""
     import gc
+
     w_result = None
     for _ in range(config.N_WARMUP):
         w_result = solve(problem, **kwargs)
         _sync_result(w_result)
 
     times: list[float] = []
-    result = w_result  # Fix: Initialize with warmup as the fallback baseline
+    result = w_result
     for _ in range(n_repeats):
         gc.collect()
-        # Synchronize device queue before starting timer
         _ = jnp.zeros(1).block_until_ready()
         t0 = time.perf_counter()
         result = solve(problem, **kwargs)
@@ -211,15 +216,16 @@ def _time_solve_loop(
 
     return times, result
 
+
 def _build_result(
     *,
     solver: str,
+    problem_obj,
     problem: str,
     dim: int,
     epsilon: float,
     times: list[float],
     result,
-    d: int,
     extra: dict | None = None,
     gap_source: str = "unknown",
 ) -> BenchmarkResult:
@@ -238,6 +244,7 @@ def _build_result(
         gap_achieved=result.gap <= epsilon,
         final_gap=float(result.gap),
         iterations=result.iterations,
+        normalized_cost=normalized_cost(problem_obj, result.oracle_stats),
         gap_source=gap_source,
     )
     if extra:
@@ -251,6 +258,29 @@ def _build_result(
     return BenchmarkResult(**kwargs)
 
 
+def _run_ablation_cases(
+    ctx: _AblationContext,
+    cases: list[_AblationCase],
+) -> list[BenchmarkResult]:
+    rows: list[BenchmarkResult] = []
+    for case in cases:
+        problem_obj = case.problem_obj if case.problem_obj is not None else ctx.problem_obj
+        kwargs = {"epsilon": ctx.epsilon, "z0": ctx.benchmark.z0, **case.kwargs}
+        times, result = _time_solve_loop(problem_obj, ctx.n_repeats, kwargs)
+        rows.append(_build_result(
+            solver=case.solver,
+            problem_obj=problem_obj,
+            problem=case.problem_name or ctx.problem_name,
+            dim=ctx.dim,
+            epsilon=ctx.epsilon,
+            times=times,
+            result=result,
+            extra=case.extra,
+            gap_source=ctx.gap_source,
+        ))
+    return rows
+
+
 # ──────────────────────────────────────────────────────────────────────
 # New Experiments
 # ──────────────────────────────────────────────────────────────────────
@@ -261,45 +291,17 @@ def ablation_no_cubic(
     epsilon: float | None = None,
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
-    """Ablation: force ρ=0 in solver when problem has ρ > 0."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-
-    original_problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or original_problem.dim_x
-    d = original_problem.dim_x + original_problem.dim_y
-    gap_source = _gap_source(prob)
-
-    if prob.name and prob.name in ("nonzero_rho", "random_cubic"):
-        seed = prob.meta.seed if prob.meta is not None and prob.meta.seed is not None else None
-        zero_prob = get_problem(prob.name, dim, seed=seed, rho=0.0)
-        problem_no_cubic = zero_prob.problem
-    else:
+    """Ablation: force rho=0 in solver when problem has rho > 0."""
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    if ctx.benchmark.name not in ("nonzero_rho", "random_cubic"):
         return []
 
-    results = []
-    for M_saddle in ("npe", "len"):
-        kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
-        if M_saddle == "len":
-            kwargs["m_lazy"] = 5
-
-        times, result = _time_solve_loop(problem_no_cubic, n_repeats, kwargs)
-        results.append(_build_result(
-            solver=f"aipe_{M_saddle}",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            gap_source=gap_source,
-        ))
-
-    return results
+    seed = ctx.benchmark.meta.seed if ctx.benchmark.meta is not None else None
+    zero_prob = get_problem(ctx.benchmark.name, ctx.dim, seed=seed, rho=0.0)
+    return _run_ablation_cases(
+        ctx,
+        _paired_saddle_cases(problem_obj=zero_prob.problem, problem_name=ctx.problem_name),
+    )
 
 
 def ablation_no_restart(
@@ -308,42 +310,14 @@ def ablation_no_restart(
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Ablation: single-shot AIPE with no restarts."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
-
-    results = []
-    for M_saddle in ("npe", "len"):
-        kwargs = {
-            "epsilon": epsilon,
-            "M_saddle": M_saddle,
-            "z0": prob.z0,
-            "no_restart": True,
-        }
-        if M_saddle == "len":
-            kwargs["m_lazy"] = 5
-
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        results.append(_build_result(
-            solver=f"aipe_{M_saddle}_no_restart",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            gap_source=gap_source,
-        ))
-
-    return results
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    return _run_ablation_cases(
+        ctx,
+        _paired_saddle_cases(
+            solver_suffix="_no_restart",
+            extra_kwargs={"no_restart": True},
+        ),
+    )
 
 
 def ablation_no_acceleration(
@@ -352,42 +326,14 @@ def ablation_no_acceleration(
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Ablation: disable Nesterov acceleration in the outer loop."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
-
-    results = []
-    for M_saddle in ("npe", "len"):
-        kwargs = {
-            "epsilon": epsilon,
-            "M_saddle": M_saddle,
-            "z0": prob.z0,
-            "no_acceleration": True,
-        }
-        if M_saddle == "len":
-            kwargs["m_lazy"] = 5
-
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        results.append(_build_result(
-            solver=f"aipe_{M_saddle}_no_accel",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            gap_source=gap_source,
-        ))
-
-    return results
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    return _run_ablation_cases(
+        ctx,
+        _paired_saddle_cases(
+            solver_suffix="_no_accel",
+            extra_kwargs={"no_acceleration": True},
+        ),
+    )
 
 
 def ablation_fixed_inner(
@@ -397,43 +343,19 @@ def ablation_fixed_inner(
     n_repeats: int | None = None,
 ) -> list[BenchmarkResult]:
     """Ablation: fixed inner-iteration budget sweep."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    if inner_iters_list is None:
-        inner_iters_list = [1, 5, 10, 20, 50, 100]
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-
-    problem = prob.problem
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    d = problem.dim_x + problem.dim_y
-    gap_source = _gap_source(prob)
-
-    rows: list[BenchmarkResult] = []
-    for n_inner in inner_iters_list:
-        kwargs = {
-            "epsilon": epsilon,
-            "M_saddle": "npe",
-            "z0": prob.z0,
-            "fixed_inner_iters": n_inner,
-        }
-
-        times, result = _time_solve_loop(problem, n_repeats, kwargs)
-        rows.append(_build_result(
-            solver="aipe_npe_fixed_inner",
-            problem=name,
-            dim=dim,
-            epsilon=epsilon,
-            times=times,
-            result=result,
-            d=d,
-            extra={"fixed_inner_iters": n_inner},
-            gap_source=gap_source,
-        ))
-
-    return rows
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    inner_iters_list = inner_iters_list or [1, 5, 10, 20, 50, 100]
+    return _run_ablation_cases(
+        ctx,
+        [
+            _AblationCase(
+                solver="aipe_npe_fixed_inner",
+                kwargs={"M_saddle": "npe", "fixed_inner_iters": n_inner},
+                extra={"fixed_inner_iters": n_inner},
+            )
+            for n_inner in inner_iters_list
+        ],
+    )
 
 
 def ablation_init_comparison(
@@ -443,55 +365,36 @@ def ablation_init_comparison(
     seed: int = 42,
 ) -> list[BenchmarkResult]:
     """Ablation: compare initialization strategies."""
-    if epsilon is None:
-        epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
-    assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
-
-    problem = prob.problem
-    d = problem.dim_x + problem.dim_y
-    name = prob.name or "?"
-    dim = prob.dim or problem.dim_x
-    gap_source = _gap_source(prob)
-
+    ctx = _resolve_ablation_context(prob, epsilon=epsilon, n_repeats=n_repeats)
+    d = ctx.problem_obj.dim_x + ctx.problem_obj.dim_y
     key = jax.random.PRNGKey(seed)
     raw_random = jax.random.normal(key, (d,)) * 0.5
     raw_zero = jnp.zeros(d)
+    dx = ctx.problem_obj.dim_x
 
-    proj_x = problem.project_x
-    proj_y = problem.project_y
-    dx = problem.dim_x
-
-    random_z0 = jnp.concatenate([proj_x(raw_random[:dx]), proj_y(raw_random[dx:])])
-    zero_z0 = jnp.concatenate([proj_x(raw_zero[:dx]), proj_y(raw_zero[dx:])])
-    heuristic_z0 = prob.z0
+    random_z0 = jnp.concatenate([
+        ctx.problem_obj.project_x(raw_random[:dx]),
+        ctx.problem_obj.project_y(raw_random[dx:]),
+    ])
+    zero_z0 = jnp.concatenate([
+        ctx.problem_obj.project_x(raw_zero[:dx]),
+        ctx.problem_obj.project_y(raw_zero[dx:]),
+    ])
     init_configs = [
-        ("heuristic", heuristic_z0),
+        ("heuristic", ctx.benchmark.z0),
         ("zero", zero_z0),
         ("random", random_z0),
     ]
 
-    results: list[BenchmarkResult] = []
+    cases: list[_AblationCase] = []
     for init_name, z0 in init_configs:
-        for M_saddle in ("npe", "len"):
-            kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": z0}
-            if M_saddle == "len":
-                kwargs["m_lazy"] = 5
-
-            times, result = _time_solve_loop(problem, n_repeats, kwargs)
-            results.append(_build_result(
-                solver=f"aipe_{M_saddle}",
-                problem=f"{name}_{init_name}",
-                dim=dim,
-                epsilon=epsilon,
-                times=times,
-                result=result,
-                d=d,
-                gap_source=gap_source,
+        for case in _paired_saddle_cases(problem_name=f"{ctx.problem_name}_{init_name}"):
+            cases.append(_AblationCase(
+                solver=case.solver,
+                kwargs={**case.kwargs, "z0": z0},
+                problem_name=case.problem_name,
             ))
-
-    return results
+    return _run_ablation_cases(ctx, cases)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -499,105 +402,91 @@ def ablation_init_comparison(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _format_time_cell(row: BenchmarkResult) -> str:
+    return f"{row.wall_time_mean:>8.4f} [{row.ci[0]:.4f},{row.ci[1]:.4f}]"
+
+
+def _format_cost_cell(row: BenchmarkResult) -> str:
+    return f"{float(row_normalized_cost(row) or 0.0):.2e}"
+
+
+def _render_table(
+    rows: list[BenchmarkResult],
+    columns: list[_TableColumn],
+    *,
+    empty: str = "(no data)",
+) -> str:
+    if not rows:
+        return empty
+
+    header = "  ".join(f"{col.header:{col.align}{col.width}}" for col in columns)
+    lines = [header, "─" * len(header)]
+    for row in rows:
+        lines.append("  ".join(
+            f"{col.render(row):{col.align}{col.width}}"
+            for col in columns
+        ))
+    return "\n".join(lines)
+
+
 def format_ablation_m_table(rows: list[BenchmarkResult]) -> str:
     """Format m_lazy ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'m_lazy':>6}  {'Time (s)':>24}  {'Cost':>11}  {'Gap':>10}"
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
-        lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {r.m_lazy:>6}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.3e}"
-        )
-    return "\n".join(lines)
+    return _render_table(rows, [
+        _TableColumn("Problem", 18, "<", lambda r: r.problem),
+        _TableColumn("Dim", 4, ">", lambda r: str(r.dim)),
+        _TableColumn("m_lazy", 6, ">", lambda r: str(r.m_lazy or 0)),
+        _TableColumn("Time (s)", 24, ">", _format_time_cell),
+        _TableColumn("Cost", 11, ">", _format_cost_cell),
+        _TableColumn("Gap", 10, ">", lambda r: f"{r.final_gap:.3e}"),
+    ])
 
 
 def format_ablation_t_table(rows: list[BenchmarkResult]) -> str:
     """Format npe_T_factor ablation as a text table."""
-    header = f"{'Problem':<18} {'Dim':>4}  {'T_factor':>8}  {'Time (s)':>24}  {'Cost':>11}  {'Gap':>10}"
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        tf = r.npe_T_factor or 0.0
-        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
-        lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {tf:>8.1f}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.3e}"
-        )
-    return "\n".join(lines)
+    return _render_table(rows, [
+        _TableColumn("Problem", 18, "<", lambda r: r.problem),
+        _TableColumn("Dim", 4, ">", lambda r: str(r.dim)),
+        _TableColumn("T_factor", 8, ">", lambda r: f"{float(r.npe_T_factor or 0.0):.1f}"),
+        _TableColumn("Time (s)", 24, ">", _format_time_cell),
+        _TableColumn("Cost", 11, ">", _format_cost_cell),
+        _TableColumn("Gap", 10, ">", lambda r: f"{r.final_gap:.3e}"),
+    ])
 
 
 def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
     """Compare with/without cubic regularization."""
-    if not rows:
-        return "(no data)"
-
-    header = (
-        f"{'Solver':<22} {'Problem':<18} {'Dim':>4}  "
-        f"{'Time (s)':>24}  {'Cost':>11}  {'Iters':>6}  {'Gap':>10}"
-    )
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
-        lines.append(
-            f"{r.solver:<22} {r.problem:<18} {r.dim:>4}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{cost:>11.2e}  {r.iterations:>6}  "
-            f"{r.final_gap:>10.3e}"
-        )
-    return "\n".join(lines)
+    return _render_table(rows, [
+        _TableColumn("Solver", 22, "<", lambda r: r.solver),
+        _TableColumn("Problem", 18, "<", lambda r: r.problem),
+        _TableColumn("Dim", 4, ">", lambda r: str(r.dim)),
+        _TableColumn("Time (s)", 24, ">", _format_time_cell),
+        _TableColumn("Cost", 11, ">", _format_cost_cell),
+        _TableColumn("Iters", 6, ">", lambda r: str(r.iterations)),
+        _TableColumn("Gap", 10, ">", lambda r: f"{r.final_gap:.3e}"),
+    ])
 
 
 def format_ablation_init_table(rows: list[BenchmarkResult]) -> str:
     """Compare initialization strategies."""
-    if not rows:
-        return "(no data)"
-
-    header = (
-        f"{'Variant':<30} {'Solver':<22} {'Dim':>4}  "
-        f"{'Time (s)':>24}  {'Cost':>11}  {'Iters':>6}  {'Gap':>10}"
-    )
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
-        lines.append(
-            f"{r.problem:<30} {r.solver:<22} {r.dim:>4}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{cost:>11.2e}  {r.iterations:>6}  "
-            f"{r.final_gap:>10.3e}"
-        )
-    return "\n".join(lines)
+    return _render_table(rows, [
+        _TableColumn("Variant", 30, "<", lambda r: r.problem),
+        _TableColumn("Solver", 22, "<", lambda r: r.solver),
+        _TableColumn("Dim", 4, ">", lambda r: str(r.dim)),
+        _TableColumn("Time (s)", 24, ">", _format_time_cell),
+        _TableColumn("Cost", 11, ">", _format_cost_cell),
+        _TableColumn("Iters", 6, ">", lambda r: str(r.iterations)),
+        _TableColumn("Gap", 10, ">", lambda r: f"{r.final_gap:.3e}"),
+    ])
 
 
 def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
     """Fixed inner-iteration sweep table."""
-    if not rows:
-        return "(no data)"
-
-    header = (
-        f"{'Problem':<18} {'Dim':>4}  {'Inner':>6}  "
-        f"{'Time (s)':>24}  {'Cost':>11}  {'Outer':>6}  {'Gap':>10}"
-    )
-    sep = "─" * len(header)
-    lines = [header, sep]
-    for r in rows:
-        ci = f"[{r.ci[0]:.4f},{r.ci[1]:.4f}]"
-        
-        inner_val = getattr(r, "fixed_inner_iters", 0)
-        outer_val = getattr(r, "iterations", 0)
-        cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
-        
-        lines.append(
-            f"{r.problem:<18} {r.dim:>4}  {inner_val:>6}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  "
-            f"{cost:>11.2e}  {outer_val:>6}  "
-            f"{r.final_gap:>10.3e}"
-        )
-    return "\n".join(lines)
+    return _render_table(rows, [
+        _TableColumn("Problem", 18, "<", lambda r: r.problem),
+        _TableColumn("Dim", 4, ">", lambda r: str(r.dim)),
+        _TableColumn("Inner", 6, ">", lambda r: str(getattr(r, "fixed_inner_iters", 0) or 0)),
+        _TableColumn("Time (s)", 24, ">", _format_time_cell),
+        _TableColumn("Cost", 11, ">", _format_cost_cell),
+        _TableColumn("Outer", 6, ">", lambda r: str(getattr(r, "iterations", 0))),
+        _TableColumn("Gap", 10, ">", lambda r: f"{r.final_gap:.3e}"),
+    ])

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from benchmarks.baselines import BaselineResult, run_eg_jit_benchmark
 from benchmarks.convergence import _gap_source as convergence_gap_source, sweep_epsilon
 from benchmarks.problems import get_problem
+from benchmarks.run_all import _resolve_scaling_selection, _run_scaling
 from minimax_aipe import OracleStats
 from minimax_aipe.gap import estimate_gap
 from minimax_aipe._framework.api import _maybe_recover_failed_result
@@ -166,6 +167,24 @@ def test_convergence_gap_source_requires_exact_duality_gap():
     assert convergence_gap_source(problem) == "estimated"
 
 
+def test_constrained_benchmark_families_now_have_exact_gap_certificates():
+    box_problem = get_problem("box_quadratic", 5, seed=0)
+    poly_problem = get_problem("bilinear_polytope", 5, seed=0)
+
+    assert box_problem.gap_star == 0.0
+    assert poly_problem.gap_star == 0.0
+    assert convergence_gap_source(box_problem) == "exact"
+    assert convergence_gap_source(poly_problem) == "exact"
+
+
+def test_bilinear_polytope_exact_gap_is_positive_off_saddle():
+    problem = get_problem("bilinear_polytope", 5, seed=0).problem
+    x = jnp.ones(problem.dim_x) * 0.1
+    y = -jnp.ones(problem.dim_y) * 0.1
+    gap = problem.duality_gap(x, y)
+    assert gap > 0.0
+
+
 def test_estimate_gap_nonzero_rho_at_origin_is_finite():
     problem = get_problem("nonzero_rho", 5, seed=0)
     gap = estimate_gap(
@@ -187,3 +206,57 @@ def test_safe_gap_maps_nan_to_inf(monkeypatch):
     )
     gap = _safe_gap(problem, jnp.zeros(problem.dim_x), jnp.zeros(problem.dim_y), 0.1)
     assert gap == float("inf")
+
+
+def test_scaling_selection_honors_single_dim_filters():
+    selected, dim_sweep_dims, fixed_dim, sparsity_dim = _resolve_scaling_selection(
+        ["ill_quadratic"],
+        [10],
+        strict=True,
+    )
+
+    assert selected == {"ill_quadratic"}
+    assert dim_sweep_dims == [10]
+    assert fixed_dim == 10
+    assert sparsity_dim == 10
+
+
+def test_scaling_selection_accepts_scalable_diagonal():
+    selected, dim_sweep_dims, fixed_dim, sparsity_dim = _resolve_scaling_selection(
+        ["scalable_diagonal"],
+        [100, 500, 1000],
+        strict=True,
+    )
+
+    assert selected == {"scalable_diagonal"}
+    assert dim_sweep_dims == [100, 500, 1000]
+    assert fixed_dim == 100
+    assert sparsity_dim == 100
+
+
+def test_run_scaling_preserves_requested_repeat_count(monkeypatch):
+    import benchmarks.scaling as scaling
+
+    calls = []
+
+    def fake_scale_dimension(problem_type, dims, epsilon=None, n_repeats=None, seed=None):
+        calls.append((problem_type, tuple(dims), n_repeats, seed))
+        return []
+
+    monkeypatch.setattr(scaling, "scale_dimension", fake_scale_dimension)
+    monkeypatch.setattr(scaling, "scale_condition_number", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scaling, "scale_rho", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scaling, "scale_sparsity", lambda *args, **kwargs: [])
+    monkeypatch.setattr(scaling, "format_scaling_table", lambda rows, key_col="dim": "(table)")
+
+    _run_scaling(
+        epsilon=0.01,
+        n_repeats=3,
+        seed=42,
+        export_data={},
+        names=["scalable_diagonal"],
+        dims=[100, 500, 1000],
+        strict_names=True,
+    )
+
+    assert calls == [("scalable_diagonal", (100, 500, 1000), 3, 42)]

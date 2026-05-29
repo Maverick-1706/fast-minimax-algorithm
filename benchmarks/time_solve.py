@@ -18,6 +18,7 @@ from minimax_aipe import solve
 from minimax_aipe.framework import _safe_gap
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
+from benchmarks.reporting import gap_source, normalized_cost, row_normalized_cost, sync_result
 from benchmarks.results import BenchmarkResult
 from benchmarks.stats import should_repeat, summarise
 from minimax_aipe.problem import BenchmarkProblem
@@ -196,10 +197,7 @@ def benchmark_solver_comparison(
         # ── AIPE-NPE ───────────────────────────────────────────────
         def run_npe():
             res = solve(problem, epsilon=epsilon, M_saddle="npe", z0=z0)
-            if hasattr(res, "x"): res.x.block_until_ready()
-            if hasattr(res, "y"): res.y.block_until_ready()
-            if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
-                res.gap.block_until_ready()
+            sync_result(res)
             return res
         t_npe = _time_callable(run_npe, n_warmup=None, n_repeats=n_repeats)
         result_npe = t_npe["result"]
@@ -216,6 +214,8 @@ def benchmark_solver_comparison(
             gap_achieved=result_npe.gap <= epsilon,
             final_gap=float(result_npe.gap),
             iterations=result_npe.iterations,
+            normalized_cost=normalized_cost(problem, result_npe.oracle_stats),
+            gap_source=gap_source(problem),
             wall_time_min=t_npe["min"],
             wall_time_max=t_npe["max"],
             n_outliers=t_npe["n_outliers"],
@@ -224,10 +224,7 @@ def benchmark_solver_comparison(
         # ── AIPE-LEN ───────────────────────────────────────────────
         def run_len():
             res = solve(problem, epsilon=epsilon, M_saddle="len", m_lazy=5, z0=z0)
-            if hasattr(res, "x"): res.x.block_until_ready()
-            if hasattr(res, "y"): res.y.block_until_ready()
-            if hasattr(res, "gap") and hasattr(res.gap, "block_until_ready"):
-                res.gap.block_until_ready()
+            sync_result(res)
             return res
             
         t_len = _time_callable(run_len, n_warmup=None, n_repeats=n_repeats)
@@ -245,6 +242,8 @@ def benchmark_solver_comparison(
             gap_achieved=result_len.gap <= epsilon,
             final_gap=float(result_len.gap),
             iterations=result_len.iterations,
+            normalized_cost=normalized_cost(problem, result_len.oracle_stats),
+            gap_source=gap_source(problem),
             wall_time_min=t_len["min"],
             wall_time_max=t_len["max"],
             n_outliers=t_len["n_outliers"],
@@ -279,6 +278,8 @@ def benchmark_solver_comparison(
             gap_achieved=eg_gap <= epsilon,
             final_gap=eg_gap,
             iterations=eg_actual_iters,
+            normalized_cost=normalized_cost(problem, eg_stats),
+            gap_source=gap_source(problem),
             wall_time_min=t_eg["min"],
             wall_time_max=t_eg["max"],
             n_outliers=t_eg["n_outliers"],
@@ -313,6 +314,8 @@ def benchmark_solver_comparison(
             gap_achieved=gda_gap <= epsilon,
             final_gap=gda_gap,
             iterations=gda_actual_iters,
+            normalized_cost=normalized_cost(problem, gda_stats),
+            gap_source=gap_source(problem),
             wall_time_min=t_gda["min"],
             wall_time_max=t_gda["max"],
             n_outliers=t_gda["n_outliers"],
@@ -330,7 +333,7 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
         f"{'Problem':<22} {'Dim':>4}  "
         f"{'AIPE-NPE (Time | NrmCost)':>34}  {'AIPE-LEN (Time | NrmCost)':>34}  "
         f"{'JIT-EG (Time | NrmCost)':>34}  {'JIT-GDA (Time | NrmCost)':>34}  "
-        f"{'AIPE gap':>8}  {'EG gap':>8}  {'GDA gap':>8}"
+        f"{'GapSrc':>8}  {'NPE gap':>8}  {'LEN gap':>8}  {'EG gap':>8}  {'GDA gap':>8}"
     )
     sep = "─" * len(header)
     lines = [header, sep]
@@ -352,30 +355,41 @@ def format_solver_comparison_table(rows: list[BenchmarkResult]) -> str:
             return f"{r.wall_time_mean:.4f} {ci}"
 
         def _format_cost(r: BenchmarkResult | None) -> str:
-            if r is None or getattr(r, "oracle_stats", None) is None:
+            if r is None:
                 return "         --- "
-            d = (r.dim or 1) * 2
-            return f"{r.oracle_stats.normalized_cost(d):.2e}"
+            cost = row_normalized_cost(r)
+            return f"{cost:.2e}" if cost is not None else "         --- "
 
         npe_str = f"{_fmt(npe)} | {_format_cost(npe)}"
         lnn_str = f"{_fmt(lnn)} | {_format_cost(lnn)}"
         eg_str = f"{_fmt(eg)} | {_format_cost(eg)}"
         gda_str = f"{_fmt(gda)} | {_format_cost(gda)}"
 
+        gap_src = (
+            npe.gap_source if npe is not None else
+            lnn.gap_source if lnn is not None else
+            eg.gap_source if eg is not None else
+            gda.gap_source if gda is not None else
+            "unknown"
+        )
         npe_gap = npe.final_gap if npe else 0.0
+        len_gap = lnn.final_gap if lnn else 0.0
         eg_gap = eg.final_gap if eg else 0.0
         gda_gap = gda.final_gap if gda else 0.0
 
         lines.append(
             f"{prob_name:<22} {dim:>4}  {npe_str:>34}  {lnn_str:>34}  {eg_str:>34}  {gda_str:>34}  "
-            f"{npe_gap:>8.4f}  {eg_gap:>8.4f}  {gda_gap:>8.4f}"
+            f"{gap_src:>8}  {npe_gap:>8.4f}  {len_gap:>8.4f}  {eg_gap:>8.4f}  {gda_gap:>8.4f}"
         )
 
     lines.append("")
     lines.append(
-        "Note: NormCost weights are grad=d, hess=d², crn=d³, proj=d, fn_eval=d.  "
-        "CRN-based costs are dominated by the d³ term while gradient-based costs "
-        "are O(d); cross-solver NormCost ratios do not reflect equal-quality work."
+        "Note: GapSrc='estimated' means the displayed gaps are not certified exact duality gaps."
+    )
+    lines.append(
+        "Note: NormCost weights are grad=d, hess=d², crn=d³, proj=d by default. Families with "
+        "expensive custom projections may override the projection weight, so cross-family ratios "
+        "remain approximate rather than exact runtime models."
     )
 
     return "\n".join(lines)

@@ -15,7 +15,7 @@ from minimax_aipe._precision import (
     GAP_FLOOR as _GAP_FLOOR,
 )
 from minimax_aipe.gap import estimate_gap
-from minimax_aipe.problem import MinimaxProblem
+from minimax_aipe.problem import MinimaxProblem, has_exact_gap
 
 
 @dataclass(frozen=True)
@@ -158,15 +158,6 @@ def _compute_loop_params(
         m_lazy=m_lazy,
     )
 
-
-def _has_exact_gap(problem: MinimaxProblem) -> bool:
-    duality_gap = getattr(problem, "duality_gap", None)
-    if duality_gap is None:
-        return False
-    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
-    return duality_gap_fn is not MinimaxProblem.duality_gap
-
-
 def _estimated_gap_budget(problem: MinimaxProblem, epsilon: float) -> tuple[int, int]:
     D = _diameter(problem)
     ell = max(_ell(problem), _ABS_TOL)
@@ -179,7 +170,7 @@ def _estimated_gap_budget(problem: MinimaxProblem, epsilon: float) -> tuple[int,
 
 
 def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> float:
-    if _has_exact_gap(problem):
+    if has_exact_gap(problem):
         gap = problem.duality_gap(x, y)
         if hasattr(gap, "block_until_ready"):
             gap.block_until_ready()

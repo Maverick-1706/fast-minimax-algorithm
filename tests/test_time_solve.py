@@ -8,7 +8,9 @@ from minimax_aipe import solve
 from benchmarks import config
 from benchmarks.export import flatten_speed_rows
 from benchmarks.problems import get_problem
-from benchmarks.time_solve import _time_callable, benchmark_solver_comparison
+from benchmarks.results import BenchmarkResult
+from benchmarks.time_solve import _time_callable, benchmark_solver_comparison, format_solver_comparison_table
+from minimax_aipe import OracleStats
 
 
 def test_time_callable_does_not_add_extra_repeats_for_stable_sample(monkeypatch):
@@ -94,3 +96,51 @@ def test_solve_handles_zero_rho_bilinear_with_or_without_fallback():
     fallback_used = result.history.get("fallback_from_accelerated") is True
     if fallback_used:
         assert result.history["accelerated_gap"] >= float(result.gap)
+
+
+def test_solver_comparison_table_shows_len_gap_and_gap_source():
+    base = dict(
+        problem="bilinear_polytope",
+        dim=10,
+        epsilon=0.01,
+        wall_time_mean=0.01,
+        wall_time_std=0.0,
+        ci=(0.01, 0.01),
+        converged=True,
+        gap_achieved=True,
+        iterations=1,
+        normalized_cost=123.0,
+        gap_source="estimated",
+    )
+    rows = [
+        BenchmarkResult(
+            solver="aipe_npe",
+            oracle_stats=OracleStats(crn_calls=1, oracle_calls=1),
+            final_gap=0.002,
+            **base,
+        ),
+        BenchmarkResult(
+            solver="aipe_len",
+            oracle_stats=OracleStats(crn_calls=1, oracle_calls=1),
+            final_gap=0.003,
+            **base,
+        ),
+        BenchmarkResult(
+            solver="eg",
+            oracle_stats=OracleStats(grad_calls=2, oracle_calls=2, call_type="gradient"),
+            final_gap=0.004,
+            **base,
+        ),
+        BenchmarkResult(
+            solver="gda",
+            oracle_stats=OracleStats(grad_calls=1, oracle_calls=1, call_type="gradient"),
+            final_gap=0.005,
+            **base,
+        ),
+    ]
+
+    table = format_solver_comparison_table(rows)
+
+    assert "LEN gap" in table
+    assert "GapSrc" in table
+    assert "estimated" in table

@@ -19,10 +19,64 @@ import jax
 from minimax_aipe import solve
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark
+from benchmarks.reporting import gap_source, normalized_cost, row_normalized_cost, sync_result
 from benchmarks.results import BenchmarkResult
 from benchmarks.oracles import count_eg_oracles
 from benchmarks.stats import bootstrap_ci
 from minimax_aipe.problem import BenchmarkProblem
+
+
+def _effective_repeats(n_repeats: int | None) -> int:
+    return n_repeats if n_repeats is not None else config.N_REPEATS_SCALING
+
+
+def _time_eg_baseline(
+    prob: BenchmarkProblem,
+    epsilon: float | None,
+    n_repeats: int | None,
+    **opt_fields,
+) -> BenchmarkResult:
+    problem = prob.problem
+    repeats = _effective_repeats(n_repeats)
+
+    warmup = None
+    for _ in range(config.N_WARMUP):
+        warmup = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        sync_result(warmup)
+
+    times = []
+    result = warmup
+    for _ in range(repeats):
+        gc.collect()
+        _ = jax.numpy.zeros(1).block_until_ready()
+        result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        sync_result(result)
+        times.append(result.wall_time)
+
+    if not times:
+        times = [0.0]
+    if result is None:
+        result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
+        sync_result(result)
+
+    stats = count_eg_oracles(result.iterations)
+    return BenchmarkResult(
+        solver="eg",
+        problem=prob.name or "?",
+        dim=prob.dim or problem.dim_x,
+        epsilon=epsilon,
+        wall_time_mean=statistics.mean(times) if times != [0.0] else 0.0,
+        wall_time_std=statistics.stdev(times) if len(times) > 1 else 0.0,
+        ci=bootstrap_ci(times),
+        oracle_stats=stats,
+        converged=result.converged,
+        gap_achieved=result.gap_achieved,
+        final_gap=result.gap,
+        iterations=result.iterations,
+        normalized_cost=normalized_cost(problem, stats),
+        gap_source=gap_source(problem),
+        **opt_fields,
+    )
 
 
 def _time_solve(
@@ -35,8 +89,7 @@ def _time_solve(
     """Time a single solve configuration and return a BenchmarkResult."""
     if epsilon is None:
         epsilon = config.EPSILON_DEFAULT
-    if n_repeats is None:
-        n_repeats = config.N_REPEATS_SCALING
+    repeats = _effective_repeats(n_repeats)
     assert isinstance(prob, BenchmarkProblem), f"Expected BenchmarkProblem, got {type(prob)}"
     problem = prob.problem
     solve_kwargs = {"epsilon": epsilon, "M_saddle": M_saddle, "z0": prob.z0}
@@ -47,32 +100,23 @@ def _time_solve(
     w_res = None
     for _ in range(config.N_WARMUP):
         w_res = solve(problem, **solve_kwargs)
-        if hasattr(w_res, "x"): w_res.x.block_until_ready()
-        if hasattr(w_res, "y"): w_res.y.block_until_ready()
-        if hasattr(w_res, "gap") and hasattr(w_res.gap, "block_until_ready"):
-            w_res.gap.block_until_ready()
+        sync_result(w_res)
 
     times = []
     last_result = w_res  # Use warmup as fallback baseline
-    for _ in range(n_repeats):
+    for _ in range(repeats):
         gc.collect()
         # Synchronize device queue before starting timer
         _ = jax.numpy.zeros(1).block_until_ready()
         t0 = time.perf_counter()
         last_result = solve(problem, **solve_kwargs)
-        if hasattr(last_result, "x"): last_result.x.block_until_ready()
-        if hasattr(last_result, "y"): last_result.y.block_until_ready()
-        if hasattr(last_result, "gap") and hasattr(last_result.gap, "block_until_ready"):
-            last_result.gap.block_until_ready()
-            
+        sync_result(last_result)
         times.append(time.perf_counter() - t0)
 
     if not times:
         times = [0.0]
 
     ci = bootstrap_ci(times)
-    d = problem.dim_x + problem.dim_y
-    
     opt_fields = {k: v for k, v in kwargs.items() if k in (
         "m_lazy", "npe_T_factor", "condition_number", "rho", "sparsity"
     )}
@@ -90,6 +134,8 @@ def _time_solve(
         gap_achieved=last_result.gap <= epsilon,
         final_gap=float(last_result.gap),
         iterations=last_result.iterations,
+        normalized_cost=normalized_cost(problem, last_result.oracle_stats),
+        gap_source=gap_source(problem),
         **opt_fields,
     )
     
@@ -107,53 +153,12 @@ def scale_dimension(
     from benchmarks.problems import get_problem
 
     rows = []
-    for i, dim in enumerate(dims):
-        prob_seed = (seed + i) if seed is not None else None
-        prob = get_problem(problem_type, dim, seed=prob_seed)
-        problem = prob.problem
+    for dim in dims:
+        prob = get_problem(problem_type, dim, seed=seed)
 
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats))
-
-        # (a) Warmup JIT first
-        w_eg = None
-        for _ in range(config.N_WARMUP):
-            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
-
-        # (b) Repeated timed runs
-        if n_repeats is None:
-            n_repeats = config.N_REPEATS_SCALING
-        eg_times = []
-        eg_result = w_eg  # Fix: Initialize with warmup to prevent NoneType bugs
-        for _ in range(n_repeats):
-            gc.collect()
-            eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(eg_result, "x") and eg_result.x is not None: eg_result.x.block_until_ready()
-            if hasattr(eg_result, "y") and eg_result.y is not None: eg_result.y.block_until_ready()
-            eg_times.append(eg_result.wall_time)
-
-        if not eg_times:
-            eg_times = [0.0]
-
-        eg_ci = bootstrap_ci(eg_times)
-        d = dim * 2
-        eg_stats = count_eg_oracles(eg_result.iterations)
-        rows.append(BenchmarkResult(
-            solver="eg",
-            problem=problem_type,
-            dim=dim,
-            epsilon=epsilon,
-            wall_time_mean=statistics.mean(eg_times) if eg_times != [0.0] else 0.0,
-            wall_time_std=statistics.stdev(eg_times) if len(eg_times) > 1 else 0.0,
-            ci=eg_ci,
-            oracle_stats=eg_stats,
-            converged=eg_result.converged,
-            gap_achieved=eg_result.gap_achieved,
-            final_gap=eg_result.gap,
-            iterations=eg_result.iterations,
-        ))
+        rows.append(_time_eg_baseline(prob, epsilon, n_repeats))
 
     return rows
 
@@ -184,54 +189,19 @@ def scale_condition_number(
     from benchmarks.problems import get_problem
 
     rows = []
-    for i, kappa in enumerate(kappas):
-        prob_seed = (seed + i) if seed is not None else None
-        prob = get_problem(problem_type, dim, seed=prob_seed, kappa=kappa)
-        problem = prob.problem
+    for kappa in kappas:
+        prob = get_problem(problem_type, dim, seed=seed, kappa=kappa)
 
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, condition_number=kappa))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, condition_number=kappa))
-
-        w_eg = None
-        for _ in range(config.N_WARMUP):
-            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
-
-        if n_repeats is None:
-            n_repeats = config.N_REPEATS_SCALING
-        eg_times = []
-        eg_result = w_eg  # Fix: Initialize with warmup to prevent NoneType bugs
-        for _ in range(n_repeats):
-            gc.collect()
-            eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(eg_result, "x") and eg_result.x is not None: eg_result.x.block_until_ready()
-            if hasattr(eg_result, "y") and eg_result.y is not None: eg_result.y.block_until_ready()
-            eg_times.append(eg_result.wall_time)
-
-        if not eg_times:
-            eg_times = [0.0]
-
-        eg_ci = bootstrap_ci(eg_times)
-        d = dim * 2
-        eg_stats = count_eg_oracles(eg_result.iterations)
-        
-        eg_res = BenchmarkResult(
-            solver="eg",
-            problem=problem_type,
-            dim=dim,
-            epsilon=epsilon,
-            wall_time_mean=statistics.mean(eg_times) if eg_times != [0.0] else 0.0,
-            wall_time_std=statistics.stdev(eg_times) if len(eg_times) > 1 else 0.0,
-            ci=eg_ci,
-            oracle_stats=eg_stats,
-            converged=eg_result.converged,
-            gap_achieved=eg_result.gap_achieved,
-            final_gap=eg_result.gap,
-            iterations=eg_result.iterations,
-            condition_number=kappa,
+        rows.append(
+            _time_eg_baseline(
+                prob,
+                epsilon,
+                n_repeats,
+                condition_number=kappa,
+            )
         )
-        rows.append(eg_res)
 
     return rows
 
@@ -247,54 +217,12 @@ def scale_rho(
     from benchmarks.problems import get_problem
 
     rows = []
-    for i, rho in enumerate(rho_values):
-        prob_seed = (seed + i) if seed is not None else None
-        prob = get_problem("nonzero_rho", dim, seed=prob_seed, rho=rho)
-        problem = prob.problem
+    for rho in rho_values:
+        prob = get_problem("nonzero_rho", dim, seed=seed, rho=rho)
 
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, rho=2 * rho))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, rho=2 * rho))
-
-        w_eg = None
-        for _ in range(config.N_WARMUP):
-            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
-
-        if n_repeats is None:
-            n_repeats = config.N_REPEATS_SCALING
-        eg_times = []
-        eg_result = w_eg  # Fix: Initialize with warmup to prevent NoneType bugs
-        for _ in range(n_repeats):
-            gc.collect()
-            eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(eg_result, "x") and eg_result.x is not None: eg_result.x.block_until_ready()
-            if hasattr(eg_result, "y") and eg_result.y is not None: eg_result.y.block_until_ready()
-            eg_times.append(eg_result.wall_time)
-
-        if not eg_times:
-            eg_times = [0.0]
-
-        eg_ci = bootstrap_ci(eg_times)
-        d = dim * 2
-        eg_stats = count_eg_oracles(eg_result.iterations)
-        
-        eg_res = BenchmarkResult(
-            solver="eg",
-            problem="nonzero_rho",
-            dim=dim,
-            epsilon=epsilon,
-            wall_time_mean=statistics.mean(eg_times) if eg_times != [0.0] else 0.0,
-            wall_time_std=statistics.stdev(eg_times) if len(eg_times) > 1 else 0.0,
-            ci=eg_ci,
-            oracle_stats=eg_stats,
-            converged=eg_result.converged,
-            gap_achieved=eg_result.gap_achieved,
-            final_gap=eg_result.gap,
-            iterations=eg_result.iterations,
-            rho=2 * rho,
-        )
-        rows.append(eg_res)
+        rows.append(_time_eg_baseline(prob, epsilon, n_repeats, rho=2 * rho))
 
     return rows
 
@@ -311,55 +239,12 @@ def scale_sparsity(
     from benchmarks.problems import get_problem
 
     rows = []
-    for i, sparsity in enumerate(sparsity_values):
-        prob_seed = (seed + i) if seed is not None else None
-        prob = get_problem("diagonal_saddle", dim, seed=prob_seed,
-                           kappa=kappa, sparsity=sparsity)
-        problem = prob.problem
+    for sparsity in sparsity_values:
+        prob = get_problem("diagonal_saddle", dim, seed=seed, kappa=kappa, sparsity=sparsity)
 
         rows.append(_time_solve(prob, epsilon, "npe", n_repeats, sparsity=sparsity))
         rows.append(_time_solve(prob, epsilon, "len", n_repeats, sparsity=sparsity))
-
-        w_eg = None
-        for _ in range(config.N_WARMUP):
-            w_eg = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(w_eg, "x") and w_eg.x is not None: w_eg.x.block_until_ready()
-            if hasattr(w_eg, "y") and w_eg.y is not None: w_eg.y.block_until_ready()
-
-        if n_repeats is None:
-            n_repeats = config.N_REPEATS_SCALING
-        eg_times = []
-        eg_result = w_eg  # Fix: Initialize with warmup to prevent NoneType bugs
-        for _ in range(n_repeats):
-            gc.collect()
-            eg_result = run_eg_jit_benchmark(problem, epsilon=epsilon, z0=prob.z0)
-            if hasattr(eg_result, "x") and eg_result.x is not None: eg_result.x.block_until_ready()
-            if hasattr(eg_result, "y") and eg_result.y is not None: eg_result.y.block_until_ready()
-            eg_times.append(eg_result.wall_time)
-
-        if not eg_times:
-            eg_times = [0.0]
-
-        eg_ci = bootstrap_ci(eg_times)
-        d = dim * 2
-        eg_stats = count_eg_oracles(eg_result.iterations)
-        
-        eg_res = BenchmarkResult(
-            solver="eg",
-            problem="diagonal_saddle",
-            dim=dim,
-            epsilon=epsilon,
-            wall_time_mean=statistics.mean(eg_times) if eg_times != [0.0] else 0.0,
-            wall_time_std=statistics.stdev(eg_times) if len(eg_times) > 1 else 0.0,
-            ci=eg_ci,
-            oracle_stats=eg_stats,
-            converged=eg_result.converged,
-            gap_achieved=eg_result.gap_achieved,
-            final_gap=eg_result.gap,
-            iterations=eg_result.iterations,
-            sparsity=sparsity,
-        )
-        rows.append(eg_res)
+        rows.append(_time_eg_baseline(prob, epsilon, n_repeats, sparsity=sparsity))
 
     return rows
 
@@ -396,16 +281,16 @@ def format_scaling_table(rows: list[BenchmarkResult], key_col: str = "dim") -> s
         eg = next((r for r in group_list if r.solver == "eg"), None)
 
         npe_time = npe.wall_time_mean if npe else 0.0
-        npe_cost = float(npe.oracle_stats.normalized_cost(npe.dim * 2)) if npe and npe.oracle_stats else 0.0
+        npe_cost = row_normalized_cost(npe) if npe else 0.0
         len_time = lnn.wall_time_mean if lnn else 0.0
-        len_cost = float(lnn.oracle_stats.normalized_cost(lnn.dim * 2)) if lnn and lnn.oracle_stats else 0.0
+        len_cost = row_normalized_cost(lnn) if lnn else 0.0
         eg_time = eg.wall_time_mean if eg else 0.0
-        eg_cost = float(eg.oracle_stats.normalized_cost(eg.dim * 2)) if eg and eg.oracle_stats else 0.0
+        eg_cost = row_normalized_cost(eg) if eg else 0.0
 
         lines.append(
-            f"{kv:>8.6g}  {npe_time:>10.4f}  {npe_cost:>11.2e}  "
-            f"{len_time:>10.4f}  {len_cost:>11.2e}  "
-            f"{eg_time:>10.4f}  {eg_cost:>11.2e}"
+            f"{kv:>8.6g}  {npe_time:>10.4f}  {float(npe_cost or 0.0):>11.2e}  "
+            f"{len_time:>10.4f}  {float(len_cost or 0.0):>11.2e}  "
+            f"{eg_time:>10.4f}  {float(eg_cost or 0.0):>11.2e}"
         )
 
     return "\n".join(lines)

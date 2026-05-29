@@ -178,3 +178,32 @@ class TestBackwardCompat:
             dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
             assert len(dep_warnings) >= 1
         assert len(rows) > 0
+
+    @pytest.mark.parametrize(
+        ("fn_name", "kwargs"),
+        [
+            ("scale_condition_number", {"problem_type": "ill_quadratic", "kappas": [10.0, 100.0], "dim": 4}),
+            ("scale_rho", {"rho_values": [0.1, 1.0], "dim": 4}),
+            ("scale_sparsity", {"sparsity_values": [0.1, 0.5], "dim": 8}),
+        ],
+    )
+    def test_scaling_parameter_sweeps_keep_seed_fixed(self, monkeypatch, fn_name, kwargs):
+        import benchmarks.scaling as scaling
+        from benchmarks.problems import get_problem as real_get_problem
+
+        seen_seeds = []
+
+        def fake_get_problem(name, dim, *, seed=None, **inner_kwargs):
+            seen_seeds.append(seed)
+            return real_get_problem("bilinear", 2, seed=0)
+
+        fake_row = real_get_problem("bilinear", 2, seed=0)
+
+        monkeypatch.setattr("benchmarks.problems.get_problem", fake_get_problem)
+        monkeypatch.setattr(scaling, "_time_solve", lambda *args, **inner_kwargs: fake_row)
+        monkeypatch.setattr(scaling, "_time_eg_baseline", lambda *args, **inner_kwargs: fake_row)
+
+        getattr(scaling, fn_name)(seed=7, epsilon=0.5, n_repeats=1, **kwargs)
+
+        assert seen_seeds
+        assert seen_seeds == [7] * len(seen_seeds)

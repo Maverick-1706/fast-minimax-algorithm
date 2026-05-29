@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import Array
 
 from minimax_aipe._precision import PROJ_EPS as _PROJ_EPS
@@ -135,6 +136,83 @@ def _make_polytope_projector(
         return z0 - G.T @ alpha
 
     return project
+
+
+def _polytope_projection_cost_weight(
+    dim: int,
+    n_constraints: int,
+    n_steps: int,
+) -> float:
+    """Gradient-equivalent proxy for one polytope projection call.
+
+    Each dual-FISTA step performs dense matrix-vector products in the
+    constraint space plus a final back-projection.  This is still a proxy,
+    but it avoids treating an inner QP solve like an O(d) clip.
+    """
+    total_dim = max(2 * dim, 1)
+    per_step_work = 2.0 * n_constraints * n_constraints + n_constraints * dim
+    return max(float(total_dim), n_steps * per_step_work / total_dim)
+
+
+def _attach_duality_gap(problem, duality_gap_fn):
+    problem.duality_gap = duality_gap_fn
+    return problem
+
+
+def _solve_box_qp_spd(
+    M: Array,
+    q: Array,
+    *,
+    lower: float = -1.0,
+    upper: float = 1.0,
+) -> tuple[Array, float]:
+    """Solve min 0.5 z^T M z + q^T z subject to lower <= z_i <= upper."""
+    from scipy.optimize import minimize
+
+    M_np = np.asarray(M, dtype=float)
+    q_np = np.asarray(q, dtype=float)
+    try:
+        x0 = -np.linalg.solve(M_np, q_np)
+    except np.linalg.LinAlgError:
+        x0 = np.zeros_like(q_np)
+    x0 = np.clip(x0, lower, upper)
+
+    def obj(z):
+        return 0.5 * z @ M_np @ z + q_np @ z
+
+    def grad(z):
+        return M_np @ z + q_np
+
+    bounds = [(lower, upper)] * q_np.shape[0]
+    res = minimize(obj, x0, jac=grad, bounds=bounds, method="L-BFGS-B")
+    z_star = res.x if np.all(np.isfinite(res.x)) else x0
+    return jnp.asarray(z_star), float(obj(z_star))
+
+
+def _linear_opt_over_polytope(
+    coeff: Array,
+    G: Array,
+    h: Array,
+    *,
+    maximize: bool,
+) -> float:
+    """Solve max/min coeff^T z subject to G z <= h via LP."""
+    from scipy.optimize import linprog
+
+    c_np = np.asarray(coeff, dtype=float)
+    G_np = np.asarray(G, dtype=float)
+    h_np = np.asarray(h, dtype=float)
+    lp_c = -c_np if maximize else c_np
+    res = linprog(
+        lp_c,
+        A_ub=G_np,
+        b_ub=h_np,
+        bounds=[(None, None)] * c_np.shape[0],
+        method="highs",
+    )
+    if not res.success:
+        raise RuntimeError(f"polytope LP failed: {res.message}")
+    return float(-res.fun if maximize else res.fun)
 
 
 # ── Bilinear saddle ────────────────────────────────────────────────────
@@ -447,6 +525,16 @@ def make_box_constrained_quadratic(
         project_x=project_box(-1.0, 1.0),
         project_y=project_box(-1.0, 1.0),
     )
+    def duality_gap(x, y) -> float:
+        x = jnp.asarray(x)
+        y = jnp.asarray(y)
+        y_star = jnp.clip(B.T @ x, -1.0, 1.0)
+        max_val = float(f(x, y_star))
+        x_star, _ = _solve_box_qp_spd(Q, B @ y, lower=-1.0, upper=1.0)
+        min_val = float(f(x_star, y))
+        return max(0.0, max_val - min_val)
+
+    _attach_duality_gap(problem, duality_gap)
     mu_x = float(jnp.min(jnp.linalg.eigvalsh(Q)))
     mu_y = float(jnp.min(jnp.linalg.eigvalsh(R)))
     return BenchmarkProblem(
@@ -866,19 +954,28 @@ def make_bilinear_polytope(
     V, _ = jnp.linalg.qr(jax.random.normal(k2, (dim, dim)))
     sigmas = jnp.ones(dim)  # κ = 1 for simplicity
     A = U @ jnp.diag(sigmas) @ V.T
+    D = 4.0
 
-    # Random polytope constraints: Gz ≤ h, with origin feasible (h > 0)
-    G_x = jax.random.normal(k3, (n_constraints, dim))
-    G_y = jax.random.normal(k4, (n_constraints, dim))
-    h_x = jnp.abs(jax.random.uniform(k5, (n_constraints,))) + 0.5
+    # Random polytope constraints: Gz ≤ h, with origin feasible (h > 0).
+    # Add box constraints explicitly so the family is genuinely compact.
+    G_x_rand = jax.random.normal(k3, (n_constraints, dim))
+    G_y_rand = jax.random.normal(k4, (n_constraints, dim))
+    h_x_rand = jnp.abs(jax.random.uniform(k5, (n_constraints,))) + 0.5
     k6, _ = jax.random.split(k5)
-    h_y = jnp.abs(jax.random.uniform(k6, (n_constraints,))) + 0.5
+    h_y_rand = jnp.abs(jax.random.uniform(k6, (n_constraints,))) + 0.5
+    eye = jnp.eye(dim)
+    G_box = jnp.concatenate([eye, -eye], axis=0)
+    h_box = jnp.full((2 * dim,), D / 2.0)
+    G_x = jnp.concatenate([G_x_rand, G_box], axis=0)
+    G_y = jnp.concatenate([G_y_rand, G_box], axis=0)
+    h_x = jnp.concatenate([h_x_rand, h_box], axis=0)
+    h_y = jnp.concatenate([h_y_rand, h_box], axis=0)
 
-    project_x = _make_polytope_projector(G_x, h_x)
-    project_y = _make_polytope_projector(G_y, h_y)
+    project_steps = 200
+    project_x = _make_polytope_projector(G_x, h_x, n_steps=project_steps)
+    project_y = _make_polytope_projector(G_y, h_y, n_steps=project_steps)
 
     ell = float(jnp.linalg.norm(A, ord=2))
-    D = 4.0
 
     def f(x, y):
         return x @ A @ y
@@ -897,6 +994,19 @@ def make_bilinear_polytope(
         project_x=project_x,
         project_y=project_y,
     )
+    problem.projection_cost_weight = _polytope_projection_cost_weight(
+        dim,
+        int(G_x.shape[0]),
+        project_steps,
+    )
+    def duality_gap(x, y) -> float:
+        x = jnp.asarray(x)
+        y = jnp.asarray(y)
+        max_term = _linear_opt_over_polytope(A.T @ x, G_y, h_y, maximize=True)
+        min_term = _linear_opt_over_polytope(A @ y, G_x, h_x, maximize=False)
+        return max(0.0, max_term - min_term)
+
+    _attach_duality_gap(problem, duality_gap)
     return BenchmarkProblem(
         problem=problem,
         x_star=jnp.zeros(dim),

@@ -114,7 +114,9 @@ class BenchmarkResult:
         
         # Export normalized_cost (gradient-equivalent FLOP units) for
         # cross-solver comparison in downstream analysis.
-        if self.dim:
+        if self.normalized_cost is not None:
+            d["normalized_cost"] = float(self.normalized_cost)
+        elif self.dim:
             d["normalized_cost"] = float(
                 self.oracle_stats.normalized_cost(self.dim * 2)
             ) if self.oracle_stats else 0.0

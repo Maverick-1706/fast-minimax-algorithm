@@ -32,6 +32,7 @@ from benchmarks.export import (
     write_metadata,
 )
 from benchmarks import config
+from benchmarks.reporting import row_normalized_cost
 from benchmarks.problems import get_all_problems, get_problem
 
 
@@ -50,7 +51,7 @@ def _platform_info() -> str:
     )
 
 
-def _parse_args():
+def _parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Benchmark suite for Minimax-AIPE solver.")
     parser.add_argument("--epsilon", type=float, default=config.EPSILON_DEFAULT, help=f"Target duality gap (default: {config.EPSILON_DEFAULT}). Used as the minimum epsilon in convergence sweeps.")
     parser.add_argument("--dims", type=str, default=None, help="Comma-separated dimensions.")
@@ -63,7 +64,7 @@ def _parse_args():
     parser.add_argument("--seed", type=int, default=None, help="Deterministic seed for all problem constructors.")
     parser.add_argument("--output", type=str, default=None, metavar="FMT[:PATH]",
                         help="Export: 'csv', 'json', 'csv:out.csv', 'json:out.json'.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _convergence_epsilons(min_epsilon: float) -> list[float]:
@@ -111,66 +112,148 @@ def _run_jit(problems, epsilon, n_repeats, export_data):
     export_data["jit_vs_eager"] = flatten_jit_rows(jit_rows)
 
 
-def _run_scaling(epsilon, n_repeats, seed, export_data):
+_SCALING_FAMILIES = {
+    "diagonal_saddle",
+    "scalable_diagonal",
+    "ill_quadratic",
+    "bilinear",
+    "nonzero_rho",
+}
+
+
+def _resolve_scaling_selection(names, dims, *, strict: bool):
+    requested = set(names) if names else set(_SCALING_FAMILIES)
+    selected = requested & _SCALING_FAMILIES
+    unknown = sorted(requested - _SCALING_FAMILIES)
+    if strict and unknown:
+        known = ", ".join(sorted(_SCALING_FAMILIES))
+        raise ValueError(
+            f"--section scaling only supports --names from {{{known}}}; got {', '.join(unknown)}"
+        )
+    if not selected:
+        return set(), dims or [2, 5, 10, 20], 10, 100
+
+    if dims is None:
+        dim_sweep_dims = [2, 5, 10, 20]
+        fixed_dim = 10
+        sparsity_dim = 100
+    else:
+        dim_sweep_dims = dims
+        if len(dims) != 1 and selected & {"ill_quadratic", "nonzero_rho"}:
+            raise ValueError(
+                "--section scaling uses --dims as a fixed dimension for condition/ρ sweeps; "
+                "pass a single value when selecting ill_quadratic or nonzero_rho."
+            )
+        fixed_dim = dims[0]
+        sparsity_dim = dims[0]
+
+    return selected, dim_sweep_dims, fixed_dim, sparsity_dim
+
+
+def _print_one_solver_scaling(rows, key_name, attr_name):
+    npe_rows = [r for r in rows if r.solver == "aipe_npe"]
+    header = f"{key_name:>8}  {'NPE (s)':>10}  {'NPE cost':>11}"
+    print(header)
+    print("─" * len(header))
+    for r in npe_rows:
+        cost = row_normalized_cost(r) or 0.0
+        print(f"{getattr(r, attr_name, 0.0):>8.2f}  {r.wall_time_mean:>10.4f}  {cost:>11.2e}")
+
+
+def _run_scaling(epsilon, n_repeats, seed, export_data, *, names=None, dims=None, strict_names=False):
     from benchmarks.scaling import scale_dimension, scale_rho, scale_condition_number, scale_sparsity, format_scaling_table
     print(_header("Scaling Analysis"))
+    selected, dim_sweep_dims, fixed_dim, sparsity_dim = _resolve_scaling_selection(
+        names,
+        dims,
+        strict=strict_names,
+    )
+    if not selected:
+        print("  [skip] no scaling-compatible families selected")
+        print()
+        return
+    scaling_repeats = max(1, n_repeats)
 
-    scale_dims = [2, 5, 10, 20]
+    if "diagonal_saddle" in selected:
+        print("  diagonal_saddle (dimension):")
+        rows = scale_dimension(
+            "diagonal_saddle",
+            dim_sweep_dims,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        print(format_scaling_table(rows))
+        export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
+        print()
 
-    # Dimension scaling on diagonal_saddle
-    print("  diagonal_saddle (dimension):")
-    rows = scale_dimension("diagonal_saddle", scale_dims, epsilon=epsilon,
-                           n_repeats=max(1, n_repeats // 2), seed=seed)
-    print(format_scaling_table(rows))
-    export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
-    print()
+    if "scalable_diagonal" in selected:
+        scalable_dims = dims if dims is not None else [100, 500, 1000]
+        print("  scalable_diagonal (dimension):")
+        rows = scale_dimension(
+            "scalable_diagonal",
+            scalable_dims,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        print(format_scaling_table(rows))
+        export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
+        print()
 
-    # Condition number scaling
-    print("  ill_conditioned_quadratic (condition number sweep):")
-    cond_rows = scale_condition_number("ill_quadratic", kappas=[1e1, 1e2, 1e3, 1e4], dim=10, epsilon=epsilon,
-                                       n_repeats=max(1, n_repeats // 2), seed=seed)
-    # BUG FIX: Added explicit key_col so groupby doesn't squash the distinct condition numbers
-    print(format_scaling_table(cond_rows, key_col="kappa"))
-    export_data.setdefault("scaling_cond", []).extend(flatten_scaling_rows(cond_rows))
-    print()
+    if "ill_quadratic" in selected:
+        print("  ill_conditioned_quadratic (condition number sweep):")
+        cond_rows = scale_condition_number(
+            "ill_quadratic",
+            kappas=[1e1, 1e2, 1e3, 1e4],
+            dim=fixed_dim,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        print(format_scaling_table(cond_rows, key_col="kappa"))
+        export_data.setdefault("scaling_cond", []).extend(flatten_scaling_rows(cond_rows))
+        print()
 
-    # Dimension scaling on bilinear
-    print("  bilinear (dimension):")
-    rows = scale_dimension("bilinear", scale_dims, epsilon=epsilon,
-                           n_repeats=max(1, n_repeats // 2), seed=seed)
-    print(format_scaling_table(rows))
-    export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
-    print()
+    if "bilinear" in selected:
+        print("  bilinear (dimension):")
+        rows = scale_dimension(
+            "bilinear",
+            dim_sweep_dims,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        print(format_scaling_table(rows))
+        export_data.setdefault("scaling_dim", []).extend(flatten_scaling_rows(rows))
+        print()
 
-    # ρ scaling
-    print("  nonzero_rho (ρ sweep):")
-    rho_rows = scale_rho([0.1, 0.5, 1.0, 5.0, 10.0], dim=10, epsilon=epsilon,
-                         n_repeats=max(1, n_repeats // 2), seed=seed)
-    npe_rows = [r for r in rho_rows if r.solver == "aipe_npe"]
-    header = f"{'ρ':>8}  {'NPE (s)':>10}  {'NPE cost':>11}"
-    print(header)
-    print("─" * len(header))
-    for r in npe_rows:
-        d = r.dim * 2
-        cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
-        print(f"{getattr(r, 'rho', 0.0):>8.1f}  {r.wall_time_mean:>10.4f}  {cost:>11.2e}")
-    export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
-    print()
+    if "nonzero_rho" in selected:
+        print("  nonzero_rho (ρ sweep):")
+        rho_rows = scale_rho(
+            [0.1, 0.5, 1.0, 5.0, 10.0],
+            dim=fixed_dim,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        _print_one_solver_scaling(rho_rows, "ρ", "rho")
+        export_data.setdefault("scaling_rho", []).extend(flatten_scaling_rows(rho_rows))
+        print()
 
-    # Sparsity scaling
-    print("  diagonal_saddle (sparsity sweep):")
-    sparsity_rows = scale_sparsity([0.0, 0.3, 0.6, 0.9], dim=100, kappa=1e4, epsilon=epsilon,
-                                   n_repeats=max(1, n_repeats // 2), seed=seed)
-    npe_rows = [r for r in sparsity_rows if r.solver == "aipe_npe"]
-    header = f"{'sparsity':>8}  {'NPE (s)':>10}  {'NPE cost':>11}"
-    print(header)
-    print("─" * len(header))
-    for r in npe_rows:
-        d = r.dim * 2
-        cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
-        print(f"{getattr(r, 'sparsity', 0.0):>8.2f}  {r.wall_time_mean:>10.4f}  {cost:>11.2e}")
-    export_data.setdefault("scaling_sparsity", []).extend(flatten_scaling_rows(sparsity_rows))
-    print()
+    if "diagonal_saddle" in selected:
+        print("  diagonal_saddle (sparsity sweep):")
+        sparsity_rows = scale_sparsity(
+            [0.0, 0.3, 0.6, 0.9],
+            dim=sparsity_dim,
+            kappa=1e4,
+            epsilon=epsilon,
+            n_repeats=scaling_repeats,
+            seed=seed,
+        )
+        _print_one_solver_scaling(sparsity_rows, "sparsity", "sparsity")
+        export_data.setdefault("scaling_sparsity", []).extend(flatten_scaling_rows(sparsity_rows))
+        print()
     
 def _run_memory(problems, epsilon, export_data):
     from benchmarks.memory import benchmark_memory_scaling, format_memory_table
@@ -339,8 +422,7 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
             prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
         )
         for r in no_restart_rows:
-            d = r.dim * 2
-            cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
+            cost = float(row_normalized_cost(r) or 0.0)
             print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
                   f"cost={cost:.2e}  "
                   f"time={r.wall_time_mean:.4f}s")
@@ -361,8 +443,7 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
             prob0, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
         )
         for r in no_accel_rows:
-            d = r.dim * 2
-            cost = float(r.oracle_stats.normalized_cost(d)) if r.oracle_stats else 0
+            cost = float(row_normalized_cost(r) or 0.0)
             print(f"    {r.solver:<28s} gap={r.final_gap:.6f}  "
                   f"cost={cost:.2e}  "
                   f"time={r.wall_time_mean:.4f}s")
@@ -393,8 +474,8 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     print()
 
 
-def main():
-    args = _parse_args()
+def main(argv: list[str] | None = None):
+    args = _parse_args(argv)
 
     dims = [int(d.strip()) for d in args.dims.split(",")] if args.dims else None
     names = [n.strip() for n in args.names.split(",")] if args.names else None
@@ -458,7 +539,15 @@ def main():
         _run_jit(problems, epsilon, n_repeats, export_data)
 
     if args.section in ("all", "scaling"):
-        _run_scaling(epsilon, n_repeats, args.seed, export_data)
+        _run_scaling(
+            epsilon,
+            n_repeats,
+            args.seed,
+            export_data,
+            names=names,
+            dims=dims,
+            strict_names=(args.section == "scaling"),
+        )
 
     if args.section in ("all", "memory"):
         _run_memory(problems, epsilon, export_data)

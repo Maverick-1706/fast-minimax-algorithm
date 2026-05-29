@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import jax.numpy as jnp
 from jax import Array
 
 from minimax_aipe.oracles import eg_step
-from minimax_aipe.problem import OracleStats, SolverResult, MinimaxProblem
+from minimax_aipe.problem import OracleStats, SolverResult, MinimaxProblem, has_exact_gap
 from minimax_aipe._precision import ABS_TOL as _ABS_TOL
 from minimax_aipe._framework.loops import _algorithm_3, _build_oracle_stats
 from minimax_aipe._framework.oracles import _maximize_y_auto
@@ -17,7 +17,6 @@ from minimax_aipe._framework.params import (
     _compute_loop_params,
     _diam,
     _ell,
-    _has_exact_gap,
     _normalize_initial_z,
     _resolve_gamma,
     _safe_gap,
@@ -57,6 +56,151 @@ def _build_solver_setup(
     return resolved_gamma, mu_x, mu_y, solver_problem, params, z0_start
 
 
+def _run_outer_epoch(pipeline, x: Array, warm_y: Optional[Array], *, no_acceleration: bool):
+    if not no_acceleration:
+        return pipeline.run_outer_epoch(x, warm_y)
+    if warm_y is not None:
+        x_new, _u, y_new, inner_calls = pipeline.prox_phi(x, warm_y)
+    else:
+        x_new, _u, y_new, inner_calls = pipeline.prox_phi(x)
+    return x_new, 1, y_new, inner_calls
+
+
+def _build_solver_history(
+    *,
+    gamma: float,
+    mu_x: float,
+    mu_y: float,
+    solver_problem: MinimaxProblem,
+    params,
+    M_saddle: str,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    history = {
+        "gamma": gamma,
+        "mu_x": mu_x,
+        "mu_y": mu_y,
+        "epsilon_regularized": True,
+        "regularized_rho": solver_problem.rho,
+        "regularized_ell": solver_problem.ell,
+        "zeta_1": params.zeta_1,
+        "zeta_2": params.zeta_2,
+        "zeta_3": params.zeta_3,
+        "T_outer": params.T_outer,
+        "S_outer": params.S_outer,
+        "T_middle": params.T_middle,
+        "S_middle": params.S_middle,
+        "T_inner": params.T_inner,
+        "S_inner": params.S_inner,
+        "M_saddle": M_saddle,
+    }
+    if extra:
+        history.update(extra)
+    return history
+
+
+def _pack_solver_result(
+    problem: MinimaxProblem,
+    epsilon: float,
+    *,
+    gamma: float,
+    mu_x: float,
+    mu_y: float,
+    solver_problem: MinimaxProblem,
+    params,
+    M_saddle: str,
+    z_candidate: Array,
+    stats_array,
+    outer_epochs: int,
+    final_y_calls: Array,
+    history_extra: Optional[dict[str, Any]] = None,
+    apply_final_eg: bool = True,
+) -> SolverResult:
+    if apply_final_eg:
+        eta = 1.0 / (2.0 * max(_ell(problem), _ABS_TOL))
+        z_out, _cert = eg_step(problem, z_candidate, eta)
+    else:
+        z_out = z_candidate
+    x_out, y_out = _split(problem, z_out)
+    gap = _safe_gap(problem, x_out, y_out, epsilon)
+    if hasattr(gap, "block_until_ready"):
+        gap.block_until_ready()
+
+    actual_outer = int(jnp.maximum(1, outer_epochs).item())
+    oracle_stats = _build_oracle_stats(
+        solver_problem, M_saddle, params, stats_array, actual_outer, final_y_calls,
+    )
+    return SolverResult(
+        x=x_out,
+        y=y_out,
+        gap=gap,
+        iterations=actual_outer,
+        oracle_calls=oracle_stats.oracle_calls,
+        oracle_stats=oracle_stats,
+        converged=gap <= epsilon,
+        history=_build_solver_history(
+            gamma=gamma,
+            mu_x=mu_x,
+            mu_y=mu_y,
+            solver_problem=solver_problem,
+            params=params,
+            M_saddle=M_saddle,
+            extra=history_extra,
+        ),
+    )
+
+
+def _maybe_use_non_accelerated_fallback(
+    result: SolverResult,
+    *,
+    solve_fn,
+    problem: MinimaxProblem,
+    epsilon: float,
+    gamma: float,
+    M_saddle: str,
+    m_lazy: int,
+    npe_T_factor: float,
+    z0: Array,
+    no_restart: bool,
+    fixed_inner_iters: Optional[int],
+    history_extra: Optional[dict[str, Any]] = None,
+    verbose: bool = False,
+    max_recovery_calls: Optional[int] = None,
+) -> SolverResult:
+    if (
+        result.converged
+        or M_saddle != "npe"
+        or float(problem.rho or 0.0) > 0.0
+    ):
+        return result
+
+    fallback_kwargs = {
+        "gamma": gamma,
+        "M_saddle": M_saddle,
+        "m_lazy": m_lazy,
+        "npe_T_factor": npe_T_factor,
+        "z0": z0,
+        "no_restart": no_restart,
+        "no_acceleration": True,
+        "fixed_inner_iters": fixed_inner_iters,
+    }
+    if solve_fn is solve:
+        fallback_kwargs["verbose"] = verbose
+        fallback_kwargs["_max_recovery_calls"] = max_recovery_calls
+
+    fallback = solve_fn(problem, epsilon, **fallback_kwargs)
+    if float(fallback.gap) >= float(result.gap):
+        return result
+
+    fallback_history = dict(fallback.history or {})
+    fallback_history["fallback_from_accelerated"] = True
+    fallback_history["accelerated_gap"] = float(result.gap)
+    fallback_history["accelerated_iterations"] = result.iterations
+    if history_extra:
+        fallback_history.update(history_extra)
+    return fallback._replace(history=fallback_history)
+
+
 def solve(
     problem: MinimaxProblem,
     epsilon: float,
@@ -92,66 +236,37 @@ def solve(
         params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
         no_acceleration=no_acceleration,
     )
-    eta = 1.0 / (2.0 * max(_ell(problem), _ABS_TOL))
-    z_out, _cert = eg_step(problem, z_hat, eta)
-    x_out, y_out = _split(problem, z_out)
-    gap = _safe_gap(problem, x_out, y_out, epsilon)
-    if hasattr(gap, "block_until_ready"):
-        gap.block_until_ready()
-
-    history = {
-        "gamma": gamma,
-        "mu_x": mu_x,
-        "mu_y": mu_y,
-        "epsilon_regularized": True,
-        "regularized_rho": solver_problem.rho,
-        "regularized_ell": solver_problem.ell,
-        "zeta_1": params.zeta_1,
-        "zeta_2": params.zeta_2,
-        "zeta_3": params.zeta_3,
-        "T_outer": params.T_outer,
-        "S_outer": params.S_outer,
-        "T_middle": params.T_middle,
-        "S_middle": params.S_middle,
-        "T_inner": params.T_inner,
-        "S_inner": params.S_inner,
-        "M_saddle": M_saddle,
-    }
-
-    actual_outer = int(jnp.maximum(1, outer_epochs).item())
-    oracle_stats = _build_oracle_stats(
-        solver_problem, M_saddle, params, stats_array, actual_outer, final_y_calls,
-    )
-    result = SolverResult(
-        x=x_out,
-        y=y_out,
-        gap=gap,
-        iterations=actual_outer,
-        oracle_calls=oracle_stats.oracle_calls,
-        oracle_stats=oracle_stats,
-        converged=gap <= epsilon,
-        history=history,
+    result = _pack_solver_result(
+        problem,
+        epsilon,
+        gamma=gamma,
+        mu_x=mu_x,
+        mu_y=mu_y,
+        solver_problem=solver_problem,
+        params=params,
+        M_saddle=M_saddle,
+        z_candidate=z_hat,
+        stats_array=stats_array,
+        outer_epochs=outer_epochs,
+        final_y_calls=final_y_calls,
     )
 
-    if (
-        not result.converged
-        and not no_acceleration
-        and M_saddle == "npe"
-        and float(problem.rho or 0.0) <= 0.0
-    ):
-        fallback = solve(
-            problem, epsilon, gamma=gamma, M_saddle=M_saddle, m_lazy=m_lazy,
-            npe_T_factor=npe_T_factor, z0=z0_start, verbose=verbose,
-            no_restart=no_restart, no_acceleration=True,
+    if not no_acceleration:
+        result = _maybe_use_non_accelerated_fallback(
+            result,
+            solve_fn=solve,
+            problem=problem,
+            epsilon=epsilon,
+            gamma=gamma,
+            M_saddle=M_saddle,
+            m_lazy=m_lazy,
+            npe_T_factor=npe_T_factor,
+            z0=z0_start,
+            no_restart=no_restart,
             fixed_inner_iters=fixed_inner_iters,
-            _max_recovery_calls=_max_recovery_calls,
+            verbose=verbose,
+            max_recovery_calls=_max_recovery_calls,
         )
-        if float(fallback.gap) < float(result.gap):
-            fallback_history = dict(fallback.history or {})
-            fallback_history["fallback_from_accelerated"] = True
-            fallback_history["accelerated_gap"] = float(result.gap)
-            fallback_history["accelerated_iterations"] = result.iterations
-            result = fallback._replace(history=fallback_history)
 
     return _maybe_recover_failed_result(
         result, problem, epsilon, gamma=gamma, M_saddle=M_saddle,
@@ -190,23 +305,15 @@ def solve_outer_trace(
     x_cur, _ = _split(problem, z0_start)
     pipeline = _get_pipeline(solver_problem, gamma, params, M_saddle)
 
-    if no_acceleration:
-        def epoch_fn(x: Array, w: Optional[Array] = None):
-            if w is not None:
-                x_new, _u, y_new, inner_calls = pipeline.prox_phi(x, w)
-            else:
-                x_new, _u, y_new, inner_calls = pipeline.prox_phi(x)
-            return x_new, 1, y_new, inner_calls
-    else:
-        epoch_fn = pipeline.run_outer_epoch
-
     warm_y = None
     total_inner_calls = jnp.zeros(3, dtype=jnp.int32)
+    final_y_calls = jnp.zeros(3, dtype=jnp.int32)
     gap_endpoints: list[float] = []
     oracle_endpoints: list[float] = []
     d = problem.dim_x + problem.dim_y
     final_x = x_cur
     final_y = problem.project_y(jnp.zeros(problem.dim_y, dtype=x_cur.dtype))
+    final_z = jnp.concatenate([final_x, final_y])
     final_gap = float("inf")
     final_stats = OracleStats()
     epochs_used = 0
@@ -215,7 +322,9 @@ def solve_outer_trace(
     best_oracle_cost = 0.0
 
     for epoch in range(params.S_outer):
-        x_new, _calls, warm_y_new, epoch_inner = epoch_fn(x_cur, warm_y)
+        x_new, _calls, warm_y_new, epoch_inner = _run_outer_epoch(
+            pipeline, x_cur, warm_y, no_acceleration=no_acceleration,
+        )
         x_new.block_until_ready()
         total_inner_calls = total_inner_calls + _stats_array(epoch_inner)
         epochs_used = epoch + 1
@@ -229,6 +338,7 @@ def solve_outer_trace(
             problem, jnp.concatenate([x_new, y_hat]),
             1.0 / (2.0 * max(_ell(problem), _ABS_TOL)),
         )
+        final_z = z_refined
         final_x, final_y = _split(problem, z_refined)
         final_gap = _safe_gap(problem, final_x, final_y, epsilon)
         final_stats = _build_oracle_stats(
@@ -248,59 +358,44 @@ def solve_outer_trace(
         if step <= params.zeta_1:
             break
 
-    history = {
-        "gamma": gamma,
-        "mu_x": mu_x,
-        "mu_y": mu_y,
-        "epsilon_regularized": True,
-        "regularized_rho": solver_problem.rho,
-        "regularized_ell": solver_problem.ell,
-        "zeta_1": params.zeta_1,
-        "zeta_2": params.zeta_2,
-        "zeta_3": params.zeta_3,
-        "T_outer": params.T_outer,
-        "S_outer": params.S_outer,
-        "T_middle": params.T_middle,
-        "S_middle": params.S_middle,
-        "T_inner": params.T_inner,
-        "S_inner": params.S_inner,
-        "M_saddle": M_saddle,
+    result = _pack_solver_result(
+        problem,
+        epsilon,
+        gamma=gamma,
+        mu_x=mu_x,
+        mu_y=mu_y,
+        solver_problem=solver_problem,
+        params=params,
+        M_saddle=M_saddle,
+        z_candidate=final_z,
+        stats_array=total_inner_calls,
+        outer_epochs=epochs_used,
+        final_y_calls=final_y_calls,
+        history_extra={
         "gap_endpoints": gap_endpoints,
         "oracle_endpoints": oracle_endpoints,
         "best_gap": best_gap,
         "best_gap_epoch": best_gap_epoch,
         "best_oracle_cost": best_oracle_cost,
-    }
-
-    result = SolverResult(
-        x=final_x,
-        y=final_y,
-        gap=final_gap,
-        iterations=epochs_used,
-        oracle_calls=final_stats.oracle_calls,
-        oracle_stats=final_stats,
-        converged=final_gap <= epsilon,
-        history=history,
+        },
+        apply_final_eg=False,
     )
 
-    if (
-        not result.converged
-        and not no_acceleration
-        and M_saddle == "npe"
-        and float(problem.rho or 0.0) <= 0.0
-    ):
-        fallback = solve_outer_trace(
-            problem, epsilon, gamma=gamma, M_saddle=M_saddle, m_lazy=m_lazy,
-            npe_T_factor=npe_T_factor, z0=z0_start, no_restart=no_restart,
-            no_acceleration=True, fixed_inner_iters=fixed_inner_iters,
+    if not no_acceleration:
+        return _maybe_use_non_accelerated_fallback(
+            result,
+            solve_fn=solve_outer_trace,
+            problem=problem,
+            epsilon=epsilon,
+            gamma=gamma,
+            M_saddle=M_saddle,
+            m_lazy=m_lazy,
+            npe_T_factor=npe_T_factor,
+            z0=z0_start,
+            no_restart=no_restart,
+            fixed_inner_iters=fixed_inner_iters,
+            history_extra={"accelerated_gap_endpoints": gap_endpoints},
         )
-        if float(fallback.gap) < float(result.gap):
-            fallback_history = dict(fallback.history or {})
-            fallback_history["fallback_from_accelerated"] = True
-            fallback_history["accelerated_gap"] = float(result.gap)
-            fallback_history["accelerated_iterations"] = result.iterations
-            fallback_history["accelerated_gap_endpoints"] = gap_endpoints
-            return fallback._replace(history=fallback_history)
 
     return result
 
@@ -333,7 +428,7 @@ def _maybe_recover_failed_result(
     resolved_max_recovery_calls = (
         max_recovery_calls
         if max_recovery_calls is not None
-        else (3 if _has_exact_gap(problem) else 0)
+        else (3 if has_exact_gap(problem) else 0)
     )
     if resolved_max_recovery_calls <= 0:
         return result
