@@ -40,6 +40,7 @@ from minimax_aipe._framework.surrogates import (
     _cubic_hess,
     _make_g_problem,
     _make_h_problem,
+    make_epsilon_regularized_problem,
 )
 from minimax_aipe._framework.types import _CallCounter
 
@@ -57,6 +58,7 @@ __all__ = [
     "_iProx_Psi",
     "_make_g_problem",
     "_make_h_problem",
+    "make_epsilon_regularized_problem",
     "_make_phi_oracle",
     "_make_psi_oracle",
     "_restart_with_early_stop",

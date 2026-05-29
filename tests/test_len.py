@@ -483,7 +483,7 @@ class TestTripleLoopIntegration:
         """The LEN solver wrapper should solve a cubic-regularised subproblem."""
         problem = _nonlinear_problem(rho=0.5)
         gamma_outer = 0.5
-        m = 3
+        m = 4
 
         from minimax_aipe.framework import _make_h_problem
 

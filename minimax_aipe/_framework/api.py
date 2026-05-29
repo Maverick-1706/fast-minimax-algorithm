@@ -17,6 +17,7 @@ from minimax_aipe._framework.params import (
     _compute_loop_params,
     _diam,
     _ell,
+    _has_exact_gap,
     _normalize_initial_z,
     _resolve_gamma,
     _safe_gap,
@@ -24,6 +25,7 @@ from minimax_aipe._framework.params import (
     _validate_solver_inputs,
 )
 from minimax_aipe._framework.pipeline import _get_pipeline
+from minimax_aipe._framework.surrogates import make_epsilon_regularized_problem
 from minimax_aipe._framework.types import _stats_array
 
 
@@ -46,12 +48,13 @@ def _build_solver_setup(
     resolved_gamma = _resolve_gamma(problem, gamma, M_saddle, m_lazy)
     mu_x = epsilon / (2.0 * max(_diam(problem.D_x), _ABS_TOL) ** 3)
     mu_y = epsilon / (2.0 * max(_diam(problem.D_y), _ABS_TOL) ** 3)
+    solver_problem = make_epsilon_regularized_problem(problem, mu_x, mu_y)
     params = _compute_loop_params(
-        problem, epsilon, resolved_gamma, npe_T_factor, m_lazy=m_lazy,
+        solver_problem, epsilon, resolved_gamma, npe_T_factor, m_lazy=m_lazy,
         no_restart=no_restart, fixed_inner_iters=fixed_inner_iters,
     )
     z0_start = _normalize_initial_z(problem, z0)
-    return resolved_gamma, mu_x, mu_y, params, z0_start
+    return resolved_gamma, mu_x, mu_y, solver_problem, params, z0_start
 
 
 def solve(
@@ -61,15 +64,16 @@ def solve(
     gamma: float | None = None,
     M_saddle: str = "npe",
     m_lazy: int = -1,
-    npe_T_factor: float = 1.0,
+    npe_T_factor: float = 0.5,
     z0: Optional[Array] = None,
     verbose: bool = False,
     no_restart: bool = False,
     no_acceleration: bool = False,
     fixed_inner_iters: Optional[int] = None,
     _allow_recovery: bool = True,
+    _max_recovery_calls: Optional[int] = None,
 ) -> SolverResult:
-    gamma, mu_x, mu_y, params, z0_start = _build_solver_setup(
+    gamma, mu_x, mu_y, solver_problem, params, z0_start = _build_solver_setup(
         problem, epsilon,
         gamma=gamma,
         M_saddle=M_saddle,
@@ -84,7 +88,7 @@ def solve(
         logger.setLevel(logging.DEBUG)
 
     z_hat, stats_array, outer_epochs, final_y_calls = _algorithm_3(
-        problem, gamma, mu_x, mu_y, params.zeta_1,
+        solver_problem, gamma, zeta_1=params.zeta_1,
         params=params, M_saddle=M_saddle, z0=z0_start, verbose=verbose,
         no_acceleration=no_acceleration,
     )
@@ -99,6 +103,9 @@ def solve(
         "gamma": gamma,
         "mu_x": mu_x,
         "mu_y": mu_y,
+        "epsilon_regularized": True,
+        "regularized_rho": solver_problem.rho,
+        "regularized_ell": solver_problem.ell,
         "zeta_1": params.zeta_1,
         "zeta_2": params.zeta_2,
         "zeta_3": params.zeta_3,
@@ -113,7 +120,7 @@ def solve(
 
     actual_outer = int(jnp.maximum(1, outer_epochs).item())
     oracle_stats = _build_oracle_stats(
-        problem, M_saddle, params, stats_array, actual_outer, final_y_calls,
+        solver_problem, M_saddle, params, stats_array, actual_outer, final_y_calls,
     )
     result = SolverResult(
         x=x_out,
@@ -137,6 +144,7 @@ def solve(
             npe_T_factor=npe_T_factor, z0=z0_start, verbose=verbose,
             no_restart=no_restart, no_acceleration=True,
             fixed_inner_iters=fixed_inner_iters,
+            _max_recovery_calls=_max_recovery_calls,
         )
         if float(fallback.gap) < float(result.gap):
             fallback_history = dict(fallback.history or {})
@@ -151,6 +159,7 @@ def solve(
         verbose=verbose, no_restart=no_restart,
         no_acceleration=no_acceleration, fixed_inner_iters=fixed_inner_iters,
         allow_recovery=_allow_recovery,
+        max_recovery_calls=_max_recovery_calls,
     )
 
 
@@ -161,13 +170,13 @@ def solve_outer_trace(
     gamma: float | None = None,
     M_saddle: str = "npe",
     m_lazy: int = -1,
-    npe_T_factor: float = 1.0,
+    npe_T_factor: float = 0.5,
     z0: Optional[Array] = None,
     no_restart: bool = False,
     no_acceleration: bool = False,
     fixed_inner_iters: Optional[int] = None,
 ) -> SolverResult:
-    gamma, mu_x, mu_y, params, z0_start = _build_solver_setup(
+    gamma, mu_x, mu_y, solver_problem, params, z0_start = _build_solver_setup(
         problem, epsilon,
         gamma=gamma,
         M_saddle=M_saddle,
@@ -179,7 +188,7 @@ def solve_outer_trace(
     )
 
     x_cur, _ = _split(problem, z0_start)
-    pipeline = _get_pipeline(problem, gamma, params, M_saddle)
+    pipeline = _get_pipeline(solver_problem, gamma, params, M_saddle)
 
     if no_acceleration:
         def epoch_fn(x: Array, w: Optional[Array] = None):
@@ -201,6 +210,9 @@ def solve_outer_trace(
     final_gap = float("inf")
     final_stats = OracleStats()
     epochs_used = 0
+    best_gap = float("inf")
+    best_gap_epoch = 0
+    best_oracle_cost = 0.0
 
     for epoch in range(params.S_outer):
         x_new, _calls, warm_y_new, epoch_inner = epoch_fn(x_cur, warm_y)
@@ -220,10 +232,15 @@ def solve_outer_trace(
         final_x, final_y = _split(problem, z_refined)
         final_gap = _safe_gap(problem, final_x, final_y, epsilon)
         final_stats = _build_oracle_stats(
-            problem, M_saddle, params, total_inner_calls, epochs_used, final_y_calls,
+            solver_problem, M_saddle, params, total_inner_calls, epochs_used, final_y_calls,
         )
         gap_endpoints.append(float(final_gap))
-        oracle_endpoints.append(float(final_stats.normalized_cost(d)))
+        oracle_cost = float(final_stats.normalized_cost(d))
+        oracle_endpoints.append(oracle_cost)
+        if float(final_gap) < best_gap:
+            best_gap = float(final_gap)
+            best_gap_epoch = epochs_used
+            best_oracle_cost = oracle_cost
 
         step = float(jnp.linalg.norm(x_new - x_cur))
         x_cur = x_new
@@ -235,6 +252,9 @@ def solve_outer_trace(
         "gamma": gamma,
         "mu_x": mu_x,
         "mu_y": mu_y,
+        "epsilon_regularized": True,
+        "regularized_rho": solver_problem.rho,
+        "regularized_ell": solver_problem.ell,
         "zeta_1": params.zeta_1,
         "zeta_2": params.zeta_2,
         "zeta_3": params.zeta_3,
@@ -247,6 +267,9 @@ def solve_outer_trace(
         "M_saddle": M_saddle,
         "gap_endpoints": gap_endpoints,
         "oracle_endpoints": oracle_endpoints,
+        "best_gap": best_gap,
+        "best_gap_epoch": best_gap_epoch,
+        "best_oracle_cost": best_oracle_cost,
     }
 
     result = SolverResult(
@@ -297,6 +320,7 @@ def _maybe_recover_failed_result(
     no_acceleration: bool,
     fixed_inner_iters: Optional[int],
     allow_recovery: bool,
+    max_recovery_calls: Optional[int],
 ) -> SolverResult:
     if (
         not allow_recovery
@@ -304,6 +328,14 @@ def _maybe_recover_failed_result(
         or M_saddle != "npe"
         or float(problem.rho or 0.0) <= 0.0
     ):
+        return result
+
+    resolved_max_recovery_calls = (
+        max_recovery_calls
+        if max_recovery_calls is not None
+        else (3 if _has_exact_gap(problem) else 0)
+    )
+    if resolved_max_recovery_calls <= 0:
         return result
 
     best = result
@@ -314,7 +346,7 @@ def _maybe_recover_failed_result(
         (gamma * 0.10, npe_T_factor, fixed_inner_iters),
     ]
 
-    for cand_gamma, cand_tf, cand_inner in candidates:
+    for cand_gamma, cand_tf, cand_inner in candidates[:resolved_max_recovery_calls]:
         if cand_gamma <= 0:
             continue
         cand = solve(
@@ -322,6 +354,7 @@ def _maybe_recover_failed_result(
             npe_T_factor=cand_tf, z0=z0, verbose=verbose, no_restart=no_restart,
             no_acceleration=no_acceleration, fixed_inner_iters=cand_inner,
             _allow_recovery=False,
+            _max_recovery_calls=0,
         )
         tried.append((cand_gamma, cand_tf, cand_inner, float(cand.gap)))
         if float(cand.gap) < float(best.gap):
@@ -336,4 +369,3 @@ def _maybe_recover_failed_result(
         best_history["fallback_trials"] = tried
         best = best._replace(history=best_history)
     return best
-

@@ -22,11 +22,19 @@ import jax
 import jax.numpy as jnp
 
 from minimax_aipe import solve
-from minimax_aipe.problem import BenchmarkProblem
+from minimax_aipe.problem import BenchmarkProblem, MinimaxProblem
 from benchmarks import config
 from benchmarks.results import BenchmarkResult
 from benchmarks.stats import bootstrap_ci
 from benchmarks.problems import get_problem
+
+
+def _gap_source(prob: BenchmarkProblem) -> str:
+    duality_gap = getattr(prob.problem, "duality_gap", None)
+    if duality_gap is None:
+        return "estimated"
+    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
+    return "exact" if duality_gap_fn is not MinimaxProblem.duality_gap else "estimated"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -54,6 +62,7 @@ def ablation_m_lazy(
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     rows = []
     for m in m_values:
@@ -68,6 +77,7 @@ def ablation_m_lazy(
             result=result,
             d=d,
             extra={"m_lazy": m},
+            gap_source=gap_source,
         ))
 
     return rows
@@ -89,6 +99,7 @@ def ablation_npe_t_factor(
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     rows = []
     for tf in t_factors:
@@ -108,6 +119,7 @@ def ablation_npe_t_factor(
             result=result,
             d=d,
             extra={"npe_T_factor": tf},
+            gap_source=gap_source,
         ))
 
     return rows
@@ -128,6 +140,7 @@ def ablation_npe_vs_len(
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     results = []
     for M_saddle in ("npe", "len"):
@@ -143,6 +156,7 @@ def ablation_npe_vs_len(
             times=times,
             result=result,
             d=d,
+            gap_source=gap_source,
         ))
 
     return results
@@ -207,6 +221,7 @@ def _build_result(
     result,
     d: int,
     extra: dict | None = None,
+    gap_source: str = "unknown",
 ) -> BenchmarkResult:
     """Construct a BenchmarkResult from timing data."""
     ci = bootstrap_ci(times)
@@ -223,6 +238,7 @@ def _build_result(
         gap_achieved=result.gap <= epsilon,
         final_gap=float(result.gap),
         iterations=result.iterations,
+        gap_source=gap_source,
     )
     if extra:
         extra_meta = {}
@@ -256,13 +272,14 @@ def ablation_no_cubic(
     name = prob.name or "?"
     dim = prob.dim or original_problem.dim_x
     d = original_problem.dim_x + original_problem.dim_y
+    gap_source = _gap_source(prob)
 
     if prob.name and prob.name in ("nonzero_rho", "random_cubic"):
         seed = prob.meta.seed if prob.meta is not None and prob.meta.seed is not None else None
         zero_prob = get_problem(prob.name, dim, seed=seed, rho=0.0)
         problem_no_cubic = zero_prob.problem
     else:
-        problem_no_cubic = original_problem
+        return []
 
     results = []
     for M_saddle in ("npe", "len"):
@@ -279,6 +296,7 @@ def ablation_no_cubic(
             times=times,
             result=result,
             d=d,
+            gap_source=gap_source,
         ))
 
     return results
@@ -300,6 +318,7 @@ def ablation_no_restart(
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     results = []
     for M_saddle in ("npe", "len"):
@@ -321,6 +340,7 @@ def ablation_no_restart(
             times=times,
             result=result,
             d=d,
+            gap_source=gap_source,
         ))
 
     return results
@@ -342,6 +362,7 @@ def ablation_no_acceleration(
     name = prob.name or "?"
     dim = problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     results = []
     for M_saddle in ("npe", "len"):
@@ -363,6 +384,7 @@ def ablation_no_acceleration(
             times=times,
             result=result,
             d=d,
+            gap_source=gap_source,
         ))
 
     return results
@@ -387,6 +409,7 @@ def ablation_fixed_inner(
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
     d = problem.dim_x + problem.dim_y
+    gap_source = _gap_source(prob)
 
     rows: list[BenchmarkResult] = []
     for n_inner in inner_iters_list:
@@ -407,6 +430,7 @@ def ablation_fixed_inner(
             result=result,
             d=d,
             extra={"fixed_inner_iters": n_inner},
+            gap_source=gap_source,
         ))
 
     return rows
@@ -429,6 +453,7 @@ def ablation_init_comparison(
     d = problem.dim_x + problem.dim_y
     name = prob.name or "?"
     dim = prob.dim or problem.dim_x
+    gap_source = _gap_source(prob)
 
     key = jax.random.PRNGKey(seed)
     raw_random = jax.random.normal(key, (d,)) * 0.5
@@ -463,6 +488,7 @@ def ablation_init_comparison(
                 times=times,
                 result=result,
                 d=d,
+                gap_source=gap_source,
             ))
 
     return results
@@ -483,7 +509,7 @@ def format_ablation_m_table(rows: list[BenchmarkResult]) -> str:
         cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.problem:<18} {r.dim:>4}  {r.m_lazy:>6}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.6f}"
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.3e}"
         )
     return "\n".join(lines)
 
@@ -499,7 +525,7 @@ def format_ablation_t_table(rows: list[BenchmarkResult]) -> str:
         cost = float(r.oracle_stats.normalized_cost(r.dim * 2)) if r.oracle_stats else 0
         lines.append(
             f"{r.problem:<18} {r.dim:>4}  {tf:>8.1f}  "
-            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.6f}"
+            f"{r.wall_time_mean:>8.4f} {ci:>16}  {cost:>11.2e}  {r.final_gap:>10.3e}"
         )
     return "\n".join(lines)
 
@@ -522,7 +548,7 @@ def format_ablation_no_cubic_table(rows: list[BenchmarkResult]) -> str:
             f"{r.solver:<22} {r.problem:<18} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
             f"{cost:>11.2e}  {r.iterations:>6}  "
-            f"{r.final_gap:>10.6f}"
+            f"{r.final_gap:>10.3e}"
         )
     return "\n".join(lines)
 
@@ -545,7 +571,7 @@ def format_ablation_init_table(rows: list[BenchmarkResult]) -> str:
             f"{r.problem:<30} {r.solver:<22} {r.dim:>4}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
             f"{cost:>11.2e}  {r.iterations:>6}  "
-            f"{r.final_gap:>10.6f}"
+            f"{r.final_gap:>10.3e}"
         )
     return "\n".join(lines)
 
@@ -572,6 +598,6 @@ def format_ablation_fixed_inner_table(rows: list[BenchmarkResult]) -> str:
             f"{r.problem:<18} {r.dim:>4}  {inner_val:>6}  "
             f"{r.wall_time_mean:>8.4f} {ci:>16}  "
             f"{cost:>11.2e}  {outer_val:>6}  "
-            f"{r.final_gap:>10.6f}"
+            f"{r.final_gap:>10.3e}"
         )
     return "\n".join(lines)

@@ -16,8 +16,7 @@ import jax.numpy as jnp
 from jax import Array
 
 from minimax_aipe import OracleStats
-from minimax_aipe.problem import MinimaxProblem
-from minimax_aipe import OracleStats
+from minimax_aipe.framework import _safe_gap
 from minimax_aipe.problem import MinimaxProblem
 from benchmarks.oracles import count_eg_oracles, count_gda_oracles, count_npe_oracles
 
@@ -42,9 +41,6 @@ class BaselineResult:
     gap_achieved: bool
     final_residual: float
     oracle_stats: OracleStats | None = None
-
-
-from minimax_aipe.gap import estimate_gap
 
 # ── JIT-compiled extragradient ───────────────────────────────────────────
 
@@ -86,10 +82,10 @@ def _get_eg_loop(problem: MinimaxProblem, max_iters: int, tol: float):
             Fz_new = F_op(z_new)
             return (chunk + 1, z_new, Fz_new)
 
-        chunks_out, z_out, _ = jax.lax.while_loop(
+        chunks_out, z_out, Fz_out = jax.lax.while_loop(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
-        return chunks_out * eval_freq, z_out
+        return chunks_out * eval_freq, z_out, Fz_out
 
     return eg_loop
 
@@ -114,10 +110,9 @@ def run_eg_jit(
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
-    iters_out, z_out = eg_loop(z_start)
-    z_out.block_until_ready()
-    # Include the blocking host-transfer for the residual in the timed region
-    residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    iters_out, z_out, Fz_out = eg_loop(z_start)
+    Fz_out.block_until_ready()
+    residual = float(jnp.linalg.norm(Fz_out))
     wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, int(iters_out)
 
@@ -137,10 +132,7 @@ def run_eg_jit_benchmark(
     t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap_val = estimate_gap(problem, x_out, y_out)
-    if hasattr(gap_val, "block_until_ready"):
-        gap_val.block_until_ready()
-    gap = float(gap_val)
+    gap = _safe_gap(problem, x_out, y_out, epsilon)
     gap_time = time.perf_counter() - t_gap
     
     wall_time = loop_time + gap_time
@@ -194,10 +186,10 @@ def _get_gda_loop(problem: MinimaxProblem, max_iters: int, tol: float):
             Fz_new = F_op(z_new)
             return (chunk + 1, z_new, Fz_new)
 
-        chunks_out, z_out, _ = jax.lax.while_loop(
+        chunks_out, z_out, Fz_out = jax.lax.while_loop(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
-        return chunks_out * eval_freq, z_out
+        return chunks_out * eval_freq, z_out, Fz_out
 
     return gda_loop
 
@@ -223,10 +215,9 @@ def run_gda_jit(
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
-    iters_out, z_out = gda_loop(z_start)
-    z_out.block_until_ready()
-    # Include the blocking host-transfer for the residual in the timed region
-    residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    iters_out, z_out, Fz_out = gda_loop(z_start)
+    Fz_out.block_until_ready()
+    residual = float(jnp.linalg.norm(Fz_out))
     wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, int(iters_out)
 
@@ -245,10 +236,7 @@ def run_gda_jit_benchmark(
     t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap_val = estimate_gap(problem, x_out, y_out)
-    if hasattr(gap_val, "block_until_ready"):
-        gap_val.block_until_ready()
-    gap = float(gap_val)
+    gap = _safe_gap(problem, x_out, y_out, epsilon)
     gap_time = time.perf_counter() - t_gap
     
     wall_time = loop_time + gap_time
@@ -312,10 +300,10 @@ def _get_npe_epoch_loop(problem: MinimaxProblem, max_iters: int, tol: float):
             Fz_new = F_op(z_new)
             return (epoch + 1, z_new, Fz_new)
 
-        epochs_out, z_out, _ = jax.lax.while_loop(
+        epochs_out, z_out, Fz_out = jax.lax.while_loop(
             cond, body, (jnp.int32(0), z_init, Fz_init)
         )
-        return epochs_out, z_out
+        return epochs_out, z_out, Fz_out
 
     return npe_epoch_loop, T
 
@@ -341,11 +329,10 @@ def run_npe_restart_jit(
 
     z_start.block_until_ready()
     t0 = time.perf_counter()
-    epochs_out, z_out = npe_epoch_loop(z_start)
-    z_out.block_until_ready()
+    epochs_out, z_out, Fz_out = npe_epoch_loop(z_start)
+    Fz_out.block_until_ready()
     actual_iters = int(epochs_out) * T
-    # Include the blocking host-transfer for the residual in the timed region
-    residual = float(jnp.linalg.norm(problem.operator_F(z_out)))
+    residual = float(jnp.linalg.norm(Fz_out))
     wall_time = time.perf_counter() - t0
     return z_out, residual, wall_time, actual_iters
 
@@ -364,10 +351,7 @@ def run_npe_restart_jit_benchmark(
     t_gap = time.perf_counter()
     x_out = z_out[: problem.dim_x]
     y_out = z_out[problem.dim_x :]
-    gap_val = estimate_gap(problem, x_out, y_out)
-    if hasattr(gap_val, "block_until_ready"):
-        gap_val.block_until_ready()
-    gap = float(gap_val)
+    gap = _safe_gap(problem, x_out, y_out, epsilon)
     gap_time = time.perf_counter() - t_gap
     
     wall_time = loop_time + gap_time

@@ -39,6 +39,7 @@ from minimax_aipe.problem import MinimaxProblem, OracleStats, SolverResult
 
 from minimax_aipe.framework import (
     RegularizedSubproblem,
+    make_epsilon_regularized_problem,
     solve,
 )
 
@@ -96,6 +97,7 @@ __all__ = [
     # Full solver
     "solve",
     "RegularizedSubproblem",
+    "make_epsilon_regularized_problem",
     # Individual algorithms
     "aipe",
     "aipe_restart",

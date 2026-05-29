@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from minimax_aipe import solve
+from minimax_aipe.framework import _safe_gap
 from benchmarks import config
 from benchmarks.baselines import run_eg_jit_benchmark, run_gda_jit_benchmark
 from benchmarks.results import BenchmarkResult
@@ -252,14 +253,12 @@ def benchmark_solver_comparison(
         # ── JIT-EG ─────────────────────────────────────────────────
         from benchmarks.baselines import run_eg_jit
         from benchmarks.oracles import count_eg_oracles  # ← Replaced OracleStats import
-        from minimax_aipe.gap import estimate_gap
 
         def run_eg():
             z_out, residual, wall_time, actual_iters = run_eg_jit(problem, max_iters=100_000, z0=z0, tol=epsilon)
             eg_x = z_out[:problem.dim_x]
             eg_y = z_out[problem.dim_x:]
-            eg_gap = float(estimate_gap(problem, eg_x, eg_y))
-            z_out.block_until_ready()
+            eg_gap = _safe_gap(problem, eg_x, eg_y, epsilon)
             return z_out, residual, actual_iters, eg_gap
 
         t_eg = _time_callable(run_eg, n_warmup=None, n_repeats=n_repeats)
@@ -293,8 +292,7 @@ def benchmark_solver_comparison(
             z_out, residual, wall_time, actual_iters = run_gda_jit(problem, max_iters=200_000, z0=z0, tol=epsilon)
             gda_x = z_out[:problem.dim_x]
             gda_y = z_out[problem.dim_x:]
-            gda_gap = float(estimate_gap(problem, gda_x, gda_y))
-            z_out.block_until_ready()
+            gda_gap = _safe_gap(problem, gda_x, gda_y, epsilon)
             return z_out, residual, actual_iters, gda_gap
 
         t_gda = _time_callable(run_gda, n_warmup=None, n_repeats=n_repeats)

@@ -95,9 +95,9 @@ def estimate_gap(
     x = jnp.atleast_1d(jnp.asarray(x))
     y = jnp.atleast_1d(jnp.asarray(y))
 
-    f = problem.f
     project_x = problem.project_x
     project_y = problem.project_y
+    grad_problem = problem.grad_f
 
     beta = momentum
 
@@ -120,8 +120,12 @@ def estimate_gap(
     # ------------------------------------------------------------------ #
     #  max_y  f(x, y)  via Nesterov accelerated gradient ascent           #
     # ------------------------------------------------------------------ #
-    f_x = lambda yy: f(x, yy)
-    grad_f_x = jax.grad(f_x)
+    def f_x(yy: Array) -> Array:
+        return problem.f(x, yy)
+
+    def grad_f_x(yy: Array) -> Array:
+        _gx, gy_neg = grad_problem(x, yy)
+        return -gy_neg
 
     def y_step_body(_step: int, carry: tuple[Array, Array, Array]) -> tuple[Array, Array, Array]:
         """Single NAG ascent step on y (traced inside fori_loop).
@@ -153,8 +157,12 @@ def estimate_gap(
     # ------------------------------------------------------------------ #
     #  min_x  f(x, y)  via Nesterov accelerated gradient descent           #
     # ------------------------------------------------------------------ #
-    f_y = lambda xx: f(xx, y)
-    grad_f_y = jax.grad(f_y)
+    def f_y(xx: Array) -> Array:
+        return problem.f(xx, y)
+
+    def grad_f_y(xx: Array) -> Array:
+        gx, _gy_neg = grad_problem(xx, y)
+        return gx
 
     def x_step_body(_step: int, carry: tuple[Array, Array, Array]) -> tuple[Array, Array, Array]:
         """Single NAG descent step on x (traced inside fori_loop).

@@ -194,7 +194,16 @@ def _run_convergence(problems, epsilon, export_data):
         name = prob.name or "?"
         dim = prob.dim or prob.problem.dim_x
         print(f"  {name} dim={dim}:")
-        rows = sweep_epsilon(prob, epsilons)
+        def _progress(row):
+            status = "ok" if row.gap_achieved else "miss"
+            print(
+                f"    ε={row.epsilon:g} {row.solver:<11} "
+                f"gap={row.final_gap:.6g} {status} "
+                f"time={row.wall_time_mean:.2f}s",
+                flush=True,
+            )
+
+        rows = sweep_epsilon(prob, epsilons, progress_callback=_progress)
         print(format_convergence_table(rows))
         print()
 
@@ -237,6 +246,16 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
     prob = problems[0]
     name = prob.name or "?"
     dim = prob.dim or prob.problem.dim_x
+    if prob.gap_star is None:
+        reason = "estimated-gap problems make the full ablation suite prohibitively expensive"
+        print(f"  [skip] ablation on {name} dim={dim}: {reason}")
+        export_data.setdefault("ablation_skipped", []).append({
+            "problem": name,
+            "dim": dim,
+            "reason": reason,
+        })
+        return
+
     print(f"  m_lazy sweep on {name} dim={dim}:")
     m_rows = ablation_m_lazy(prob, epsilon=epsilon, n_repeats=max(1, n_repeats // 2))
     print(format_ablation_m_table(m_rows))
@@ -264,7 +283,9 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
             print(f"    {npe.problem:18s} dim={npe.dim:>4}  "
                   f"NPE: {npe_t:.4f}s ({npe_calls} calls)  "
                   f"LEN: {len_t:.4f}s ({len_calls} calls)")
-            export_data.setdefault("ablation_compare", []).extend(results)
+            export_data.setdefault("ablation_compare", []).extend(
+                flatten_ablation_rows(results),
+            )
     print()
 
     # ── NEW: No-cubic regularization ────────────────────────────────
@@ -280,10 +301,13 @@ def _run_ablation(problems, epsilon, n_repeats, export_data):
         no_cubic_rows = ablation_no_cubic(
             rho_problem, epsilon=epsilon, n_repeats=max(1, n_repeats // 2),
         )
-        print(format_ablation_no_cubic_table(no_cubic_rows))
-        export_data.setdefault("ablation_no_cubic", []).extend(
-            flatten_ablation_rows(no_cubic_rows),
-        )
+        if no_cubic_rows:
+            print(format_ablation_no_cubic_table(no_cubic_rows))
+            export_data.setdefault("ablation_no_cubic", []).extend(
+                flatten_ablation_rows(no_cubic_rows),
+            )
+        else:
+            print(f"    [skip] no zero-cubic constructor for {rname}")
         print()
     else:
         print("  [skip] no_cubic — no problems with ρ > 0 found")

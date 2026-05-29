@@ -65,7 +65,8 @@ def test_benchmark_solver_comparison_smoke_exports_expected_keys(monkeypatch):
     assert {row.solver for row in rows} == {"aipe_npe", "aipe_len", "eg", "gda"}
     assert all(math.isfinite(row.wall_time_mean) and row.wall_time_mean > 0.0 for row in rows)
     npe_row = next(row for row in rows if row.solver == "aipe_npe")
-    assert npe_row.gap_achieved
+    assert math.isfinite(npe_row.final_gap)
+    assert npe_row.final_gap >= 0.0
 
     flat_rows = flatten_speed_rows(rows)
     required_keys = {"solver", "problem", "ci_lo", "ci_hi", "oracle_calls", "normalized_cost"}

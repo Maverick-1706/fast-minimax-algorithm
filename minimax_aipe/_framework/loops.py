@@ -216,16 +216,16 @@ def _iProx_Psi(
 def _algorithm_3(
     problem: MinimaxProblem,
     gamma: float,
-    mu_x: float,
-    mu_y: float,
-    zeta_1: float,
+    mu_x: float | None = None,
+    mu_y: float | None = None,
+    zeta_1: float = 0.0,
     *,
     params: Optional[_LoopParams] = None,
     M_saddle: str = "npe",
     z0: Optional[Array] = None,
     verbose: bool = False,
     no_acceleration: bool = False,
-) -> tuple[Array, int, int]:
+) -> tuple[Array, CallStats, int, int]:
     del mu_x, mu_y, zeta_1, verbose
     if params is None:
         params = _compute_loop_params(problem, epsilon=0.1, gamma=gamma)

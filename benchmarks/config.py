@@ -51,6 +51,9 @@ EPSILON_GRID: list[float] = [0.1, 0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001]
 TOLERANCE_LEVELS: list[float] = [1e-1, 5e-2, 1e-2, 5e-3, 1e-3]
 """Tolerance levels used in solver convergence tests."""
 
+CONVERGENCE_SOLVE_TIMEOUT_SECONDS: float = 150.0
+"""Per-solver wall-clock timeout for convergence sweeps."""
+
 # ── Bootstrap CI ───────────────────────────────────────────────────────
 
 BOOTSTRAP_CI_LEVEL: float = 0.95

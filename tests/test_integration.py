@@ -421,6 +421,27 @@ class TestLENvsNPEEquivalence:
                 f"quadratic: ‖Δz‖={diff:.4e}"
             )
 
+    def test_bilinear_constant_hessian_any_m(self, bilinear_3d):
+        """For bilinear problems, LEN with any m should also match NPE."""
+        from minimax_aipe.len import make_lazy_crn_npe_oracle, len_loop
+
+        p = bilinear_3d.problem
+        gamma = 2.0
+        z0 = jnp.array([0.2, -0.15, 0.1, 0.3, -0.2, 0.05])
+        T = 15
+
+        npe_oracle = make_crn_npe_oracle(p, gamma)
+        z_npe, _ = npe(npe_oracle, p.operator_F, z0, T, gamma)
+
+        for m in [1, 3, 5]:
+            len_oracle = make_lazy_crn_npe_oracle(p, gamma)
+            z_len, _ = len_loop(len_oracle, p.operator_F, z0, T, gamma, m=m)
+            diff = float(jnp.linalg.norm(z_npe - z_len))
+            assert diff < 1e-3, (
+                f"LEN(m={m}) diverged from NPE on constant-Hessian "
+                f"bilinear: ‖Δz‖={diff:.4e}"
+            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Section 5 — Nontrivial Convergence

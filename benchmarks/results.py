@@ -56,6 +56,10 @@ class BenchmarkResult:
     n_outliers: Optional[int] = None
     final_residual: Optional[float] = None
     normalized_cost: Optional[float] = None
+    gap_source: str = "unknown"
+    best_gap: Optional[float] = None
+    best_gap_epoch: Optional[int] = None
+    best_oracle_cost: Optional[float] = None
     # ── Independent Convergence Endpoints (Experiment 5) ──────────────
     gap_endpoints: Optional[list[float]] = None
     """Duality gap at different epsilon targets.  Length = len(epsilons)."""

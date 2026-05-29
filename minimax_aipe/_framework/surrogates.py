@@ -254,3 +254,53 @@ def _make_h_problem(
         project_x=problem.project_x, project_y=problem.project_y,
     )
 
+
+def make_epsilon_regularized_problem(
+    problem: MinimaxProblem,
+    mu_x: float,
+    mu_y: float,
+) -> MinimaxProblem:
+    """Return the epsilon-regularized minimax problem used by the reduction."""
+
+    mu_x = float(mu_x)
+    mu_y = float(mu_y)
+
+    def f_reg(x: Array, y: Array):
+        return (
+            problem.f(x, y)
+            + (mu_x / 3.0) * jnp.linalg.norm(x) ** 3
+            - (mu_y / 3.0) * jnp.linalg.norm(y) ** 3
+        )
+
+    def grad_reg(x: Array, y: Array) -> tuple[Array, Array]:
+        gx, gy_neg = problem.grad_f(x, y)
+        return gx + _cubic_grad(x, mu_x), gy_neg + _cubic_grad(y, mu_y)
+
+    def hess_reg(x: Array, y: Array):
+        (H_xx, H_xy), (H_yx, H_yy) = problem.hessian_f(x, y)
+        return (
+            (H_xx + _cubic_hess(x, mu_x), H_xy),
+            (H_yx, H_yy - _cubic_hess(y, mu_y)),
+        )
+
+    ell_x = (problem.ell_x or problem.ell or 0.0) + 2.0 * mu_x * max(problem.D_x, 1.0)
+    ell_y = (problem.ell_y or problem.ell or 0.0) + 2.0 * mu_y * max(problem.D_y, 1.0)
+    ell = max(problem.ell or 0.0, ell_x, ell_y)
+    rho = (problem.rho or 0.0) + 2.0 * max(mu_x, mu_y)
+
+    return MinimaxProblem(
+        f=f_reg,
+        grad_f=grad_reg,
+        hessian_f=hess_reg,
+        dim_x=problem.dim_x,
+        dim_y=problem.dim_y,
+        D_x=problem.D_x,
+        D_y=problem.D_y,
+        rho=rho,
+        ell=ell,
+        ell_x=ell_x,
+        ell_y=ell_y,
+        L=problem.L,
+        project_x=problem.project_x,
+        project_y=problem.project_y,
+    )

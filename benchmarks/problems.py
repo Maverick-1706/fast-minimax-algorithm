@@ -80,6 +80,7 @@ _PROBLEM_REGISTRY: list[tuple[str, Callable, list[int]]] = [
     ("sparse_bilinear",     make_sparse_bilinear,                                       [10, 50, 100, 200]),
     ("random_cubic",        make_random_cubic_quadratic,                                [5, 10, 20]),
     ("adversarial_training", make_adversarial_training_toy,                             [5, 10, 20]),
+    ("box_quadratic",       make_box_constrained_quadratic,                             [5, 10, 20]),
     ("bilinear_polytope",   make_bilinear_polytope,                                     [5, 10, 20]),
     ("scalable_diagonal",   make_scalable_diagonal,                                     [100, 500, 1000, 2000]),
 ]

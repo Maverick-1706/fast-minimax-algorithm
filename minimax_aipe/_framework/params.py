@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from math import ceil, log2
 from typing import Optional
 
@@ -158,27 +159,46 @@ def _compute_loop_params(
     )
 
 
-def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> float:
-    try:
-        gap = problem.duality_gap(x, y)
-        if hasattr(gap, "block_until_ready"):
-            gap.block_until_ready()
-        return max(0.0, float(gap))
-    except NotImplementedError:
-        pass
+def _has_exact_gap(problem: MinimaxProblem) -> bool:
+    duality_gap = getattr(problem, "duality_gap", None)
+    if duality_gap is None:
+        return False
+    duality_gap_fn = getattr(duality_gap, "__func__", duality_gap)
+    return duality_gap_fn is not MinimaxProblem.duality_gap
 
+
+def _estimated_gap_budget(problem: MinimaxProblem, epsilon: float) -> tuple[int, int]:
     D = _diameter(problem)
     ell = max(_ell(problem), _ABS_TOL)
     kappa_proxy = ell * D * D / max(epsilon, _GAP_FLOOR)
-    num_steps = max(10000, min(50000, int(200 * kappa_proxy ** 0.5)))
-    num_restarts = max(10, min(20, int(4 * (1 + D) ** 0.5)))
+    # Cap the proxy to avoid exploding gap-estimation work on hard problems.
+    kappa_proxy = min(kappa_proxy, 1000.0)
+    num_steps = max(10000, min(20000, int(200 * kappa_proxy ** 0.5)))
+    num_restarts = max(10, min(14, int(4 * (1 + D) ** 0.5)))
+    return num_restarts, num_steps
+
+
+def _safe_gap(problem: MinimaxProblem, x: Array, y: Array, epsilon: float) -> float:
+    if _has_exact_gap(problem):
+        gap = problem.duality_gap(x, y)
+        if hasattr(gap, "block_until_ready"):
+            gap.block_until_ready()
+        gap_value = float(gap)
+        if not math.isfinite(gap_value):
+            return float("inf")
+        return max(0.0, gap_value)
+
+    num_restarts, num_steps = _estimated_gap_budget(problem, epsilon)
     gap = estimate_gap(
         problem, x, y,
         num_restarts=num_restarts, num_steps=num_steps, lr=None,
     )
     if hasattr(gap, "block_until_ready"):
         gap.block_until_ready()
-    return max(0.0, float(gap))
+    gap_value = float(gap)
+    if not math.isfinite(gap_value):
+        return float("inf")
+    return max(0.0, gap_value)
 
 
 def _initial_z(problem: MinimaxProblem) -> Array:
@@ -201,4 +221,3 @@ def _diameter(problem: MinimaxProblem) -> float:
 
 def _ell(problem: MinimaxProblem) -> float:
     return float(problem.ell) if problem.ell is not None and problem.ell > 0 else 1.0
-

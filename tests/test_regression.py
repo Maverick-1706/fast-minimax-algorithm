@@ -16,6 +16,7 @@ from minimax_aipe import (
     crn_oracle,
     eg_step,
     RegularizedSubproblem,
+    make_epsilon_regularized_problem,
     npe,
     make_crn_npe_oracle,
 )
@@ -257,6 +258,48 @@ class TestRegularizedSubproblem:
         z_manual = jnp.concatenate([x_proj, y_proj])
 
         assert jnp.allclose(z_proj, z_manual, atol=1e-4)
+
+
+# ── ε-regularized reduction ───────────────────────────────────────────────
+
+class TestEpsilonRegularizedReduction:
+
+    def test_wrapper_adds_cubic_terms_to_gradient(self, bilinear_3d):
+        """The AIPE reduction must alter the actual problem oracles."""
+        p = bilinear_3d.problem
+        mu_x = 0.2
+        mu_y = 0.3
+        wrapped = make_epsilon_regularized_problem(p, mu_x, mu_y)
+
+        x = jnp.array([0.2, -0.1, 0.3])
+        y = jnp.array([0.1, 0.25, -0.2])
+
+        gx, gy_neg = p.grad_f(x, y)
+        gx_reg, gy_neg_reg = wrapped.grad_f(x, y)
+
+        expected_x = gx + mu_x * jnp.linalg.norm(x) * x
+        expected_y = gy_neg + mu_y * jnp.linalg.norm(y) * y
+
+        assert jnp.allclose(gx_reg, expected_x, atol=1e-7)
+        assert jnp.allclose(gy_neg_reg, expected_y, atol=1e-7)
+
+    def test_wrapper_adds_regularizing_hessian_blocks(self, bilinear_3d):
+        """Bilinear has zero diagonal Hessian blocks before wrapping."""
+        p = bilinear_3d.problem
+        wrapped = make_epsilon_regularized_problem(p, mu_x=0.2, mu_y=0.3)
+
+        x = jnp.array([0.2, -0.1, 0.3])
+        y = jnp.array([0.1, 0.25, -0.2])
+
+        (H_xx, _), (_, H_yy) = p.hessian_f(x, y)
+        (H_xx_reg, _), (_, H_yy_reg) = wrapped.hessian_f(x, y)
+
+        assert float(jnp.linalg.norm(H_xx)) < 1e-10
+        assert float(jnp.linalg.norm(H_yy)) < 1e-10
+        assert float(jnp.linalg.norm(H_xx_reg)) > 1e-4
+        assert float(jnp.linalg.norm(H_yy_reg)) > 1e-4
+        assert wrapped.rho > (p.rho or 0.0)
+        assert wrapped.ell >= (p.ell or 0.0)
 
 
 # ── Surrogate oracles (g-problem, h-problem) ─────────────────────────────
